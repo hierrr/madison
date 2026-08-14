@@ -273,7 +273,7 @@ def feed(c, limit: int = 50) -> list[dict]:
         " LEFT JOIN sessions s ON s.device_id=e.device_id AND s.agent=e.agent"
         "   AND s.session_id=e.session_id"
         " WHERE e.event != 'heartbeat'"
-        " ORDER BY e.id DESC LIMIT ?", (min(limit, 200),),
+        " ORDER BY e.id DESC LIMIT ?", (limit if limit > 0 else -1,),  # 0 = 무제한
     ).fetchall()
     out = []
     for r in rows:

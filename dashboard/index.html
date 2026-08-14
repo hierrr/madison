@@ -352,6 +352,8 @@
   .rpt-report li.svc:first-child { margin-top: 8px; }
   .rpt-empty { color: var(--ink-3); font-size: 13px; padding: 12px 4px; }
   .rpt-gen-spin { color: var(--accent); }
+  .pgbar { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 9px 0 5px; }
+  .pgbar .pginfo { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
   .mstat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
   .mstat .ml { font-size: 11.5px; color: var(--ink-3); }
   .mstat .mv { font-size: 21px; font-weight: 650; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
@@ -976,6 +978,50 @@
   var EVENT_CLS = { session_start: 'life', prompt: 'life', tool_start: '', heartbeat: '',
     turn_done: 'stop', idle: 'stop', permission_request: 'noti', session_end: '' };
 
+  var EF = { device: '', project: '', days: '0' };   // 이벤트 탭 필터
+  function renderEvents() {
+    var rows = HIST.feed || [];
+    var devs = [], projs = [];
+    rows.forEach(function (r) {
+      if (devs.indexOf(r.device) < 0) devs.push(r.device);
+      var p = r.project || 'unknown';
+      if (projs.indexOf(p) < 0) projs.push(p);
+    });
+    devs.sort(); projs.sort();
+    var cutoff = daysCut(EF.days);
+    var shown = rows.filter(function (r) {
+      if (EF.device && r.device !== EF.device) return false;
+      if (EF.project && (r.project || 'unknown') !== EF.project) return false;
+      if (cutoff && tsMs(r.ts) < cutoff) return false;
+      return true;
+    });
+    var p = pageSlice(shown, 'events');
+    var html = p.rows.map(function (e2) {
+      return '<tr><td class="mono dim">#' + e2.id + '</td>' +
+        '<td class="mono dim">' + fmtTs(e2.ts) + '</td>' +
+        '<td class="mono">' + esc(e2.device) + '</td>' +
+        '<td><span class="agent ' + (e2.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(e2) + '</span></td>' +
+        '<td><span class="ev ' + (EVENT_CLS[e2.event] || '') + '">' + esc(e2.event) + '</span></td>' +
+        '<td class="mono">' + esc(e2.project || '') + '</td>' +
+        '<td class="mono dim">' + (e2.sid_num != null ? '#' + e2.sid_num : '') + '</td>' +
+        '<td class="wrapcell dim">' + esc(String(e2.note || '')) + '</td></tr>';
+    });
+    document.getElementById('eventsTable').innerHTML =
+      '<div class="htbar">' +
+      '<select class="hsel" data-ef="device">' + optsFor(devs, EF.device, '기기 전체') + '</select>' +
+      '<select class="hsel" data-ef="project">' + optsFor(projs, EF.project, '프로젝트 전체') + '</select>' +
+      '<select class="hsel" data-ef="days">' +
+      '<option value="0"' + (EF.days === '0' ? ' selected' : '') + '>전체 기간</option>' +
+      '<option value="1"' + (EF.days === '1' ? ' selected' : '') + '>최근 24시간</option>' +
+      '<option value="7"' + (EF.days === '7' ? ' selected' : '') + '>최근 7일</option>' +
+      '<option value="30"' + (EF.days === '30' ? ' selected' : '') + '>최근 30일</option>' +
+      '</select>' +
+      '<span class="hcount">' + shown.length + '</span>' +
+      '</div>' +
+      table(['ID', '시각', '기기', '에이전트', '이벤트', '프로젝트', '태스크', '내용'], html) +
+      pgbar('events', p);
+  }
+
   function setView(v) {
     VIEW = v;
     document.querySelectorAll('.view').forEach(function (el) {
@@ -1008,11 +1054,41 @@
   }
 
   var HIST = {
-    devices: null, state: null, sessions: null,
+    devices: null, state: null, sessions: null, feed: null,
     devF: { online: true, quiet: true, revoked: false },
     devSort: { key: 'seen', dir: 'asc' },
     taskF: { device: '', agent: '', project: '', days: '0' }
   };
+
+  // ── 공용 페이지네이션 (페이지당 20개) ──
+  var PG = { tasks: 1, queue: 1, events: 1, auto: 1 };
+  var PG_RENDER = {};   // key → 렌더 함수 (정의 후 채움)
+  function pageSlice(rows, key) {
+    var per = 20, pages = Math.max(1, Math.ceil(rows.length / per));
+    if (PG[key] > pages) PG[key] = pages;
+    if (PG[key] < 1) PG[key] = 1;
+    return { rows: rows.slice((PG[key] - 1) * per, PG[key] * per), page: PG[key], pages: pages };
+  }
+  function pgbar(key, p) {
+    if (p.pages <= 1) return '';
+    return '<div class="pgbar">' +
+      '<button class="navb" data-pg="' + key + '" data-dir="-1"' + (p.page <= 1 ? ' disabled' : '') + '>◀</button>' +
+      '<span class="pginfo">' + p.page + ' / ' + p.pages + '</span>' +
+      '<button class="navb" data-pg="' + key + '" data-dir="1"' + (p.page >= p.pages ? ' disabled' : '') + '>▶</button></div>';
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-pg]');
+    if (!b || b.disabled) return;
+    PG[b.dataset.pg] += parseInt(b.dataset.dir, 10);
+    if (PG_RENDER[b.dataset.pg]) PG_RENDER[b.dataset.pg]();
+  });
+  function daysCut(daysStr) {
+    return daysStr === '0' ? null : Date.now() - parseInt(daysStr, 10) * 86400000;
+  }
+  function tsMs(iso) {
+    var d = new Date((iso || '').indexOf('Z') > -1 ? iso : (iso || '') + 'Z');
+    return isNaN(d) ? 0 : d.getTime();
+  }
 
   function loadHistory(v) {
     if (v === 'devices') {
@@ -1022,32 +1098,22 @@
         renderDevices();
       }).catch(function () { document.getElementById('devicesTable').textContent = '불러오기 실패'; });
     } else if (v === 'tasks') {
-      getJSON('/api/history/sessions?limit=2000&days=' + HIST.taskF.days).then(function (rows) {
+      getJSON('/api/history/sessions?limit=0&days=0').then(function (rows) {
         HIST.sessions = rows;
         renderTasks();
       }).catch(function () { document.getElementById('tasksTable').textContent = '불러오기 실패'; });
     } else if (v === 'handoff') {
-      getJSON('/api/handoffs?limit=500').then(function (rows) {
+      getJSON('/api/handoffs?limit=0').then(function (rows) {
         HIST.handoffs = rows;
         renderQueue();
       }).catch(function () { document.getElementById('queueTable').textContent = '불러오기 실패'; });
     } else if (v === 'events') {
-      getJSON('/api/feed?limit=200').then(function (rows) {
-        rows = rows.filter(function (r) { return r.frontend !== 'auto'; });
-        var html = rows.map(function (e2) {
-          return '<tr><td class="mono dim">#' + e2.id + '</td>' +
-            '<td class="mono dim">' + fmtTs(e2.ts) + '</td>' +
-            '<td class="mono">' + esc(e2.device) + '</td>' +
-            '<td><span class="ev ' + (EVENT_CLS[e2.event] || '') + '">' + esc(e2.event) + '</span></td>' +
-            '<td class="mono">' + esc(e2.project || e2.agent) + '</td>' +
-            '<td class="mono dim">' + (e2.sid_num != null ? '#' + e2.sid_num : '') + '</td>' +
-            '<td class="wrapcell dim">' + esc(String(e2.note || '')) + '</td></tr>';
-        });
-        document.getElementById('eventsTable').innerHTML =
-          table(['ID', '시각', '기기', '이벤트', '프로젝트', '태스크', '내용'], html);
+      getJSON('/api/feed?limit=0').then(function (rows) {
+        HIST.feed = rows.filter(function (r) { return r.frontend !== 'auto'; });
+        renderEvents();
       }).catch(function () { document.getElementById('eventsTable').textContent = '불러오기 실패'; });
     } else if (v === 'auto') {
-      getJSON('/api/history/sessions?limit=2000&days=0').then(function (rows) {
+      getJSON('/api/history/sessions?limit=0&days=0').then(function (rows) {
         HIST.autoSessions = rows.filter(function (s) { return s.frontend === 'auto'; });
         renderAuto();
       }).catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
@@ -1081,7 +1147,8 @@
       }
       return true;
     });
-    var html = shown.map(function (h) {
+    var pq = pageSlice(shown, 'queue');
+    var html = pq.rows.map(function (h) {
       var label = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[h.status] || h.status;
       return '<tr><td class="mono dim">#' + h.id + '</td>' +
         '<td class="mono">' + esc(h.from_name || '?') + ' → ' + esc(h.to_name || '?') + '</td>' +
@@ -1109,7 +1176,8 @@
       '</select>' +
       '<span class="hcount">' + shown.length + '</span>' +
       '</div>' +
-      table(['ID', '경로', '프로젝트', '태스크', '상태', '생성 → 수신'], html);
+      table(['ID', '경로', '프로젝트', '태스크', '상태', '생성 → 수신'], html) +
+      pgbar('queue', pq);
   }
 
   // ── 설정 탭 ──
@@ -1225,9 +1293,27 @@
       .finally(function () { btn.disabled = false; });
   });
 
+  var AF = { device: '', agent: '', project: '', days: '0' };   // 자동화 탭 필터
   function renderAuto() {
     var rows = HIST.autoSessions || [];
-    var html = rows.map(function (s, i) {
+    var devs = [], agents = [], projs = [];
+    rows.forEach(function (s) {
+      if (devs.indexOf(s.device) < 0) devs.push(s.device);
+      var al = agentLabel(s);
+      if (agents.indexOf(al) < 0) agents.push(al);
+      var pj = s.project || 'unknown';
+      if (projs.indexOf(pj) < 0) projs.push(pj);
+    });
+    devs.sort(); agents.sort(); projs.sort();
+    var cutoff = daysCut(AF.days);
+    var shown = rows.filter(function (s) {
+      return (!AF.device || s.device === AF.device) &&
+        (!AF.agent || agentLabel(s) === AF.agent) &&
+        (!AF.project || (s.project || 'unknown') === AF.project) &&
+        (!cutoff || tsMs(s.last_seen_hub) >= cutoff);
+    });
+    var p = pageSlice(shown, 'auto');
+    var html = p.rows.map(function (s, i) {
       var work = s.task_summary || s.last_prompt || '';
       var rid = 'autoev-' + i;
       return '<tr class="expandable" data-expand="' + rid + '" data-device="' + esc(s.device) + '"' +
@@ -1243,7 +1329,20 @@
         '<tr class="subrow hidden" id="' + rid + '"><td colspan="8"><div class="subev">이벤트 불러오는 중…</div></td></tr>';
     });
     document.getElementById('autoTable').innerHTML =
-      table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '기간'], html);
+      '<div class="htbar">' +
+      '<select class="hsel" data-af="device">' + optsFor(devs, AF.device, '기기 전체') + '</select>' +
+      '<select class="hsel" data-af="agent">' + optsFor(agents, AF.agent, '에이전트 전체') + '</select>' +
+      '<select class="hsel" data-af="project">' + optsFor(projs, AF.project, '프로젝트 전체') + '</select>' +
+      '<select class="hsel" data-af="days">' +
+      '<option value="0"' + (AF.days === '0' ? ' selected' : '') + '>전체 기간</option>' +
+      '<option value="1"' + (AF.days === '1' ? ' selected' : '') + '>최근 24시간</option>' +
+      '<option value="7"' + (AF.days === '7' ? ' selected' : '') + '>최근 7일</option>' +
+      '<option value="30"' + (AF.days === '30' ? ' selected' : '') + '>최근 30일</option>' +
+      '</select>' +
+      '<span class="hcount">' + shown.length + '</span>' +
+      '</div>' +
+      table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '기간'], html) +
+      pgbar('auto', p);
   }
 
   // 자동화 탭: 행 펼침 → 해당 세션 이벤트 로드
@@ -1325,12 +1424,15 @@
       if (projs.indexOf(p) < 0) projs.push(p);
     });
     devs.sort(); agents.sort(); projs.sort();
+    var cutoff = daysCut(f.days);
     var shown = rows.filter(function (s) {
       return (!f.device || s.device === f.device) &&
         (!f.agent || agentLabel(s) === f.agent) &&
-        (!f.project || (s.project || 'unknown') === f.project);
+        (!f.project || (s.project || 'unknown') === f.project) &&
+        (!cutoff || tsMs(s.last_seen_hub) >= cutoff);
     });
-    var html = shown.map(function (s) {
+    var p = pageSlice(shown, 'tasks');
+    var html = p.rows.map(function (s) {
       var work = s.task_summary || s.last_prompt || '';  // 응답문(last_summary)은 작업 칸에 싣지 않음
       return '<tr><td class="mono dim">#' + (s.row_id != null ? s.row_id : '') + '</td>' +
         '<td class="mono">' + esc(s.device) + '</td>' +
@@ -1358,7 +1460,8 @@
       '</select>' +
       '<span class="hcount">' + shown.length + '</span>' +
       '</div>' +
-      table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '모델', '기간', ''], html);
+      table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '모델', '기간', ''], html) +
+      pgbar('tasks', p);
   }
 
   // 이력 탭 상호작용 (위임)
@@ -1375,19 +1478,17 @@
     var dt = e.target.closest('[data-devtasks]');
     if (dt) { HIST.taskF.device = dt.dataset.devtasks; setView('tasks'); }
   });
+  PG_RENDER.tasks = renderTasks; PG_RENDER.queue = renderQueue;
+  PG_RENDER.events = renderEvents; PG_RENDER.auto = renderAuto;
   document.addEventListener('change', function (e) {
     var sel = e.target.closest('[data-taskf]');
-    if (sel) {
-      HIST.taskF[sel.dataset.taskf] = sel.value;
-      if (sel.dataset.taskf === 'days') loadHistory('tasks');
-      else renderTasks();
-      return;
-    }
+    if (sel) { HIST.taskF[sel.dataset.taskf] = sel.value; PG.tasks = 1; renderTasks(); return; }
     var qsel = e.target.closest('[data-qf]');
-    if (qsel) {
-      QF[qsel.dataset.qf] = qsel.value;
-      renderQueue();
-    }
+    if (qsel) { QF[qsel.dataset.qf] = qsel.value; PG.queue = 1; renderQueue(); return; }
+    var esel = e.target.closest('[data-ef]');
+    if (esel) { EF[esel.dataset.ef] = esel.value; PG.events = 1; renderEvents(); return; }
+    var asel = e.target.closest('[data-af]');
+    if (asel) { AF[asel.dataset.af] = asel.value; PG.auto = 1; renderAuto(); }
   });
 
   // 기기 폐기

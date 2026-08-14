@@ -185,7 +185,7 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0):
         q += " WHERE s.last_seen_hub >= datetime('now', ?)"
         args.append(f"-{int(days)} days")
     q += " ORDER BY s.last_seen_hub DESC LIMIT ?"
-    args.append(min(limit, 5000))
+    args.append(limit if limit > 0 else -1)  # 0 = 무제한
     with db.tx() as c:
         return [dict(r) for r in c.execute(q, args).fetchall()]
 
@@ -276,7 +276,7 @@ async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin
                 "SELECT h.*, fd.name AS from_name, td.name AS to_name FROM handoffs h"
                 " LEFT JOIN devices fd ON fd.id=h.from_device"
                 " LEFT JOIN devices td ON td.id=h.to_device"
-                " ORDER BY h.id DESC LIMIT ?", (min(limit, 500),)).fetchall()
+                " ORDER BY h.id DESC LIMIT ?", (limit if limit > 0 else -1,)).fetchall()
         return [
             {**dict(r), "hf": f"HF-{r['id']:03d}"} for r in rows
         ]
