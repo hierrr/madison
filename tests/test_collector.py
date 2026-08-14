@@ -40,12 +40,21 @@ class CollectorTests(unittest.TestCase):
         executable(
             bindir / "curl",
             "#!/bin/bash\n"
-            "data=''\n"
-            "while [ $# -gt 0 ]; do\n"
-            "  if [ \"$1\" = '--data-binary' ]; then data=\"$2\"; shift 2; else shift; fi\n"
+            "url=''; data=''; method='GET'; prev=''\n"
+            "for a in \"$@\"; do\n"
+            "  case \"$prev\" in\n"
+            "    -X) method=\"$a\" ;;\n"
+            "    --data-binary) data=\"$a\" ;;\n"
+            "  esac\n"
+            "  case \"$a\" in http*) url=\"$a\" ;; esac\n"
+            "  prev=\"$a\"\n"
             "done\n"
+            "if [ -n \"${MADISON_TEST_LOG:-}\" ]; then printf '%s %s\\n' \"$method\" \"$url\" >> \"$MADISON_TEST_LOG\"; fi\n"
             "if [ -n \"$data\" ] && [ -n \"${MADISON_TEST_CAPTURE:-}\" ]; then printf '%s' \"$data\" > \"$MADISON_TEST_CAPTURE\"; fi\n"
-            "printf '200'\n",
+            "case \"$url\" in\n"
+            "  *'/api/handoffs?mine=1'*) printf '%s' \"${MADISON_TEST_HANDOFFS:-[]}\" ;;\n"
+            "  *) printf '200' ;;\n"
+            "esac\n",
         )
         executable(bindir / "launchctl", "#!/bin/bash\nexit 0\n")
         executable(
@@ -98,6 +107,32 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(payload["detail"]["frontend"], "app")
         self.assertEqual(payload["detail"]["summary"], "Done")
         self.assertEqual(payload["detail"]["model"], "gpt-rollout")
+
+    def test_session_start_briefs_handoff_without_consuming(self):
+        # 세션 시작 안내는 pending 핸드오프를 알려주기만 하고 상태(PATCH)는 건드리지 않는다.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            log = root / "curl.log"
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
+                "MADISON_TEST_CAPTURE": str(root / "capture.json"),
+                "MADISON_TEST_LOG": str(log),
+                "MADISON_TEST_HANDOFFS": json.dumps([{
+                    "id": 7, "hf": "HF-007", "from_name": "studio", "repo": "madison",
+                    "branch": "wip/x", "doc_path": "docs/handoffs/x.md", "summary": "테스트 이관",
+                }]),
+            })
+            proc = subprocess.run(
+                ["bash", str(REPORT), "session_start", "codex-cli"],
+                input=json.dumps({"session_id": "s9", "cwd": str(REPO), "source": "startup"}),
+                text=True, env=env, cwd=REPO, check=True, capture_output=True,
+            )
+            self.assertIn("HF-007", proc.stdout)
+            self.assertIn("/pickup", proc.stdout)
+            self.assertNotIn("PATCH", log.read_text())
 
     def test_installer_merges_hooks_and_repairs_old_notify(self):
         with tempfile.TemporaryDirectory() as tmp:
