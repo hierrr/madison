@@ -38,9 +38,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   state TEXT,
   state_ts TEXT,          -- 상태를 정한 이벤트의 ts_device (지연 도착 가드)
   state_since TEXT,       -- 상태가 바뀐 허브 시각 ("n분째" 표시용)
-  last_prompt TEXT, last_summary TEXT, approval_msg TEXT, current_tool TEXT,
+  last_prompt TEXT, last_summary TEXT, task_summary TEXT,
+  approval_msg TEXT, current_tool TEXT,
+  model TEXT, effort TEXT, frontend TEXT,
   turns INTEGER DEFAULT 0,
   started_at TEXT, last_seen_hub TEXT, ended_at TEXT, end_reason TEXT,
+  collection_mode TEXT,
   PRIMARY KEY (device_id, agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -83,7 +86,8 @@ def conn() -> sqlite3.Connection:
         for ddl in ("ALTER TABLE sessions ADD COLUMN task_summary TEXT",
                     "ALTER TABLE sessions ADD COLUMN model TEXT",
                     "ALTER TABLE sessions ADD COLUMN effort TEXT",
-                    "ALTER TABLE sessions ADD COLUMN frontend TEXT"):
+                    "ALTER TABLE sessions ADD COLUMN frontend TEXT",
+                    "ALTER TABLE sessions ADD COLUMN collection_mode TEXT"):
             try:
                 _conn.execute(ddl)
             except sqlite3.OperationalError:

@@ -6,7 +6,8 @@
 param(
     [string]$Name = "",
     [string]$Secret = $env:MADISON_ENROLL_SECRET,
-    [string]$Hub = "https://madison-api.example.com"
+    [string]$Hub = "https://madison-api.example.com",
+    [switch]$NoCodex
 )
 $ErrorActionPreference = "Stop"
 $MadDir = Join-Path $env:USERPROFILE ".claude\madison"
@@ -67,10 +68,38 @@ if ($changed) {
     Write-Host "[MADISON] 전역 훅 설치됨 (백업 생성)"
 } else { Write-Host "[MADISON] 전역 훅 이미 최신" }
 
-# 4) 스풀 플러셔 — Task Scheduler 5분 주기 (이름 있는 태스크: MADISON\madison-flush)
+# 4) Codex lifecycle hooks — 기존 hooks.json과 병합
+if (-not $NoCodex) {
+    $codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+    $codexHooksPath = Join-Path $codexDir "hooks.json"
+    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+    $codexDoc = if (Test-Path $codexHooksPath) { Get-Content $codexHooksPath -Raw | ConvertFrom-Json -AsHashtable } else { @{} }
+    if (-not $codexDoc.hooks) { $codexDoc.hooks = @{} }
+    $codexChanged = $false
+    foreach ($hookName in $events.Keys) {
+        $eventName = $events[$hookName]
+        $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$reportPath`" $eventName codex-cli"
+        $hookTimeout = if ($hookName -in @("SessionStart", "SessionEnd")) { 3 } else { 5 }
+        $handler = @{ type = "command"; command = $cmd; timeout = $hookTimeout }
+        if ($hookName -notin @("SessionStart", "SessionEnd")) { $handler.async = $true }
+        $entry = @{ hooks = @($handler) }
+        if (-not $codexDoc.hooks[$hookName]) { $codexDoc.hooks[$hookName] = @() }
+        $present = $codexDoc.hooks[$hookName] | Where-Object { $_.hooks.command -contains $cmd }
+        if (-not $present) { $codexDoc.hooks[$hookName] += $entry; $codexChanged = $true }
+    }
+    # Codex에는 Claude의 Notification/idle_prompt 훅이 없으므로 MADISON은 추가하지 않는다.
+    if ($codexChanged) {
+        if (Test-Path $codexHooksPath) { Copy-Item $codexHooksPath "$codexHooksPath.bak-madison-$(Get-Date -Format yyyyMMddHHmmss)" }
+        $codexDoc | ConvertTo-Json -Depth 12 | Set-Content $codexHooksPath
+        Write-Host "[MADISON] Codex lifecycle hooks 설치됨 — Codex에서 /hooks 신뢰 필요"
+    } else { Write-Host "[MADISON] Codex lifecycle hooks 이미 최신" }
+}
+
+# 5) 스풀 플러셔 — Task Scheduler 5분 주기 (이름 있는 태스크: MADISON\madison-flush)
 schtasks /Create /F /SC MINUTE /MO 5 /TN "MADISON\madison-flush" `
     /TR "powershell -NoProfile -ExecutionPolicy Bypass -File `"$reportPath`" __flush" | Out-Null
 Write-Host "[MADISON] 스풀 플러셔 등록 (Task Scheduler, 5분 주기)"
 
-Write-Host "[MADISON] 설치 완료 — 열려 있는 Claude Code 세션은 재시작해야 훅이 적용됩니다"
+Write-Host "[MADISON] 설치 완료 — 열려 있는 Claude Code/Codex 세션은 재시작해야 훅이 적용됩니다"
+if (-not $NoCodex) { Write-Host "[MADISON] Codex에서 /hooks를 열어 MADISON 훅을 검토·신뢰하세요" }
 Write-Host "[MADISON] 대시보드: https://madison.example.com"

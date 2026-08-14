@@ -46,8 +46,8 @@ push a piece of work from one machine to another without walking over to it.
   detected by a hub-side TTL, not just by an end-of-session hook that may never fire.
 - **Task summaries** — each session's instruction is condensed to one line by a
   small model on the hub (never on the device, never in the hook's critical path).
-- **Session traceability** — every session's id is one click away, with a ready
-  `claude --resume <id>` you can run on the machine it lives on.
+- **Session traceability** — every session id is one click away and can be resumed
+  on its machine with `claude --resume <id>` or `codex resume <id>`.
 - **Handoff** — carry a task's context (git branch + a handoff doc) to another
   machine; the target's SessionStart hook injects it so you can pick up where you left off.
 - **History** — devices, sessions, handoffs, and the raw event log, each
@@ -66,7 +66,7 @@ push a piece of work from one machine to another without walking over to it.
 ```mermaid
 flowchart LR
     subgraph dev["each device — sessions stay local"]
-        hooks["Claude Code global hooks<br/>Codex notify + watcher"]
+        hooks["Claude Code global hooks<br/>Codex lifecycle hooks"]
         rep["report.sh<br/>fire-and-forget · 2s timeout · spooled"]
         hooks --> rep
     end
@@ -104,7 +104,7 @@ are never demoted by the timer — only genuinely silent *working* sessions are.
 | Surface | Coverage |
 |---|---|
 | Claude Code — terminal CLI, desktop app, IDE | **Full** — the same global hooks fire regardless of front-end |
-| Codex — CLI/TUI, desktop | **Partial** — chains the `notify` program and tails session logs; no per-tool events, so cards show a *partial* badge |
+| Codex — CLI/TUI, desktop | **Full** — global lifecycle hooks collect session, turn, tool, and approval events. A few hosted tools such as WebSearch do not pass through local tool hooks and therefore do not emit per-tool heartbeats |
 | Cloud chats / web tasks (claude.ai, ChatGPT, Codex web) | Out of scope — no local footprint to hook |
 
 ## Quick start
@@ -141,12 +141,13 @@ curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
 # Claude Code + Codex collection are both on by default; pass --no-codex to skip Codex
 ```
 
-This registers the device (a long-lived token, hashed on the server), installs the
-global Claude Code hooks (covering CLI, desktop app, and IDE sessions alike — merged
-with any hooks you already have), chains the Codex `notify` program when
-`~/.codex/config.toml` exists, and schedules the spool flusher.
-Restart any already-open sessions so the hooks take effect. Rotate `ENROLL_SECRET`
-once the whole fleet is enrolled.
+This registers the device (a long-lived token, hashed on the server), merges global
+hooks for both Claude Code and Codex with any hooks already present, and schedules
+the spool flusher. If an older Madison Codex `notify` + 60-second watcher install is
+present, the installer restores the user's original `notify` and removes the old
+collector path. Open `/hooks` in Codex after installation to review and trust the
+new command hooks. Restart any already-open Claude Code and Codex sessions. Rotate
+`ENROLL_SECRET` once the whole fleet is enrolled.
 
 ### Windows (beta)
 
@@ -183,15 +184,16 @@ The installer touches global state, so here is how to undo it on a device (macOS
 
 ```bash
 # 1. Stop the launchd jobs
-for j in flush codexwatch; do launchctl bootout "gui/$(id -u)/dev.madison.$j" 2>/dev/null; done
+launchctl bootout "gui/$(id -u)/dev.madison.flush" 2>/dev/null
 rm -f ~/Library/LaunchAgents/dev.madison.*.plist
 
 # 2. Remove the collector and skills
 rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 
-# 3. Restore hooks and Codex config from the backups the installer made
-#    (settings.json.bak-madison-* and, if Codex was configured, config.toml.bak-madison-*)
-#    or delete the MADISON hook entries from ~/.claude/settings.json by hand.
+# 3. Restore hook config from the backups the installer made
+#    (settings.json.bak-madison-*, hooks.json.bak-madison-*, and config.toml backups
+#    when migrating the old collector), or remove MADISON entries from
+#    ~/.claude/settings.json and ~/.codex/hooks.json by hand.
 ```
 
 Then revoke the device from the dashboard's **Devices** tab so its token stops being accepted.
@@ -219,7 +221,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 |---|---|
 | `server/` | Hub — FastAPI + SQLite (enroll, ingest, state fold, TTL, handoff queue, reports, summary worker) |
 | `dashboard/` | Single-file HTML dashboard + logo assets |
-| `collector/` | Everything device-side — hooks, `report.sh`, idempotent installer, Codex chaining, `/handoff` · `/pickup` skills, Windows beta scripts |
+| `collector/` | Everything device-side — Claude/Codex hooks, `report.sh`, idempotent installer, `/handoff` · `/pickup` skills, Windows beta scripts |
 | `scripts/` | launchd stubs (standard pattern) |
 | `assets/` | Project logo |
 
@@ -227,9 +229,9 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 
 The dashboard UI and AI-generated task summaries are currently Korean-only.
 
-Built and running as a personal fleet console. Claude Code support is complete;
-Codex is partial by design; the Windows collector is beta (unverified on real
-hardware). Contributions welcome.
+Built and running as a personal fleet console. Local Claude Code and Codex CLI/app
+surfaces are collected through global hooks. The Windows collector remains beta
+(unverified on real hardware). Contributions welcome.
 
 ## License
 

@@ -2,7 +2,7 @@
 # MADISON collector 설치 — 멱등 (IMPLEMENTATION.md §8.3)
 # 사용: curl -fsSL https://madison-api.example.com/install.sh | bash -s -- --name studio --secret <등록암호>
 # 옵션: --hub <URL> (허브 기기 자신은 http://127.0.0.1:8787), --no-codex (Codex 수집 제외)
-# Claude Code(CLI·데스크탑앱 공통 전역 훅)와 Codex(notify 체이닝) 수집이 모두 기본이다.
+# Claude Code와 Codex(CLI·데스크톱 앱 공통 lifecycle hooks) 수집이 모두 기본이다.
 set -euo pipefail
 
 HUB="https://madison-api.example.com"
@@ -130,70 +130,123 @@ EOF
   note "스풀 플러셔 등록 (dev.madison.flush, 5분 주기)"
 fi
 
-# ── 5) Codex 수집 (기본 — --no-codex로 제외) ──
-if [ "$WITH_CODEX" = "1" ] && [ ! -f "$HOME/.codex/config.toml" ]; then
-  note "Codex 설정(~/.codex/config.toml) 없음 — Codex 수집 건너뜀 (Codex 로그인 후 재실행하면 자동 구성)"
-fi
-if [ "$WITH_CODEX" = "1" ] && [ -f "$HOME/.codex/config.toml" ]; then
-  fetch codex-notify-wrapper.sh "$MAD_DIR/codex-notify-wrapper.sh"
-  fetch codex-watch.sh "$MAD_DIR/bin/madison-codex-watch"
-  chmod 700 "$MAD_DIR/codex-notify-wrapper.sh" "$MAD_DIR/bin/madison-codex-watch"
-  python3 - "$HOME/.codex/config.toml" "$MAD_DIR" <<'PY'
+# ── 5) Codex lifecycle hooks (기본 — --no-codex로 제외) ──
+if [ "$WITH_CODEX" = "1" ]; then
+  CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+  CODEX_HOOKS="$CODEX_DIR/hooks.json"
+  mkdir -p "$CODEX_DIR"
+  CTMPL="$(mktemp)"; fetch codex-hooks.template.json "$CTMPL"
+
+  # 기존 사용자 훅을 보존하며 MADISON 훅만 멱등 병합한다.
+  python3 - "$CODEX_HOOKS" "$CTMPL" <<'PY'
+import json, sys, time, tomllib
+from pathlib import Path
+
+hooks_path, tmpl_path = Path(sys.argv[1]), Path(sys.argv[2])
+doc = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
+tmpl = json.loads(tmpl_path.read_text())
+hooks = doc.setdefault("hooks", {})
+changed = False
+
+for event, entries in tmpl["hooks"].items():
+    existing = hooks.setdefault(event, [])
+    for entry in entries:
+        wanted = entry["hooks"][0]
+        cmd = wanted["command"]
+        found = None
+        for group in existing:
+            if not isinstance(group, dict):
+                continue
+            for handler in group.get("hooks", []):
+                if isinstance(handler, dict) and handler.get("command") == cmd:
+                    found = handler
+                    break
+            if found is not None:
+                break
+        if found is None:
+            existing.append(entry)
+            changed = True
+        elif found != wanted:
+            found.clear()
+            found.update(wanted)
+            changed = True
+
+if changed:
+    if hooks_path.exists():
+        backup = hooks_path.with_name(f"hooks.json.bak-madison-{time.strftime('%Y%m%d%H%M%S')}")
+        backup.write_text(hooks_path.read_text())
+    hooks_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    print("[MADISON] Codex lifecycle hooks 설치됨 (기존 훅 보존)")
+else:
+    print("[MADISON] Codex lifecycle hooks 이미 최신 — 변경 없음")
+
+config_path = hooks_path.with_name("config.toml")
+if config_path.exists():
+    try:
+        if tomllib.loads(config_path.read_text()).get("hooks"):
+            print("[MADISON] 참고: config.toml inline hooks도 있어 Codex가 두 소스를 병합합니다")
+    except tomllib.TOMLDecodeError:
+        pass
+PY
+  rm -f "$CTMPL"
+
+  # 구버전 MADISON notify 체이닝을 제거하고, 설치 전에 보존했던 사용자 notify를 복원한다.
+  # bare notify를 TOML 끝에 붙여 다른 테이블 안으로 들어갔던 과거 설치 오류도 함께 정리한다.
+  if [ -f "$CODEX_DIR/config.toml" ]; then
+    python3 - "$CODEX_DIR/config.toml" "$MAD_DIR" <<'PY'
 import json, re, sys, time, tomllib
 from pathlib import Path
 
 cfg_path, mad_dir = Path(sys.argv[1]), Path(sys.argv[2])
-text = cfg_path.read_text()
-cfg = tomllib.loads(text)
+original_text = cfg_path.read_text()
 wrapper = str(mad_dir / "codex-notify-wrapper.sh")
-orig = cfg.get("notify")
-orig_file = mad_dir / "codex-orig-notify.json"
+lines = original_text.splitlines(keepends=True)
+kept = [line for line in lines if not (re.match(r"^\s*notify\s*=", line) and wrapper in line)]
+text = "".join(kept)
 
-if orig == [wrapper]:
-    print("[MADISON] Codex notify 이미 체이닝됨 — 변경 없음")
-elif orig:
-    # 원본 명령 보존(체이닝 대상) 후 래퍼로 교체 (§4.3)
-    if not orig_file.exists():
-        orig_file.write_text(json.dumps(orig, ensure_ascii=False))
+orig_file = mad_dir / "codex-orig-notify.json"
+saved = []
+if orig_file.exists():
+    try:
+        value = json.loads(orig_file.read_text())
+        if isinstance(value, list) and all(isinstance(x, str) for x in value):
+            saved = value
+    except (json.JSONDecodeError, OSError):
+        pass
+
+parsed = tomllib.loads(text)
+if saved and not parsed.get("notify"):
+    notify_line = "notify = " + json.dumps(saved, ensure_ascii=False) + "\n"
+    current = text.splitlines(keepends=True)
+    insert_at = next((i for i, line in enumerate(current) if line.lstrip().startswith("[")), len(current))
+    current.insert(insert_at, notify_line)
+    text = "".join(current)
+
+# 쓰기 전에 최종 TOML을 다시 검증한다.
+tomllib.loads(text)
+if text != original_text:
     backup = cfg_path.with_name(f"config.toml.bak-madison-{time.strftime('%Y%m%d%H%M%S')}")
-    backup.write_text(text)
-    new_line = f'notify = ["{wrapper}"]'
-    # notify는 여러 줄 배열일 수 있다 — 다음 최상위 키(줄머리 word=) 또는 EOF까지 전부 치환
-    pat = re.compile(r"(?ms)^notify\s*=.*?(?=^\s*[A-Za-z0-9_.\[]|\Z)")
-    if pat.search(text):
-        text = pat.sub(new_line + "\n", text, count=1)
-    else:
-        text = re.sub(r"(?m)^notify\s*=.*$", new_line, text, count=1)
+    backup.write_text(original_text)
     cfg_path.write_text(text)
-    print(f"[MADISON] Codex notify 체이닝 설치 (원본은 {orig_file.name}에 보존, config 백업 생성)")
-else:
-    orig_file.write_text("[]")
-    with cfg_path.open("a") as f:
-        f.write(f'\nnotify = ["{wrapper}"]\n')
-    print("[MADISON] Codex notify 신규 설정")
+    print("[MADISON] 기존 Codex notify 체이닝 제거 및 사용자 notify 복원 (config 백업 생성)")
 PY
-  if [ "$(uname)" = "Darwin" ]; then
-    WPLIST="$HOME/Library/LaunchAgents/dev.madison.codexwatch.plist"
-    cat > "$WPLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>dev.madison.codexwatch</string>
-  <key>ProgramArguments</key><array>
-    <string>$MAD_DIR/bin/madison-codex-watch</string>
-  </array>
-  <key>StartInterval</key><integer>60</integer>
-  <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>$MAD_DIR/codex-watch.log</string>
-  <key>StandardErrorPath</key><string>$MAD_DIR/codex-watch.log</string>
-</dict></plist>
-EOF
-    launchctl bootout "gui/$(id -u)/dev.madison.codexwatch" 2>/dev/null || true
-    sleep 1
-    launchctl bootstrap "gui/$(id -u)" "$WPLIST" 2>/dev/null \
-      || { sleep 1; launchctl bootstrap "gui/$(id -u)" "$WPLIST"; }
-    note "Codex history watcher 등록 (60초 주기)"
   fi
+
+  # 60초 history watcher는 lifecycle hooks와 중복되므로 정확한 기존 MADISON 작업만 제거한다.
+  if [ "$(uname)" = "Darwin" ]; then
+    launchctl bootout "gui/$(id -u)/dev.madison.codexwatch" 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/dev.madison.codexwatch.plist"
+  fi
+  rm -f "$MAD_DIR/bin/madison-codex-watch" "$MAD_DIR/codex-notify-wrapper.sh"
+
+  if command -v codex >/dev/null 2>&1; then
+    if codex features list 2>/dev/null | awk '$1 == "hooks" && $3 == "true" { found=1 } END { exit !found }'; then
+      note "Codex hooks 기능 확인됨"
+    else
+      note "경고: 이 Codex 버전에서 hooks 활성화를 확인하지 못함 — Codex 업데이트 필요"
+    fi
+  fi
+  note "Codex에서 /hooks를 열어 새 MADISON command hooks를 검토·신뢰해야 합니다"
 fi
 
 # ── 6) 검증 + 안내 ──
@@ -206,5 +259,6 @@ else
   note "경고: 허브 연결 확인 실패 (code=$CODE) — 네트워크/토큰 확인 필요"
 fi
 note "설치 완료. 유의사항:"
-note "  · 이미 열려 있는 Claude Code 세션은 재시작해야 훅이 적용됩니다"
+note "  · 이미 열려 있는 Claude Code/Codex 세션은 재시작해야 새 훅이 적용됩니다"
+note "  · Codex CLI에서 /hooks를 열어 MADISON 훅을 신뢰하세요"
 note "  · 대시보드: https://madison.example.com (Access 로그인)"

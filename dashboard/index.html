@@ -659,10 +659,14 @@
     }).join('');
   }
 
-  // CLI/앱 4종 라벨 — frontend는 수집기가 판별(Claude: 부모 프로세스, Codex: rollout originator)
+  // CLI/앱/자동 실행 라벨 — 모르는 구형 수집값을 임의로 CLI로 단정하지 않는다.
   function agentLabel(s) {
-    var app = s.frontend === 'app';
-    return s.agent === 'claude-code' ? (app ? 'CLAUDE APP' : 'CLAUDE CODE') : (app ? 'CODEX APP' : 'CODEX CLI');
+    var provider = s.agent === 'claude-code' ? 'CLAUDE' : 'CODEX';
+    if (s.frontend === 'app') return provider + ' APP';
+    if (s.frontend === 'cli') return provider + (provider === 'CLAUDE' ? ' CODE' : ' CLI');
+    if (s.frontend === 'auto') return provider + ' AUTO';
+    if (s.frontend === 'ide') return provider + ' IDE';
+    return provider;
   }
 
   function sessionCard(s) {
@@ -686,6 +690,7 @@
     if (s.unconfirmed) task += ' <b>· 마지막 신호 ' + age(s.seen_min) + '</b>';
     var taskTitle = s.last_summary ? ' title="마지막 응답: ' + esc(s.last_summary) + '"' : '';
     var sidShort = esc((s.session_id || '').slice(0, 8));
+    var resumeHint = s.agent === 'claude-code' ? 'claude --resume <해시>' : 'codex resume <해시>';
     return '<article class="card' + (s.unconfirmed ? ' unconf' : '') + '" data-state="' + esc(s.state) + '"' +
       ' data-att="' + ((s.state === 'needs_approval' || s.state === 'awaiting_input') && !s.unconfirmed ? 1 : 0) + '"' +
       ' data-unconf="' + (s.unconfirmed ? 1 : 0) + '">' +
@@ -705,8 +710,8 @@
       '<span>' + s.turns + '턴</span>' +
       '<span>' + age(s.seen_min) + '</span>' +
       '<span class="sid">' + sidShort + '</span>' +
-      '<button class="copy" data-copy="' + esc(s.session_id) + '" title="세션 해시 — ' + esc(s.device) + '에서 claude --resume <해시>로 열람">hash 복사</button>' +
-      (s.partial ? '<span class="badge partial">부분 수집</span>' : '') +
+      '<button class="copy" data-copy="' + esc(s.session_id) + '" title="세션 해시 — ' + esc(s.device) + '에서 ' + resumeHint + '로 열람">hash 복사</button>' +
+      (s.partial ? '<span class="badge partial">구형 수집</span>' : '') +
       (s.state !== 'ended'
         ? '<button class="copy act-danger" data-endsession="1" data-device="' + esc(s.device) + '"' +
           ' data-agent="' + esc(s.agent) + '" data-sid="' + esc(s.session_id) + '"' +
