@@ -121,17 +121,10 @@ if [ "${MADISON_DEBUG:-0}" = "1" ]; then
   printf '%s' "$IN" > "$SAMPLES_DIR/$EV.json" 2>/dev/null
 fi
 
-TS="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
 SID=$(printf '%s' "$IN" | jq -r '.session_id // "unknown"' 2>/dev/null) || SID="unknown"
-CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""' 2>/dev/null) || CWD=""
-TP=$(printf '%s' "$IN" | jq -r '.transcript_path // ""' 2>/dev/null) || TP=""
-TURN_ID=$(printf '%s' "$IN" | jq -r '.turn_id // ""' 2>/dev/null) || TURN_ID=""
-TOOL_USE_ID=$(printf '%s' "$IN" | jq -r '.tool_use_id // ""' 2>/dev/null) || TOOL_USE_ID=""
-
-CURL_M=2
-[ "$EV" = "session_start" ] && CURL_M=1  # SessionStart는 stdout 주입 대기 때문에 예산 축소 (§7.2)
 
 # ── 스로틀: heartbeat/tool_start는 세션당 60초 1회 ─────
+# Codex 훅은 동기 실행(async 미지원)이라, 걸러질 이벤트는 아래 파싱 비용 전에 최대한 빨리 나간다.
 if [ "$EV" = "heartbeat" ] || [ "$EV" = "tool_start" ]; then
   STAMP="$THROTTLE_DIR/$SID"
   NOW_EPOCH=$(date +%s)
@@ -143,6 +136,15 @@ if [ "$EV" = "heartbeat" ] || [ "$EV" = "tool_start" ]; then
 fi
 # 승인 요청 직후엔 다음 이벤트가 즉시 통과해야 빨강 해제가 안 늦음 (§7.2)
 [ "$EV" = "permission_request" ] && rm -f "$THROTTLE_DIR/$SID" 2>/dev/null
+
+TS="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""' 2>/dev/null) || CWD=""
+TP=$(printf '%s' "$IN" | jq -r '.transcript_path // ""' 2>/dev/null) || TP=""
+TURN_ID=$(printf '%s' "$IN" | jq -r '.turn_id // ""' 2>/dev/null) || TURN_ID=""
+TOOL_USE_ID=$(printf '%s' "$IN" | jq -r '.tool_use_id // ""' 2>/dev/null) || TOOL_USE_ID=""
+
+CURL_M=2
+[ "$EV" = "session_start" ] && CURL_M=1  # SessionStart는 stdout 주입 대기 때문에 예산 축소 (§7.2)
 
 # ── 프런트엔드 판별: CLI / 데스크톱 앱 / headless 자동 실행 ──
 # Claude는 부모 프로세스, Codex는 rollout session_meta.originator를 우선 사용한다.

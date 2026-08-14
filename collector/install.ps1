@@ -80,12 +80,24 @@ if (-not $NoCodex) {
         $eventName = $events[$hookName]
         $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$reportPath`" $eventName codex-cli"
         $hookTimeout = if ($hookName -in @("SessionStart", "SessionEnd")) { 3 } else { 5 }
+        # async 필드는 Codex가 아직 미지원("skipping async hook" 경고와 함께 훅 자체가 스킵됨) — 동기 + 짧은 timeout만 쓴다.
         $handler = @{ type = "command"; command = $cmd; timeout = $hookTimeout }
-        if ($hookName -notin @("SessionStart", "SessionEnd")) { $handler.async = $true }
         $entry = @{ hooks = @($handler) }
         if (-not $codexDoc.hooks[$hookName]) { $codexDoc.hooks[$hookName] = @() }
-        $present = $codexDoc.hooks[$hookName] | Where-Object { $_.hooks.command -contains $cmd }
-        if (-not $present) { $codexDoc.hooks[$hookName] += $entry; $codexChanged = $true }
+        $found = $null
+        foreach ($group in @($codexDoc.hooks[$hookName])) {
+            foreach ($h in @($group.hooks)) {
+                if ("$($h.command)" -eq $cmd) { $found = $h; break }
+            }
+            if ($found) { break }
+        }
+        if (-not $found) { $codexDoc.hooks[$hookName] += $entry; $codexChanged = $true }
+        elseif ("$($found.type)" -ne "command" -or $found.timeout -ne $hookTimeout -or [bool]$found.async) {
+            # 같은 command가 이미 있으면 내용만 제자리 갱신 (구버전이 남긴 async 제거 포함) — install.sh와 동일
+            $found.type = "command"; $found.timeout = $hookTimeout
+            if ($found.Contains("async")) { $found.Remove("async") }
+            $codexChanged = $true
+        }
     }
     # Codex에는 Claude의 Notification/idle_prompt 훅이 없으므로 MADISON은 추가하지 않는다.
     if ($codexChanged) {
