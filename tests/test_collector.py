@@ -183,7 +183,12 @@ class CollectorTests(unittest.TestCase):
             (mad / "bin" / "madison-codex-watch").write_text("old")
             wrapper.write_text("old")
             existing_hooks = {
-                "hooks": {"PreToolUse": [{"matcher": "Custom", "hooks": [{"type": "command", "command": "custom-hook"}]}]}
+                "hooks": {
+                    "PreToolUse": [{"matcher": "Custom", "hooks": [{"type": "command", "command": "custom-hook"}]}],
+                    # 구버전 설치가 남긴 async 훅 — Codex가 스킵하므로 재실행 시 제거되어야 한다
+                    "Stop": [{"hooks": [{"type": "command", "async": True, "timeout": 9,
+                                         "command": "~/.claude/madison/report.sh turn_done codex-cli 2>/dev/null || true"}]}],
+                }
             }
             hooks_path = home / ".codex" / "hooks.json"
             hooks_path.write_text(json.dumps(existing_hooks))
@@ -204,8 +209,11 @@ class CollectorTests(unittest.TestCase):
             custom = [h for group in hooks["PreToolUse"] for h in group["hooks"] if h["command"] == "custom-hook"]
             self.assertEqual(len(custom), 1)
             for name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "SessionEnd"):
-                commands = [h["command"] for group in hooks[name] for h in group["hooks"] if "madison" in h["command"]]
-                self.assertEqual(len(commands), 1, name)
+                handlers = [h for group in hooks[name] for h in group["hooks"] if "madison" in h["command"]]
+                self.assertEqual(len(handlers), 1, name)
+                self.assertNotIn("async", handlers[0], name)
+            stop_madison = [h for group in hooks["Stop"] for h in group.get("hooks", []) if "madison" in h["command"]]
+            self.assertEqual(stop_madison[0]["timeout"], 5)
 
             for skill in ("handoff", "pickup"):
                 self.assertTrue((home / ".codex" / "skills" / skill / "SKILL.md").exists(), skill)
