@@ -26,6 +26,12 @@ SETTINGS="$HOME/.claude/settings.json"
 SKILLS_DIR="$HOME/.claude/skills"
 note() { printf '\033[36m[MADISON]\033[0m %s\n' "$*"; }
 
+# 재설치/갱신: --hub 미지정이면 이미 등록된 env의 MADISON_URL을 기본값으로 쓴다
+if [ "$HUB" = "https://madison-api.example.com" ] && [ -f "$ENV_FILE" ]; then
+  SAVED_URL=$(sed -n 's/^MADISON_URL=//p' "$ENV_FILE" | head -1)
+  [ -n "$SAVED_URL" ] && HUB="$SAVED_URL"
+fi
+
 command -v jq >/dev/null 2>&1 || { echo "jq가 필요합니다: brew install jq" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3가 필요합니다" >&2; exit 1; }
 

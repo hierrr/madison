@@ -218,6 +218,20 @@ class CollectorTests(unittest.TestCase):
             for skill in ("handoff", "pickup"):
                 self.assertTrue((home / ".codex" / "skills" / skill / "SKILL.md").exists(), skill)
 
+    def test_installer_defaults_hub_from_env(self):
+        # 등록된 기기에서 --hub 없이 재실행하면 env의 MADISON_URL을 쓴다 (placeholder로 가지 않음)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            log = root / "curl.log"
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_LOG": str(log)})
+            subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO, check=True, capture_output=True, text=True)
+            log_text = log.read_text()
+            self.assertIn("madison.test", log_text)
+            self.assertNotIn("example.com", log_text)
+
     def test_installer_repairs_notify_rechained_by_computer_use(self):
         # Computer Use가 MADISON 래퍼 위에 재체이닝하며 경로를 JSON 이스케이프(\/)로 품은 실측 케이스:
         # 래퍼 참조가 남은 notify를 제거하고 보존해둔 원본 notify를 복원해야 한다.

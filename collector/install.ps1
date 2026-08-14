@@ -14,6 +14,13 @@ $MadDir = Join-Path $env:USERPROFILE ".claude\madison"
 $EnvFile = Join-Path $MadDir "env"
 $Settings = Join-Path $env:USERPROFILE ".claude\settings.json"
 
+# 재설치/갱신: -Hub 미지정이면 이미 등록된 env의 MADISON_URL을 기본값으로 쓴다
+if ($Hub -eq "https://madison-api.example.com" -and (Test-Path $EnvFile)) {
+    $savedUrl = Get-Content $EnvFile | Where-Object { $_ -match '^MADISON_URL=(.+)$' } |
+        ForEach-Object { $Matches[1].Trim('"') } | Select-Object -First 1
+    if ($savedUrl) { $Hub = $savedUrl }
+}
+
 New-Item -ItemType Directory -Force -Path $MadDir, (Join-Path $MadDir "throttle") | Out-Null
 
 # 1) 파일 배치
