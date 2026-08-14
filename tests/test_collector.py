@@ -182,6 +182,12 @@ class CollectorTests(unittest.TestCase):
             (mad / "codex-orig-notify.json").write_text('["terminal-notifier"]')
             (mad / "bin" / "madison-codex-watch").write_text("old")
             wrapper.write_text("old")
+            # 구형 P3 태스크 폴러(라벨 임의)는 plist 내용으로 식별해 제거, 무관한 잡은 보존
+            la_dir = home / "Library" / "LaunchAgents"
+            poller = la_dir / "com.palusomni.madison.poll.plist"
+            poller.write_text("<plist><dict><string>curl http://madison.test/api/tasks?mine=1</string></dict></plist>")
+            keeper = la_dir / "com.other.job.plist"
+            keeper.write_text("<plist><dict><key>Label</key><string>com.other.job</string></dict></plist>")
             existing_hooks = {
                 "hooks": {
                     "PreToolUse": [{"matcher": "Custom", "hooks": [{"type": "command", "command": "custom-hook"}]}],
@@ -204,6 +210,8 @@ class CollectorTests(unittest.TestCase):
             self.assertNotIn("notify", parsed["mcp_servers"]["pencil"])
             self.assertFalse((mad / "bin" / "madison-codex-watch").exists())
             self.assertFalse(wrapper.exists())
+            self.assertFalse(poller.exists())
+            self.assertTrue(keeper.exists())
 
             hooks = json.loads(hooks_path.read_text())["hooks"]
             custom = [h for group in hooks["PreToolUse"] for h in group["hooks"] if h["command"] == "custom-hook"]

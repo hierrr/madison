@@ -134,6 +134,14 @@ EOF
   launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
     || { sleep 1; launchctl bootstrap "gui/$(id -u)" "$PLIST"; }
   note "스풀 플러셔 등록 (dev.madison.flush, 5분 주기)"
+
+  # 서버에서 제거된 구형 P3 태스크 폴러 정리 — 라벨이 기기마다 달라 plist 내용(api/tasks)으로 식별한다.
+  grep -l 'api/tasks' "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null | while IFS= read -r OLD_PLIST; do
+    OLD_LBL=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$OLD_PLIST" 2>/dev/null || basename "$OLD_PLIST" .plist)
+    launchctl bootout "gui/$(id -u)/$OLD_LBL" 2>/dev/null || true
+    rm -f "$OLD_PLIST"
+    note "구형 태스크 폴러 제거: $OLD_LBL"
+  done || true
 fi
 
 # ── 5) Codex lifecycle hooks (기본 — --no-codex로 제외) ──
