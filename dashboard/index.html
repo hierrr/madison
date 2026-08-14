@@ -827,8 +827,8 @@
           var active = h.status === 'pending' || h.status === 'delivered';
           var stateCls = h.status === 'delivered' ? 'ok' : h.status === 'pending' ? 'pend' : 'done';
           var stateLabel = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[h.status] || h.status;
-          var meta = h.status === 'delivered' ? 'SessionStart 훅이 컨텍스트로 주입함 — 작업이 끝나면 완료 처리'
-            : h.status === 'pending' ? '대상 기기에서 세션 시작 시 자동 주입'
+          var meta = h.status === 'delivered' ? '수신 기기에서 착수함 — 작업이 끝나면 완료 처리'
+            : h.status === 'pending' ? '대상 기기에 알림·세션 안내 중 — /pickup으로 착수하면 수신됨'
             : '';  // 끝난 항목은 상태 라벨·흐림 처리로 충분
           return '<div class="hf' + (active ? '' : ' term') + '"><div class="hfroute">' + esc(h.from || '?') +
             ' <span class="arr">→</span> ' + esc(h.to) +

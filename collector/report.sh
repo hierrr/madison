@@ -303,17 +303,12 @@ if [ "$EV" = "session_start" ]; then
       HLIST=$(curl -sS -m 1 -H "Authorization: Bearer $MADISON_TOKEN" \
         "$MADISON_URL/api/handoffs?mine=1&repo=$QREPO&origin=$QORIGIN" 2>/dev/null) || HLIST=""
       if [ -n "$HLIST" ] && printf '%s' "$HLIST" | jq -e 'type=="array" and length>0' >/dev/null 2>&1; then
+        # 상태는 바꾸지 않는다 — 수신됨(delivered)은 사용자가 착수를 지시할 때 pickup 절차가 찍는다 (§9).
+        # 그래서 픽업 전까지는 새 세션마다(에이전트 무관) 같은 안내가 반복 주입된다.
         printf '%s' "$HLIST" | jq -r '.[] |
-          "[MADISON] \(.from_name // "다른 기기")발 핸드오프 \(.hf) 도착: \(.summary // "요약 없음"). " +
-          "브랜치 \(.branch // "?")를 체크아웃하고 \(.doc_path // "핸드오프 문서")를 읽은 뒤, " +
-          "이어서 진행할지 사용자에게 확인하세요."' 2>/dev/null
-        # 주입한 건만 delivered (§7.2)
-        printf '%s' "$HLIST" | jq -r '.[].id' 2>/dev/null | while read -r HID; do
-          [ -n "$HID" ] && curl -sS -m 1 -o /dev/null \
-            -H "Authorization: Bearer $MADISON_TOKEN" -H 'Content-Type: application/json' \
-            -X PATCH "$MADISON_URL/api/handoffs/$HID" \
-            --data-binary '{"status":"delivered"}' 2>/dev/null
-        done
+          "[MADISON] \(.from_name // "다른 기기")발 핸드오프 \(.hf) 대기 중: \(.summary // "요약 없음") " +
+          "(브랜치 \(.branch // "?"), 문서 \(.doc_path // "?")). " +
+          "이어받을지 사용자에게 확인하고, 승인하면 pickup 스킬(/pickup) 절차로 진행하세요."' 2>/dev/null
       fi
       ;;
   esac
