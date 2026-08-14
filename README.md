@@ -52,6 +52,9 @@ push a piece of work from one machine to another without walking over to it.
   machine; the target's SessionStart hook injects it so you can pick up where you left off.
 - **History** — devices, sessions, handoffs, and the raw event log, each
   filterable, behind tabs.
+- **Daily/weekly reports** — the hub condenses each period's work into a
+  work-journal style markdown (grouped by service, nested bullets) you can paste
+  into Notion, plus usage metrics (turns, sessions, active hours, a streak grid).
 - **Agent + surface aware** — tells `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` /
   `CODEX APP` sessions apart, and separates automated headless runs (cron/launchd)
   into their own tab.
@@ -69,7 +72,7 @@ flowchart LR
     end
     rep -->|"HTTPS · tunnel or direct"| api
     subgraph hub["hub — one always-on machine"]
-        api["FastAPI + SQLite (one file)<br/>enroll · events · state (fold + TTL)<br/>handoffs"]
+        api["FastAPI + SQLite (one file)<br/>enroll · events · state (fold + TTL)<br/>handoffs · reports"]
         dash["dashboard — GET /"]
         api --> dash
     end
@@ -212,7 +215,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 
 | Path | What |
 |---|---|
-| `server/` | Hub — FastAPI + SQLite (enroll, ingest, state fold, TTL, handoff queue, summary worker) |
+| `server/` | Hub — FastAPI + SQLite (enroll, ingest, state fold, TTL, handoff queue, reports, summary worker) |
 | `dashboard/` | Single-file HTML dashboard + logo assets |
 | `collector/` | Everything device-side — hooks, `report.sh`, idempotent installer, Codex chaining, `/handoff` · `/pickup` skills, Windows beta scripts |
 | `scripts/` | launchd stubs (standard pattern) |

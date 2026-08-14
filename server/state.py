@@ -155,9 +155,10 @@ def assemble(c) -> dict:
     # 기기별 최근 7일 turn_done 스파크
     for d in devices.values():
         rows = c.execute(
-            "SELECT date(ts_hub, 'localtime') AS day, COUNT(*) AS n FROM events"
+            "SELECT date(ts_hub, 'localtime') AS day, COUNT(*) AS n FROM events e"
             " WHERE device_id=? AND event='turn_done'"
             "   AND ts_hub >= datetime('now', '-7 days')"
+            " AND NOT EXISTS (SELECT 1 FROM sessions x WHERE x.device_id=e.device_id AND x.agent=e.agent AND x.session_id=e.session_id AND x.frontend='auto')"
             " GROUP BY day", (d["id"],),
         ).fetchall()
         by_day = {r["day"]: r["n"] for r in rows}
@@ -204,15 +205,18 @@ def assemble(c) -> dict:
 
     # KPI: 오늘 완료 턴 + 어제 같은 시각까지와 비교
     today = c.execute(
-        "SELECT COUNT(*) AS n FROM events WHERE event='turn_done'"
-        " AND date(ts_hub,'localtime') = date('now','localtime')").fetchone()["n"]
+        "SELECT COUNT(*) AS n FROM events e WHERE event='turn_done'"
+        " AND date(ts_hub,'localtime') = date('now','localtime')"
+        " AND NOT EXISTS (SELECT 1 FROM sessions x WHERE x.device_id=e.device_id AND x.agent=e.agent AND x.session_id=e.session_id AND x.frontend='auto')").fetchone()["n"]
     ydelta = c.execute(
-        "SELECT COUNT(*) AS n FROM events WHERE event='turn_done'"
+        "SELECT COUNT(*) AS n FROM events e WHERE event='turn_done'"
         " AND date(ts_hub,'localtime') = date('now','localtime','-1 day')"
-        " AND time(ts_hub,'localtime') <= time('now','localtime')").fetchone()["n"]
+        " AND time(ts_hub,'localtime') <= time('now','localtime')"
+        " AND NOT EXISTS (SELECT 1 FROM sessions x WHERE x.device_id=e.device_id AND x.agent=e.agent AND x.session_id=e.session_id AND x.frontend='auto')").fetchone()["n"]
     spark12 = c.execute(
         "SELECT strftime('%Y-%m-%dT%H', ts_hub, 'localtime') AS h, COUNT(*) AS n"
-        " FROM events WHERE event='turn_done' AND ts_hub >= datetime('now','-12 hours')"
+        " FROM events e WHERE event='turn_done' AND ts_hub >= datetime('now','-12 hours')"
+        " AND NOT EXISTS (SELECT 1 FROM sessions x WHERE x.device_id=e.device_id AND x.agent=e.agent AND x.session_id=e.session_id AND x.frontend='auto')"
         " GROUP BY h").fetchall()
     by_hour = {r["h"]: r["n"] for r in spark12}
     hours = []

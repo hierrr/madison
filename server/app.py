@@ -1,4 +1,5 @@
 """MADISON 허브 — 단일 FastAPI 앱이 API와 대시보드를 함께 서빙한다."""
+import datetime
 import hashlib
 import os
 import subprocess
@@ -10,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import auth, db, llm_meta, state
+from . import auth, db, llm_meta, report, state
 from .config import CFG, REPO_ROOT
 
 app = FastAPI(title="MADISON", docs_url=None, redoc_url=None, openapi_url=None)
@@ -541,6 +542,136 @@ def _summary_loop():
             pass
 
 
+# ── 업무 리포트 + 사용 메트릭 ──────────────────────────
+# events(prompt/turn_done)를 프로젝트별로 모아 허브 LLM으로 업무일지 마크다운 생성.
+# 일일=주기적 자동 갱신, 주간=매일 밤 갱신, 대시보드에서 수동 갱신도 가능.
+
+_gen_lock = threading.Lock()          # LLM 생성 직렬화 (동시 2건 방지)
+_gen_active: set = set()              # 생성 중인 (range, day) — 상태 표시용
+_gen_active_lock = threading.Lock()
+
+
+def _today_local() -> str:
+    return time.strftime("%Y-%m-%d", time.localtime())
+
+
+def _strip_fences(md: str) -> str:
+    """모델이 전체를 ```…```로 감싸 반환하는 경우 바깥 펜스만 벗긴다."""
+    t = md.strip()
+    if t.startswith("```"):
+        first_nl = t.find("\n")
+        if first_nl != -1 and t.rstrip().endswith("```"):
+            t = t[first_nl + 1:].rstrip()
+            t = t[: t.rfind("```")].rstrip()
+    return t
+
+
+def _report_llm(prompt: str) -> str:
+    return _strip_fences(_llm_run("report", prompt, timeout=300))
+
+
+def _gen_report(range_: str, day: str) -> dict:
+    """기간 리포트 생성·저장. 생성 중 표시(_gen_active) + LLM 직렬화(_gen_lock).
+    백그라운드 루프·수동 갱신 어느 경로든 이 함수를 통하므로 대시보드가 '생성 중'을 본다."""
+    key = (range_, day)
+    with _gen_active_lock:
+        _gen_active.add(key)
+    try:
+        with _gen_lock:
+            with db.tx() as c:
+                work = report.gather(c, range_, day)
+            if not work:
+                md = "_이 기간에 기록된 작업이 없습니다._"
+            else:
+                md = _report_llm(report.build_prompt(range_, day, work)) or report.fallback_md(work)
+            gen_at = state.utcnow()
+            with db.tx() as c:
+                c.execute(
+                    "INSERT INTO reports (range, day, markdown, generated_at) VALUES (?,?,?,?)"
+                    " ON CONFLICT(range, day) DO UPDATE SET"
+                    " markdown=excluded.markdown, generated_at=excluded.generated_at",
+                    (range_, day, md, gen_at))
+        return {"range": range_, "day": day, "markdown": md, "generated_at": gen_at}
+    finally:
+        with _gen_active_lock:
+            _gen_active.discard(key)
+
+
+def _norm_range(r: str) -> str:
+    return "week" if r == "week" else "day"
+
+
+def _norm_day(range_: str, day: str) -> str:
+    """주간은 달력 주(월~일) 고정 — 어떤 날짜로 조회해도 그 주 월요일 키로 정규화."""
+    if range_ != "week":
+        return day
+    try:
+        d = datetime.date.fromisoformat(day)
+    except ValueError:
+        return day
+    return (d - datetime.timedelta(days=d.weekday())).isoformat()
+
+
+@app.get("/api/report")
+async def get_report(request: Request, range: str = "day", date: str = ""):
+    _require(request, ("device", "admin"))
+    range_ = _norm_range(range)
+    day = _norm_day(range_, date or _today_local())
+    with db.tx() as c:
+        row = c.execute("SELECT markdown, generated_at FROM reports WHERE range=? AND day=?",
+                        (range_, day)).fetchone()
+    with _gen_active_lock:
+        generating = (range_, day) in _gen_active
+    return {
+        "range": range_, "day": day, "generating": generating,
+        "markdown": row["markdown"] if row else None,
+        "generated_at": row["generated_at"] if row else None,
+    }
+
+
+@app.post("/api/report/refresh")
+async def refresh_report(request: Request, range: str = "day", date: str = ""):
+    _require(request, ("admin",), state_change=True)   # 관리자 전용 (LLM 비용 유발)
+    range_ = _norm_range(range)
+    day = _norm_day(range_, date or _today_local())
+    key = (range_, day)
+    with _gen_active_lock:
+        busy = key in _gen_active
+        if not busy:
+            _gen_active.add(key)
+    if busy:
+        return {"status": "generating"}
+    threading.Thread(target=_gen_report, args=(range_, day), daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/metrics")
+async def get_metrics(request: Request, range: str = "day", date: str = ""):
+    _require(request, ("device", "admin"))
+    with db.tx() as c:
+        r2 = _norm_range(range)
+        return report.metrics(c, r2, _norm_day(r2, date or _today_local()))
+
+
+def _report_loop():
+    """일일·주간 리포트 자동 생성 — 둘 다 부팅 직후 1회 + 각자 주기(REPORT_DAILY_MIN·REPORT_WEEKLY_MIN).
+    특정 시각에 의존하지 않으므로 절전·재시작·아침 열람에도 항상 최신에 가깝게 준비된다."""
+    last_daily = 0.0
+    last_weekly = 0.0
+    while True:
+        try:
+            today = _today_local()
+            if time.time() - last_daily >= CFG.report_daily_min * 60:
+                _gen_report("day", today)
+                last_daily = time.time()
+            if time.time() - last_weekly >= CFG.report_weekly_min * 60:
+                _gen_report("week", _norm_day("week", today))
+                last_weekly = time.time()
+        except Exception:
+            pass
+        time.sleep(300)
+
+
 # ── 보존 정리 스레드 ──────────────────────────────────
 
 def _retention_loop():
@@ -561,3 +692,5 @@ async def startup():
     threading.Thread(target=_retention_loop, daemon=True).start()
     if CFG.task_summary_enabled:
         threading.Thread(target=_summary_loop, daemon=True).start()
+    if CFG.report_enabled:
+        threading.Thread(target=_report_loop, daemon=True).start()

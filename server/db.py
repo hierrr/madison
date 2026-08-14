@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,               -- 예: llm.report.model — 대시보드 설정 탭에서 관리, .env 기본값을 덮음
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS reports (
+  range TEXT NOT NULL,          -- 'day' | 'week'
+  day TEXT NOT NULL,            -- 기준 로컬 날짜 'YYYY-MM-DD'
+  markdown TEXT,
+  generated_at TEXT,
+  PRIMARY KEY (range, day)
+);
 """
 
 
