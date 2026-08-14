@@ -213,8 +213,19 @@ async def end_session(request: Request):
 
 @app.get("/api/devices")
 async def list_devices(request: Request):
-    _require(request, ("admin",))
+    actor = _require(request, ("device", "admin"))
     with db.tx() as c:
+        if actor["kind"] == "device":
+            # 기기 토큰: 핸드오프 대상 선택용 최소 정보 — 자기 자신 제외, 이름·온라인 여부만
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return [
+                {"name": r["name"],
+                 "online": (age := state._age_min(now, r["last_seen_at"])) is not None
+                           and age <= CFG.device_online_min}
+                for r in c.execute(
+                    "SELECT name, last_seen_at FROM devices WHERE revoked=0 AND id != ?"
+                    " ORDER BY name", (actor["device"]["id"],))
+            ]
         return [dict(r) for r in c.execute(
             "SELECT id, name, created_at, last_seen_at, revoked FROM devices ORDER BY name")]
 

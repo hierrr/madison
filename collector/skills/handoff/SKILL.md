@@ -14,7 +14,9 @@ description: 현재 작업을 다른 기기로 이관한다 — WIP 커밋·push
 1. **전제 확인**: `~/.claude/madison/env`가 존재해야 한다(없으면 "이 기기는 MADISON 미등록"이라 안내하고 중단). 현재 디렉터리가 git 리포인지 확인한다.
 2. **대상 기기 확인**: `source ~/.claude/madison/env` 후
    `curl -sS -m 5 -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/devices"`
-   로 등록 기기 목록을 받아 대상 이름이 실재하는지 확인한다(오타 방지).
+   응답은 이 기기를 제외한 피어 목록 `[{"name":"imac2","online":true}, …]`.
+   - 대상 이름이 목록에 없으면 가능한 이름들을 보여주고 중단한다(오타 방지 — git 작업 전에 잡는다).
+   - 대상이 `"online": false`면 "꺼져 있거나 신호가 끊겨 알림·세션 안내가 늦을 수 있다"고 알리고 계속할지 확인한다.
 3. **코드 상태 운반 (git)**:
    - 미커밋 변경이 있으면 현재 브랜치가 main/master일 땐 `wip/<주제-슬러그>` 브랜치를 만들어 커밋하고, 이미 작업 브랜치면 그 브랜치에 WIP 커밋한다.
    - origin이 있으면 push한다. origin이 없으면 사용자에게 "push 없이는 코드가 이관되지 않는다(문서만 전달됨)"라고 경고하고 계속 진행 여부를 확인한다.
