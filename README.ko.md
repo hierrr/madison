@@ -1,0 +1,219 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <img src="assets/logo-light.png" alt="MADISON" width="620">
+  </picture>
+</p>
+
+<p align="center">
+  <b>M</b>ulti-<b>A</b>gent &amp; <b>D</b>evice <b>I</b>ntegrated <b>S</b>upervision, <b>O</b>perations &amp; <b>N</b>etworking
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows(beta)-lightgrey.svg" alt="Platform">
+</p>
+
+<p align="center"><a href="README.md">English</a> · 한국어</p>
+
+---
+
+여러 기기에 흩어져 돌아가는 AI 코딩 에이전트 세션을 **한 화면에서** 관제하는 콘솔입니다.
+Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 쓴다면, MADISON이
+각 세션의 상태를 훅으로 모아 지금 어디서 무엇이 돌고 있는지, 무엇이 내 손을 기다리는지,
+무엇이 조용히 멈췄는지를 대시보드 하나로 보여줍니다. 기기 사이로 작업을 옮기는 일도 합니다.
+컨텍스트째로 **핸드오프**해 다른 기기에서 이어서 작업할 수 있습니다.
+
+세션은 **전부 각자의 기기에서** 돌아가고, 허브로는 메타데이터와 짧은 발췌만 올라옵니다.
+상태, 한 줄 요약에 쓰는 지시문 앞부분, 모델·effort(추론 강도), 시각 정도입니다. 코드와
+파일은 기기를 떠나지 않습니다.
+
+## 왜 필요한가
+
+기기가 네다섯 대로 늘고 저마다 에이전트를 두어 개씩 돌리다 보면 금세 손을 놓칩니다.
+어느 세션이 권한 승인을 기다리며 멈춰 있는지, 어느 것이 일을 끝내고 다음 지시를 기다리는지,
+어느 것이 크래시로 세션만 덩그러니 남았는지 알 수가 없죠. MADISON은 플릿 전체에 대고
+**"지금 내가 봐야 할 게 뭐지?"**에 답하고, 그 기기 앞까지 가지 않고도 한 기기의 작업을
+다른 기기로 넘길 수 있게 해 줍니다.
+
+## 기능
+
+- **실시간 플릿 뷰** — 세션을 기기별로 묶고, 사람이 손대야 할 것(권한 승인, 완료 후
+  입력 대기)이 맨 위로 오도록 정렬합니다.
+- **믿을 수 있는 생사 판정** — 크래시·절전·네트워크 단절로 죽은 세션을, 발화를 장담할 수
+  없는 종료 훅이 아니라 허브 쪽 TTL로 잡아냅니다.
+- **작업 요약** — 각 세션의 지시를 허브의 작은 모델이 한 줄로 간추립니다. 기기에서 돌지도
+  않고, 훅의 실행 경로에 끼어들지도 않습니다.
+- **세션 추적** — 모든 세션의 id를 바로 볼 수 있고, 그 기기에서 곧장 실행할
+  `claude --resume <id>` 명령이 딸려 나옵니다.
+- **핸드오프** — 작업 맥락(git 브랜치 + 핸드오프 문서)을 다른 기기로 넘기면, 그 기기에서
+  세션을 열 때 SessionStart 훅이 맥락을 주입해 이어서 하게 해 줍니다.
+- **히스토리** — 기기·세션·핸드오프·이벤트 원장을 탭마다 필터링해 볼 수 있습니다.
+- **에이전트·실행 경로 구분** — `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` / `CODEX APP`
+  세션을 가려서 보여 주고, 자동화(cron·launchd의 headless 실행) 세션은 전용 탭으로 분리합니다.
+- **로컬 우선, 메타데이터만** — 특정 벤더의 원격·클라우드 세션 인프라에 기대지 않습니다.
+  허브는 온전히 당신 것입니다.
+
+## 아키텍처
+
+```mermaid
+flowchart LR
+    subgraph dev["각 기기 — 세션은 로컬에"]
+        hooks["Claude Code 전역 훅<br/>Codex notify + watcher"]
+        rep["report.sh<br/>fire-and-forget · 2초 · 실패 시 스풀"]
+        hooks --> rep
+    end
+    rep -->|"HTTPS · 터널 또는 직결"| api
+    subgraph hub["허브 — 상시 구동 기기 1대"]
+        api["FastAPI + SQLite (단일 파일)<br/>등록 · 이벤트 · 상태(폴드 + TTL)<br/>핸드오프"]
+        dash["대시보드 — GET /"]
+        api --> dash
+    end
+```
+
+- **Collector**(기기마다): 전역 훅이 `report.sh`를 호출해 이벤트 메타데이터를 2초 타임아웃으로
+  허브에 POST하고, 실패하면 디스크에 스풀해 둡니다. 세션을 절대 막거나 느리게 하지 않도록
+  만들었습니다(무슨 일이 있어도 `exit 0`).
+- **Hub**(한 대): FastAPI 프로세스 하나가 JSON API와 대시보드를 함께 서빙하고, 그 뒤를
+  SQLite 파일 하나가 받칩니다. launchd로 상주시킵니다(스텁 동봉). Linux에선 systemd 등 아무 수퍼바이저나 쓰면 됩니다.
+- **Dashboard**: `/api/state`를 5초마다 폴링하는, 그 자체로 완결된 HTML 페이지 하나입니다.
+
+세션이 로컬에서 돌고 수집이 단방향이라(닿으면 좋고 안 닿아도 그만), 허브가 꺼져 있거나
+재시작 중이어도 돌아가는 세션에는 **아무 영향이 없습니다.** 이벤트는 스풀에 쌓였다가 허브가
+돌아오면 다시 보냅니다.
+
+## 생사 판정은 이렇게
+
+종료 훅은 믿을 수 없습니다(크래시·절전·강제 종료 때는 발화하지 않으니까요). 그래서 MADISON은
+두 가지 신호를 씁니다. 도구를 쓸 때마다 훅이 스로틀된 하트비트를 보내 세션이 살아 일하고
+있음을 알리고, 허브는 *작업 중*이던 세션이 15분간 조용하면 **끊김 의심(unconfirmed)**으로
+표시합니다. 정당하게 쉬고 있는(사람을 기다리는) 세션은 타이머로 끌어내리지 않습니다.
+진짜로 조용해진 *작업 중* 세션만 걸립니다.
+
+## 에이전트 지원
+
+| 경로 | 수집 |
+|---|---|
+| Claude Code — 터미널 CLI, 데스크톱 앱, IDE | **완전** — 프런트엔드 무관하게 동일한 전역 훅이 발화 |
+| Codex — CLI/TUI, 데스크톱 | **부분** — `notify` 프로그램을 체이닝하고 세션 로그를 tail; 도구 단위 이벤트가 없어 카드에 *부분 수집* 배지 |
+| 클라우드 채팅·웹 태스크 (claude.ai, ChatGPT, Codex web) | 범위 밖 — 훅을 걸 로컬 발자국이 없음 |
+
+## 빠른 시작
+
+**요구 사항:** Python 3.11+, `jq`, git. 허브는 macOS/Linux.
+
+### 1. 허브 실행 (상시 구동 기기에서)
+
+```bash
+git clone https://github.com/hierrr/madison.git
+cd madison
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env      # 편집: ENROLL_SECRET 설정, 터널로 노출할 거면 호스트명도
+.venv/bin/python -m server
+```
+
+허브는 `127.0.0.1:8787`에서 대기합니다. 같은 기기에서는 <http://127.0.0.1:8787>로 엽니다.
+다른 기기에서 접근하려면 터널(예: Cloudflare Tunnel) 뒤에 둡니다. 사람용 대시보드 호스트는
+SSO로 보호하고, 기계용 API 호스트는 기기별 토큰으로 인증하는 식입니다. `.env.example`을 참고하세요.
+
+상주 서비스로 돌리려면 `scripts/launchd/madison-hub` 스텁을 LaunchAgent 잡으로 등록하세요
+(이 스텁이 `scripts/_launchd_wrapper.sh` → venv를 exec합니다. 스텁 파일명이 곧 로그인 항목의
+표시 이름이 됩니다).
+
+### 2. 기기 온보딩
+
+제로터치입니다. 허브가 설치 스크립트를 직접 서빙하니, 각 기기에서 직접 실행하거나 그 기기의
+에이전트에게 대신 실행해 달라고 맡기면 됩니다.
+
+```bash
+curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
+  --name studio --secret <ENROLL_SECRET> --hub https://madison-api.example.com
+# Codex도 쓰는 기기면 --with-codex 추가
+```
+
+이 명령은 기기를 등록하고(토큰은 서버에 해시로만 저장), 전역 훅을 설치하며(이미 있는 훅과는
+병합), 스풀 플러셔를 등록합니다. 이미 열려 있던 세션은 다시 시작해야 훅이 먹습니다. 기기를
+전부 등록하고 나면 `ENROLL_SECRET`은 로테이트하세요.
+
+### Windows (베타)
+
+Windows 수집기는 launchd 대신 작업 스케줄러를 쓰는 PowerShell 스크립트
+(`collector/install.ps1`, `report.ps1`)로 제공됩니다. 다만 **실기기에서 검증하지 않았고
+macOS 수집기보다 기능이 뒤처지는** 베타입니다. 쓰는 방식은 똑같은 제로터치 온보딩이라, 그
+기기의 에이전트에게 설치 명령을 건네고 훅 배선을 맡기면 됩니다. **WSL** 안에서 Claude Code를
+쓴다면 리눅스용 `install.sh`를 그대로 쓰세요. 이쪽은 베타가 아니라 정식 지원 경로입니다.
+
+## 기기 간 작업 이관
+
+- **핸드오프**(사람이 이어받음): `/handoff <기기>`가 WIP 브랜치를 커밋하고 핸드오프 문서를
+  써서 큐에 올립니다. 대상 기기에서 그 리포의 세션을 열면 SessionStart 훅이 맥락을 주입하고,
+  `/pickup`으로 지금 바로 가져올 수도 있습니다.
+
+
+## 보안 모델
+
+- **세션 전문은 기기 밖으로 나가지 않습니다.** 허브에는 메타데이터와 짧게 잘린 발췌만
+  남습니다 — 지시문 앞 약 600자(요약용)와 응답·승인 메시지 200자입니다.
+- **요청은 세 부류입니다.** 기기(bearer 토큰), 관리자(허브 기기의 루프백이거나 SSO로 검증된
+  대시보드), 등록(공유 시크릿 — 로테이트가 전제). 루프백이라는 사실만으로 관리자로 믿지는
+  않습니다. 터널 뒤에서 프록시된 인터넷 요청이 로컬인 척하지 못하도록 CF 헤더를 확인합니다.
+- **상태를 바꾸는 엔드포인트에는 CSRF 방어**(`Sec-Fetch-Site`)를 걸어, 허브 기기에서 열려
+  있는 아무 웹페이지가 디스패처를 건드리지 못하게 했습니다.
+- 대시보드는 당신의 SSO(예: Cloudflare Access) 뒤에 두는 것을 전제로 하고, API 호스트는 기기를
+  토큰으로 인증합니다.
+
+## 제거
+
+전역 설정을 건드리는 도구라, 한 기기에서 되돌리는 방법입니다(macOS):
+
+```bash
+# 1. launchd 잡 중지
+for j in flush codexwatch; do launchctl bootout "gui/$(id -u)/dev.madison.$j" 2>/dev/null; done
+rm -f ~/Library/LaunchAgents/dev.madison.*.plist
+
+# 2. 수집기·스킬 제거
+rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
+
+# 3. 훅·Codex 설정을 설치 시 만든 백업으로 복원
+#    (settings.json.bak-madison-*, --with-codex를 썼다면 config.toml.bak-madison-*)
+#    또는 ~/.claude/settings.json에서 MADISON 훅 항목을 직접 지웁니다.
+```
+
+마지막으로 대시보드 **기기** 탭에서 그 기기를 폐기해 토큰을 무효화하세요.
+
+## 설정 (`.env`)
+
+| 키 | 기본값 | 의미 |
+|---|---|---|
+| `HOST` / `PORT` | `127.0.0.1` / `8787` | 허브 바인드 주소 |
+| `DB_PATH` | `data/madison.db` | SQLite 파일 |
+| `ENROLL_SECRET` | — | 기기 등록용 공유 시크릿; 온보딩 후 비우거나 로테이트 |
+| `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | 터널 호스트명(사람용 vs 기계용) |
+| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | 대시보드용 Cloudflare Access JWT 검증 |
+| `TTL_STALE_MIN` | `15` | 작업 중 세션이 *끊김 의심*이 되기까지의 무신호 분 |
+| `DEVICE_ONLINE_MIN` | `10` | 이 분 이내 신호가 있으면 기기를 온라인으로 |
+| `ENDED_HIDE_HOURS` | `24` | 종료 세션이 현황에서 사라지기까지의 시간 |
+| `EVENT_RETENTION_DAYS` | `90` | 이벤트 로그 보존 |
+| `TASK_SUMMARY` | `1` | 허브의 한 줄 요약 — 허브 기기에 `claude` CLI 필요(없으면 원문 발췌로 대체) |
+| `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | 요약 워커가 호출하는 모델·바이너리 |
+| `IP_ALLOWLIST` | *(off)* | 선택 — 기기 보고를 제한하는 `이름:ip` 목록 |
+
+## 저장소 구조
+
+| 경로 | 내용 |
+|---|---|
+| `server/` | 허브 — FastAPI + SQLite (등록·수신·상태 폴드·TTL·핸드오프 큐·요약 워커) |
+| `dashboard/` | 단일 HTML 대시보드 + 로고 자산 |
+| `collector/` | 기기 쪽 전부 — 훅·`report.sh`·멱등 설치 스크립트·Codex 체이닝·`/handoff`·`/pickup` 스킬·Windows 베타 |
+| `scripts/` | launchd 스텁 (표준 패턴) |
+| `assets/` | 프로젝트 로고 |
+
+## 상태
+
+개인용 플릿 콘솔로 만들어 실제로 쓰고 있습니다. Claude Code는 완전히 지원하고, Codex는
+설계상 부분만, Windows 수집기는 아직 베타(실기기 미검증)입니다. 기여는 언제든 환영합니다.
+
+## 라이선스
+
+[MIT](LICENSE) © hierrr
