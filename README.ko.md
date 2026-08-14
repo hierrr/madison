@@ -50,6 +50,9 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
 - **핸드오프** — 작업 맥락(git 브랜치 + 핸드오프 문서)을 다른 기기로 넘기면, 그 기기에서
   세션을 열 때 SessionStart 훅이 맥락을 주입해 이어서 하게 해 줍니다.
 - **히스토리** — 기기·세션·핸드오프·이벤트 원장을 탭마다 필터링해 볼 수 있습니다.
+- **일일/주간 리포트** — 허브가 기간별 작업을 업무일지 스타일 마크다운(서비스별
+  묶음·중첩 불릿)으로 정리해 노션에 붙여넣을 수 있고, 사용 메트릭(턴·세션·활동
+  시간·스트릭 잔디)도 함께 보여줍니다.
 - **에이전트·실행 경로 구분** — `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` / `CODEX APP`
   세션을 가려서 보여 주고, 자동화(cron·launchd의 headless 실행) 세션은 전용 탭으로 분리합니다.
 - **로컬 우선, 메타데이터만** — 특정 벤더의 원격·클라우드 세션 인프라에 기대지 않습니다.
@@ -66,7 +69,7 @@ flowchart LR
     end
     rep -->|"HTTPS · 터널 또는 직결"| api
     subgraph hub["허브 — 상시 구동 기기 1대"]
-        api["FastAPI + SQLite (단일 파일)<br/>등록 · 이벤트 · 상태(폴드 + TTL)<br/>핸드오프"]
+        api["FastAPI + SQLite (단일 파일)<br/>등록 · 이벤트 · 상태(폴드 + TTL)<br/>핸드오프 · 리포트"]
         dash["대시보드 — GET /"]
         api --> dash
     end
@@ -203,7 +206,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 
 | 경로 | 내용 |
 |---|---|
-| `server/` | 허브 — FastAPI + SQLite (등록·수신·상태 폴드·TTL·핸드오프 큐·요약 워커) |
+| `server/` | 허브 — FastAPI + SQLite (등록·수신·상태 폴드·TTL·핸드오프 큐·리포트·요약 워커) |
 | `dashboard/` | 단일 HTML 대시보드 + 로고 자산 |
 | `collector/` | 기기 쪽 전부 — 훅·`report.sh`·멱등 설치 스크립트·Codex 체이닝·`/handoff`·`/pickup` 스킬·Windows 베타 |
 | `scripts/` | launchd 스텁 (표준 패턴) |
