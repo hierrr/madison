@@ -207,6 +207,9 @@ class CollectorTests(unittest.TestCase):
                 commands = [h["command"] for group in hooks[name] for h in group["hooks"] if "madison" in h["command"]]
                 self.assertEqual(len(commands), 1, name)
 
+            for skill in ("handoff", "pickup"):
+                self.assertTrue((home / ".codex" / "skills" / skill / "SKILL.md").exists(), skill)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,6 +137,12 @@ if [ "$WITH_CODEX" = "1" ]; then
   mkdir -p "$CODEX_DIR"
   CTMPL="$(mktemp)"; fetch codex-hooks.template.json "$CTMPL"
 
+  # Codex에서도 /handoff·/pickup을 쓸 수 있게 같은 스킬(SKILL.md 호환)을 설치한다 — 에이전트 선택은 사용자 몫.
+  mkdir -p "$CODEX_DIR/skills/handoff" "$CODEX_DIR/skills/pickup"
+  cp "$SKILLS_DIR/handoff/SKILL.md" "$CODEX_DIR/skills/handoff/SKILL.md"
+  cp "$SKILLS_DIR/pickup/SKILL.md" "$CODEX_DIR/skills/pickup/SKILL.md"
+  note "Codex에도 /handoff·/pickup 스킬 설치"
+
   # 기존 사용자 훅을 보존하며 MADISON 훅만 멱등 병합한다.
   python3 - "$CODEX_HOOKS" "$CTMPL" <<'PY'
 import json, sys, time, tomllib
