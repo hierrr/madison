@@ -45,8 +45,8 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
   없는 종료 훅이 아니라 허브 쪽 TTL로 잡아냅니다.
 - **작업 요약** — 각 세션의 지시를 허브의 작은 모델이 한 줄로 간추립니다. 기기에서 돌지도
   않고, 훅의 실행 경로에 끼어들지도 않습니다.
-- **세션 추적** — 모든 세션의 id를 바로 볼 수 있고, 그 기기에서 곧장 실행할
-  `claude --resume <id>` 명령이 딸려 나옵니다.
+- **세션 추적** — 모든 세션의 id를 바로 볼 수 있고, 그 기기에서 `claude --resume <id>`
+  또는 `codex resume <id>`로 이어서 열 수 있습니다.
 - **핸드오프** — 작업 맥락(git 브랜치 + 핸드오프 문서)을 다른 기기로 넘기면, 그 기기에서
   세션을 열 때 SessionStart 훅이 맥락을 주입해 이어서 하게 해 줍니다.
 - **히스토리** — 기기·세션·핸드오프·이벤트 원장을 탭마다 필터링해 볼 수 있습니다.
@@ -63,7 +63,7 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
 ```mermaid
 flowchart LR
     subgraph dev["각 기기 — 세션은 로컬에"]
-        hooks["Claude Code 전역 훅<br/>Codex notify + watcher"]
+        hooks["Claude Code 전역 훅<br/>Codex lifecycle hooks"]
         rep["report.sh<br/>fire-and-forget · 2초 · 실패 시 스풀"]
         hooks --> rep
     end
@@ -99,7 +99,7 @@ flowchart LR
 | 경로 | 수집 |
 |---|---|
 | Claude Code — 터미널 CLI, 데스크톱 앱, IDE | **완전** — 프런트엔드 무관하게 동일한 전역 훅이 발화 |
-| Codex — CLI/TUI, 데스크톱 | **부분** — `notify` 프로그램을 체이닝하고 세션 로그를 tail; 도구 단위 이벤트가 없어 카드에 *부분 수집* 배지 |
+| Codex — CLI/TUI, 데스크톱 | **완전** — 전역 lifecycle hooks로 세션·턴·도구·승인 이벤트 수집. 단, 호스팅 WebSearch처럼 로컬 훅 경로를 거치지 않는 일부 도구는 도구 단위 하트비트 제외 |
 | 클라우드 채팅·웹 태스크 (claude.ai, ChatGPT, Codex web) | 범위 밖 — 훅을 걸 로컬 발자국이 없음 |
 
 ## 빠른 시작
@@ -135,10 +135,12 @@ curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
 # Claude Code + Codex 수집이 모두 기본 — Codex를 빼려면 --no-codex
 ```
 
-이 명령은 기기를 등록하고(토큰은 서버에 해시로만 저장), Claude Code 전역 훅을 설치하며
-(CLI·데스크탑앱·IDE 세션 공통, 이미 있는 훅과는 병합), `~/.codex/config.toml`이 있으면
-Codex `notify`도 체이닝하고, 스풀 플러셔를 등록합니다. 이미 열려 있던 세션은 다시 시작해야 훅이 먹습니다. 기기를
-전부 등록하고 나면 `ENROLL_SECRET`은 로테이트하세요.
+이 명령은 기기를 등록하고(토큰은 서버에 해시로만 저장), Claude Code와 Codex의 전역 훅을
+각자의 기존 훅과 병합하고 스풀 플러셔를 등록합니다. 과거 Madison의 Codex `notify`+60초
+감시기가 설치돼 있으면 사용자 원래 `notify`를 복원한 뒤 구형 수집 경로를 제거합니다.
+Codex에서는 설치 뒤 `/hooks`를 열어 새 command hooks를 검토·신뢰해야 합니다. 이미 열려 있던
+Claude Code/Codex 세션은 다시 시작해야 새 훅이 적용됩니다. 기기를 전부 등록하고 나면
+`ENROLL_SECRET`은 로테이트하세요.
 
 ### Windows (베타)
 
@@ -173,15 +175,15 @@ macOS 수집기보다 기능이 뒤처지는** 베타입니다. 쓰는 방식은
 
 ```bash
 # 1. launchd 잡 중지
-for j in flush codexwatch; do launchctl bootout "gui/$(id -u)/dev.madison.$j" 2>/dev/null; done
+launchctl bootout "gui/$(id -u)/dev.madison.flush" 2>/dev/null
 rm -f ~/Library/LaunchAgents/dev.madison.*.plist
 
 # 2. 수집기·스킬 제거
 rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 
-# 3. 훅·Codex 설정을 설치 시 만든 백업으로 복원
-#    (settings.json.bak-madison-*, Codex를 구성했다면 config.toml.bak-madison-*)
-#    또는 ~/.claude/settings.json에서 MADISON 훅 항목을 직접 지웁니다.
+# 3. 훅 설정을 설치 시 만든 백업으로 복원
+#    (settings.json.bak-madison-*, hooks.json.bak-madison-*, 구형 수집을 옮겼다면 config.toml 백업)
+#    또는 ~/.claude/settings.json과 ~/.codex/hooks.json에서 MADISON 훅 항목을 직접 지웁니다.
 ```
 
 마지막으로 대시보드 **기기** 탭에서 그 기기를 폐기해 토큰을 무효화하세요.
@@ -209,14 +211,14 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 |---|---|
 | `server/` | 허브 — FastAPI + SQLite (등록·수신·상태 폴드·TTL·핸드오프 큐·리포트·요약 워커) |
 | `dashboard/` | 단일 HTML 대시보드 + 로고 자산 |
-| `collector/` | 기기 쪽 전부 — 훅·`report.sh`·멱등 설치 스크립트·Codex 체이닝·`/handoff`·`/pickup` 스킬·Windows 베타 |
+| `collector/` | 기기 쪽 전부 — Claude/Codex 훅·`report.sh`·멱등 설치 스크립트·`/handoff`·`/pickup` 스킬·Windows 베타 |
 | `scripts/` | launchd 스텁 (표준 패턴) |
 | `assets/` | 프로젝트 로고 |
 
 ## 상태
 
-개인용 플릿 콘솔로 만들어 실제로 쓰고 있습니다. Claude Code는 완전히 지원하고, Codex는
-설계상 부분만, Windows 수집기는 아직 베타(실기기 미검증)입니다. 기여는 언제든 환영합니다.
+개인용 플릿 콘솔로 만들어 실제로 쓰고 있습니다. Claude Code와 Codex의 로컬 CLI/앱 경로를
+전역 훅으로 지원하며, Windows 수집기는 아직 베타(실기기 미검증)입니다. 기여는 언제든 환영합니다.
 
 ## 라이선스
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# MADISON collector — Claude Code 훅 본체 (IMPLEMENTATION.md §7)
+# MADISON collector — Claude Code / Codex 공용 훅 본체 (IMPLEMENTATION.md §7)
 # 원칙: 어떤 경우에도 exit 0. 세션을 절대 방해하지 않는다. macOS bash 3.2 호환.
 set -u
 
@@ -12,7 +12,9 @@ SAMPLES_DIR="$MAD_DIR/samples"
 SPOOL_MAX_LINES=5000
 
 EV="${1:-}"
+AGENT="${2:-claude-code}"
 [ -z "$EV" ] && exit 0
+case "$AGENT" in claude-code|codex-cli) : ;; *) exit 0 ;; esac
 # 허브 요약 워커 등 내부 실행은 보고하지 않는다 (재귀 차단)
 [ "${MADISON_SUPPRESS:-0}" = "1" ] && exit 0
 [ -f "$ENV_FILE" ] || exit 0
@@ -95,9 +97,12 @@ if [ "${MADISON_DEBUG:-0}" = "1" ]; then
   printf '%s' "$IN" > "$SAMPLES_DIR/$EV.json" 2>/dev/null
 fi
 
-TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+TS="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
 SID=$(printf '%s' "$IN" | jq -r '.session_id // "unknown"' 2>/dev/null) || SID="unknown"
 CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""' 2>/dev/null) || CWD=""
+TP=$(printf '%s' "$IN" | jq -r '.transcript_path // ""' 2>/dev/null) || TP=""
+TURN_ID=$(printf '%s' "$IN" | jq -r '.turn_id // ""' 2>/dev/null) || TURN_ID=""
+TOOL_USE_ID=$(printf '%s' "$IN" | jq -r '.tool_use_id // ""' 2>/dev/null) || TOOL_USE_ID=""
 
 CURL_M=2
 [ "$EV" = "session_start" ] && CURL_M=1  # SessionStart는 stdout 주입 대기 때문에 예산 축소 (§7.2)
@@ -115,20 +120,69 @@ fi
 # 승인 요청 직후엔 다음 이벤트가 즉시 통과해야 빨강 해제가 안 늦음 (§7.2)
 [ "$EV" = "permission_request" ] && rm -f "$THROTTLE_DIR/$SID" 2>/dev/null
 
-# ── 프런트엔드 판별: 앱(조상에 Claude.app) / auto(claude가 -p headless = launchd 등 자동화) / cli ──
-# (TTY 기반은 불가 — Claude Code가 훅을 TTY 없이 띄우는 것 실측. 명령줄의 -p 유무가 결정적)
-FRONTEND="cli"
-if [ "$EV" = "session_start" ] || [ "$EV" = "prompt" ] || [ "$EV" = "turn_done" ]; then
+# ── 프런트엔드 판별: CLI / 데스크톱 앱 / headless 자동 실행 ──
+# Claude는 부모 프로세스, Codex는 rollout session_meta.originator를 우선 사용한다.
+# transcript 형식은 안정 API가 아니므로 Codex도 부모 프로세스를 폴백으로 함께 확인한다.
+FRONTEND=""
+ORIGINATOR=""
+SESSION_SOURCE=""
+if [ "$AGENT" = "codex-cli" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
+  META=$(head -n 1 "$TP" 2>/dev/null)
+  ORIGINATOR=$(printf '%s' "$META" | jq -r '
+    if .type == "session_meta" then (.payload.originator // "") else "" end
+  ' 2>/dev/null) || ORIGINATOR=""
+  SESSION_SOURCE=$(printf '%s' "$META" | jq -r '
+    if .type == "session_meta" then (.payload.source // "") else "" end
+  ' 2>/dev/null) || SESSION_SOURCE=""
+  case "$ORIGINATOR" in
+    codex_exec|exec) FRONTEND="auto" ;;
+    codex-tui|cli) FRONTEND="cli" ;;
+    "Codex Desktop"|codex-desktop|codex_desktop) FRONTEND="app" ;;
+    *VSCode*|*vscode*|*"Visual Studio Code"*) FRONTEND="ide" ;;
+  esac
+fi
+if [ -z "$FRONTEND" ]; then
   P="$PPID"; i=0
-  while [ -n "$P" ] && [ "$P" -gt 1 ] && [ "$i" -lt 6 ]; do
+  while [ -n "$P" ] && [ "$P" -gt 1 ] && [ "$i" -lt 8 ]; do
     PCMD=$(ps -o command= -p "$P" 2>/dev/null || true)
     case "$PCMD" in
-      *"/Applications/Claude.app/"*) FRONTEND="app"; break ;;
-      *claude*" -p "*|*claude*" -p"|*claude*" --print"*) FRONTEND="auto"; break ;;
+      *"/Applications/Claude.app/"*|*"/Applications/Codex.app/"*) FRONTEND="app"; break ;;
+      *"/Applications/Visual Studio Code.app/"*|*.vscode/extensions/*)
+        if [ "$AGENT" = "codex-cli" ]; then FRONTEND="ide"; break; fi ;;
+      *claude*" -p "*|*claude*" -p"|*claude*" --print"*|*codex*" exec "*) FRONTEND="auto"; break ;;
     esac
     P=$(ps -o ppid= -p "$P" 2>/dev/null | tr -d ' ') || break
     i=$((i + 1))
   done
+fi
+if [ -z "$FRONTEND" ] && [ "$AGENT" = "codex-cli" ]; then
+  case "$SESSION_SOURCE" in
+    cli) FRONTEND="cli" ;;
+    exec) FRONTEND="auto" ;;
+    vscode) FRONTEND="ide" ;;
+  esac
+fi
+if [ -z "$FRONTEND" ]; then
+  if [ "$AGENT" = "claude-code" ]; then FRONTEND="cli"; else FRONTEND="unknown"; fi
+fi
+
+# ── 모델/effort ───────────────────────────────────────
+# Codex는 model을 공식 훅 필드로 제공한다. effort는 훅 필드 우선, rollout turn_context 폴백.
+MODEL=$(printf '%s' "$IN" | jq -r '.model // ""' 2>/dev/null) || MODEL=""
+EFFORT=$(printf '%s' "$IN" | jq -r '
+  .effort | if type=="object" then (.level // "") elif type=="string" then . else "" end
+' 2>/dev/null) || EFFORT=""
+if [ "$AGENT" = "codex-cli" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
+  # rollout은 매우 커질 수 있으므로 전체 grep 대신 최근 레코드만 본다.
+  TC=$(tail -n 200 "$TP" 2>/dev/null | jq -cs '[.[] | select(.type=="turn_context")] | last // {}' 2>/dev/null) || TC="{}"
+  [ -n "$MODEL" ] || MODEL=$(printf '%s' "$TC" | jq -r '.payload.model // ""' 2>/dev/null) || MODEL=""
+  [ -n "$EFFORT" ] || EFFORT=$(printf '%s' "$TC" | jq -r '
+    .payload.effort | if type=="object" then (.level // "") elif type=="string" then . else "" end
+  ' 2>/dev/null) || EFFORT=""
+elif [ "$AGENT" = "claude-code" ] && [ -z "$MODEL" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
+  MODEL=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '
+    [.[] | select(type=="object" and .type=="assistant")] | last | .message.model // ""
+  ' 2>/dev/null) || MODEL=""
 fi
 
 # ── 프로젝트/브랜치 ────────────────────────────────────
@@ -148,40 +202,34 @@ fi
 DETAIL="{}"
 case "$EV" in
   session_start)
-    DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" '{source: (.source // ""), frontend: $f}' 2>/dev/null) || DETAIL="{}"
+    DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
+      '{source: (.source // ""), frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}' 2>/dev/null) || DETAIL="{}"
     ;;
   prompt)
-    DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" '{prompt: ((.prompt // "") | .[0:600]), frontend: $f}' 2>/dev/null) || DETAIL="{}"
+    DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
+      '{prompt: ((.prompt // "") | .[0:600]), frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}' 2>/dev/null) || DETAIL="{}"
     ;;
   heartbeat|tool_start)
-    # 스로틀(분당 1회) 통과 시에만 오므로 전사본 꼬리에서 모델도 함께 추출
-    TP=$(printf '%s' "$IN" | jq -r '.transcript_path // ""' 2>/dev/null) || TP=""
-    MODEL=""
-    if [ -n "$TP" ] && [ -f "$TP" ]; then
-      MODEL=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '
-        [.[] | select(type=="object" and .type=="assistant")] | last | .message.model // ""
-      ' 2>/dev/null) || MODEL=""
-    fi
-    # effort는 문자열 또는 {"level": "..."} 객체 두 형태가 실측됨
-    EFF_JQ='(.effort | if type=="object" then (.level // "") elif type=="string" then . else "" end)'
     if [ "$EV" = "tool_start" ]; then
-      DETAIL=$(printf '%s' "$IN" | jq -c --arg m "${MODEL:-}" "{tool: (.tool_name // .tool // \"\"), effort: $EFF_JQ, model: \$m}" 2>/dev/null) || DETAIL="{}"
+      DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
+        '{tool: (.tool_name // .tool // ""), frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}' 2>/dev/null) || DETAIL="{}"
     else
-      DETAIL=$(printf '%s' "$IN" | jq -c --arg m "${MODEL:-}" "{effort: $EFF_JQ, model: \$m}" 2>/dev/null) || DETAIL="{}"
+      DETAIL=$(jq -cn --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
+        '{frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}')
     fi
     ;;
   permission_request|idle)
-    DETAIL=$(printf '%s' "$IN" | jq -c '{message: ((.message // .title // .tool_name // "") | tostring | .[0:200])}' 2>/dev/null) || DETAIL="{}"
+    DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" '
+      {message: ((.message // .title //
+        (.tool_input | if type=="object" then (.description // empty) else empty end) //
+        .tool_name // "") | tostring | .[0:200]),
+       frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}
+    ' 2>/dev/null) || DETAIL="{}"
     ;;
   turn_done)
     # 공식 필드 우선, transcript 꼬리 파싱은 폴백 (§4.2)
     SUMMARY=$(printf '%s' "$IN" | jq -r '(.last_assistant_message // "") | .[0:200]' 2>/dev/null) || SUMMARY=""
-    TP=$(printf '%s' "$IN" | jq -r '.transcript_path // ""' 2>/dev/null) || TP=""
-    MODEL=""
-    if [ -n "$TP" ] && [ -f "$TP" ]; then
-      MODEL=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '
-        [.[] | select(type=="object" and .type=="assistant")] | last | .message.model // ""
-      ' 2>/dev/null) || MODEL=""
+    if [ "$AGENT" = "claude-code" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
       if [ -z "$MODEL" ]; then
         # Stop 발화 직후 전사본 flush 레이스 — 한 번만 짧게 재시도
         sleep 0.3
@@ -195,19 +243,35 @@ case "$EV" in
           (.message.content // []) | map(select(.type=="text") | .text) | join(" ") | .[0:200]
         ' 2>/dev/null) || SUMMARY=""
       fi
+    elif [ "$AGENT" = "codex-cli" ] && [ -z "$SUMMARY" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
+      SUMMARY=$(tail -n 80 "$TP" 2>/dev/null | jq -rs '
+        [.[] | select(.type=="response_item" and .payload.type=="message" and .payload.role=="assistant")] | last |
+        [.payload.content[]? | select(.type=="output_text") | .text] | join(" ") | .[0:200]
+      ' 2>/dev/null) || SUMMARY=""
     fi
-    DETAIL=$(jq -cn --arg s "${SUMMARY:-}" --arg m "${MODEL:-}" --arg f "$FRONTEND" \
-      '{summary: $s, model: $m, frontend: $f}')
+    DETAIL=$(jq -cn --arg s "${SUMMARY:-}" --arg m "$MODEL" --arg e "$EFFORT" --arg f "$FRONTEND" \
+      '{summary: $s, model: $m, effort: $e, frontend: $f, collection_mode: "hooks"}')
     ;;
   session_end)
-    DETAIL=$(printf '%s' "$IN" | jq -c '{reason: (.reason // "")}' 2>/dev/null) || DETAIL="{}"
+    DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
+      '{reason: (.reason // ""), frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}' 2>/dev/null) || DETAIL="{}"
     ;;
 esac
 [ -z "$DETAIL" ] && DETAIL="{}"
 
+EID=""
+if [ "$AGENT" = "codex-cli" ] && [ -n "$TURN_ID" ]; then
+  case "$EV" in
+    prompt|turn_done) EID="codex-$SID-$TURN_ID-$EV" ;;
+    tool_start|heartbeat)
+      [ -n "$TOOL_USE_ID" ] && EID="codex-$SID-$TURN_ID-$EV-$TOOL_USE_ID"
+      ;;
+  esac
+fi
+[ -n "$EID" ] || EID=$(uuidgen 2>/dev/null || echo "$SID-$TS-$EV-$$")
 EVJSON=$(jq -cn \
-  --arg agent "claude-code" --arg sid "$SID" --arg ev "$EV" --arg ts "$TS" \
-  --arg eid "$(uuidgen 2>/dev/null || echo "$SID-$TS-$EV-$$")" \
+  --arg agent "$AGENT" --arg sid "$SID" --arg ev "$EV" --arg ts "$TS" \
+  --arg eid "$EID" \
   --arg project "$PROJECT" --arg branch "$BRANCH" --argjson detail "$DETAIL" \
   '{agent:$agent, session_id:$sid, event:$ev, ts:$ts, event_id:$eid,
     project:$project, branch:$branch, detail:$detail}' 2>/dev/null) || exit 0

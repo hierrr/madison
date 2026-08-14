@@ -1,0 +1,60 @@
+{
+  "description": "MADISON Codex lifecycle collector",
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh session_start codex-cli 2>/dev/null || true",
+        "timeout": 3,
+        "statusMessage": "Reporting session start to MADISON"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh prompt codex-cli 2>/dev/null || true",
+        "async": true,
+        "timeout": 5
+      }]
+    }],
+    "PreToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh tool_start codex-cli 2>/dev/null || true",
+        "async": true,
+        "timeout": 5
+      }]
+    }],
+    "PostToolUse": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh heartbeat codex-cli 2>/dev/null || true",
+        "async": true,
+        "timeout": 5
+      }]
+    }],
+    "PermissionRequest": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh permission_request codex-cli 2>/dev/null || true",
+        "async": true,
+        "timeout": 5
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh turn_done codex-cli 2>/dev/null || true",
+        "async": true,
+        "timeout": 5
+      }]
+    }],
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/madison/report.sh session_end codex-cli 2>/dev/null || true",
+        "timeout": 3
+      }]
+    }]
+  }
+}

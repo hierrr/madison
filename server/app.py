@@ -26,7 +26,7 @@ API_HOST_ALLOWED_EXACT = {"/install.sh", "/install.ps1", "/healthz", "/favicon.s
 
 COLLECTOR_FILES = {
     "report.sh", "flush.sh", "install.sh", "install.ps1", "report.ps1",
-    "hooks.template.json", "codex-notify-wrapper.sh", "codex-watch.sh",
+    "hooks.template.json", "codex-hooks.template.json",
     "skills/handoff/SKILL.md", "skills/pickup/SKILL.md",
 }
 

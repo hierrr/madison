@@ -91,6 +91,8 @@ def ingest(c, device_id: int, ev: dict) -> str:
     # 프런트엔드(cli/app): 실려 오면 반영
     if payload.get("frontend"):
         sets += ["frontend=?"]; args += [str(payload["frontend"])[:20]]
+    if payload.get("collection_mode"):
+        sets += ["collection_mode=?"]; args += [str(payload["collection_mode"])[:20]]
 
     # 모델·에포트: 어떤 이벤트든 실려 오면 최신값으로 반영
     if payload.get("model"):
@@ -107,7 +109,7 @@ def ingest(c, device_id: int, ev: dict) -> str:
         sets += ["last_prompt=?", "task_summary=NULL"]
         args += [str(payload.get("prompt", ""))[:600]]
     elif event == "turn_done":
-        # 턴 = 완료 기준으로 전 에이전트 통일 (codex는 시작 신호가 없어 지시 기준이 불가 — 사용자 결정)
+        # 턴 수는 에이전트 종류와 무관하게 완료 이벤트 기준으로 통일한다.
         sets += ["turns=turns+1", "last_summary=?", "current_tool=NULL"]
         args += [str(payload.get("summary", ""))[:300]]
     elif event == "idle":
@@ -192,9 +194,10 @@ def assemble(c) -> dict:
             "last_prompt": s["last_prompt"], "last_summary": s["last_summary"],
             "task_summary": s["task_summary"],
             "model": s["model"], "effort": s["effort"], "frontend": s["frontend"],
+            "collection_mode": s["collection_mode"],
             "approval_msg": s["approval_msg"], "current_tool": s["current_tool"],
             "turns": s["turns"], "end_reason": s["end_reason"],
-            "partial": s["agent"] != "claude-code",
+            "partial": s["agent"] != "claude-code" and s["collection_mode"] != "hooks",
         })
 
     order = {"needs_approval": 0, "awaiting_input": 1}
