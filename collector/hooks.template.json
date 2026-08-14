@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "SessionStart":      [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh session_start 2>/dev/null || true" }] }],
+    "UserPromptSubmit":  [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh prompt 2>/dev/null || true" }] }],
+    "PreToolUse":        [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh tool_start 2>/dev/null || true" }] }],
+    "PostToolUse":       [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh heartbeat 2>/dev/null || true" }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh permission_request 2>/dev/null || true" }] }],
+    "Notification":      [{ "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh idle 2>/dev/null || true" }] }],
+    "Stop":              [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh turn_done 2>/dev/null || true" }] }],
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh session_end 2>/dev/null || true" }] }]
+  }
+}
