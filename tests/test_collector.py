@@ -218,6 +218,31 @@ class CollectorTests(unittest.TestCase):
             for skill in ("handoff", "pickup"):
                 self.assertTrue((home / ".codex" / "skills" / skill / "SKILL.md").exists(), skill)
 
+    def test_installer_repairs_notify_rechained_by_computer_use(self):
+        # Computer Use가 MADISON 래퍼 위에 재체이닝하며 경로를 JSON 이스케이프(\/)로 품은 실측 케이스:
+        # 래퍼 참조가 남은 notify를 제거하고 보존해둔 원본 notify를 복원해야 한다.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            config = home / ".codex" / "config.toml"
+            wrapper_escaped = str(mad / "codex-notify-wrapper.sh").replace("/", "\\\\/")
+            config.write_text(
+                'model = "gpt-test"\n'
+                'notify = [ "/Apps/SkyComputerUseClient", "turn-ended", "--previous-notify", "[\\"'
+                + wrapper_escaped + '\\"]" ]\n'
+            )
+            (mad / "codex-orig-notify.json").write_text('["/Apps/SkyComputerUseClient", "turn-ended"]')
+
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
+            subprocess.run(
+                ["bash", str(INSTALL), "--name", "test-device", "--hub", "http://madison.test"],
+                env=env, cwd=REPO, check=True, capture_output=True, text=True,
+            )
+            parsed = tomllib.loads(config.read_text())
+            self.assertEqual(parsed["notify"], ["/Apps/SkyComputerUseClient", "turn-ended"])
+
 
 if __name__ == "__main__":
     unittest.main()

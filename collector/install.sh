@@ -205,9 +205,10 @@ from pathlib import Path
 
 cfg_path, mad_dir = Path(sys.argv[1]), Path(sys.argv[2])
 original_text = cfg_path.read_text()
-wrapper = str(mad_dir / "codex-notify-wrapper.sh")
 lines = original_text.splitlines(keepends=True)
-kept = [line for line in lines if not (re.match(r"^\s*notify\s*=", line) and wrapper in line)]
+# 래퍼 경로는 다른 프로그램(Computer Use 등)이 --previous-notify 인자로 JSON 이스케이프(\/)해
+# 품고 있을 수 있어 전체 경로 대신 파일명으로 매칭한다 — 파일명은 MADISON 고유라 오탐 없음.
+kept = [line for line in lines if not (re.match(r"^\s*notify\s*=", line) and "codex-notify-wrapper.sh" in line)]
 text = "".join(kept)
 
 orig_file = mad_dir / "codex-orig-notify.json"
