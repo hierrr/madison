@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS summary_cache (
   summary TEXT NOT NULL,
   created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,               -- 예: llm.report.model — 대시보드 설정 탭에서 관리, .env 기본값을 덮음
+  value TEXT
+);
 """
 
 

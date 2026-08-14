@@ -314,6 +314,18 @@
   .hfrepo { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); margin-top: 4px; }
   .hf p { margin: 3px 0 4px; font-size: 12.5px; color: var(--ink-2); }
   .hfmeta { font-size: 11px; color: var(--ink-3); }
+  /* ── 설정 탭 ── */
+  .set-note { font-size: 12px; color: var(--ink-3); margin: 0 0 12px; }
+  .set-grid { display: flex; gap: 22px; flex-wrap: wrap; }
+  .set-site { flex: 1 1 300px; display: flex; flex-direction: column; gap: 8px; }
+  .set-site h4 { margin: 0 0 2px; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px; }
+  .set-site h4 .dim { font-weight: 400; font-size: 12px; }
+  .set-site label, .set-grid > label { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-2); }
+  .set-site label .hsel, .set-grid > label .hsel { flex: 1; min-width: 0; }
+  .set-site label { max-width: 420px; }
+  .set-site label > span:first-child { width: 64px; }
+  .set-path { font-family: var(--mono); font-size: 12px; }
+
   .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .feed li { display: flex; align-items: baseline; gap: 8px; padding: 5px 2px; border-bottom: 1px solid var(--line); font-size: 12px; }
   .feed li:last-child { border-bottom: none; }
@@ -399,6 +411,7 @@
     <button class="tab" data-view="handoff" aria-selected="false">핸드오프</button>
     <button class="tab" data-view="events" aria-selected="false">이벤트</button>
     <button class="tab" data-view="auto" aria-selected="false">자동화</button>
+    <button class="tab" data-view="settings" aria-selected="false">설정</button>
   </nav>
 
   <div id="view-main" class="view">
@@ -484,6 +497,47 @@
   </div>
   <div id="view-events" class="view hidden"><div class="htwrap" id="eventsTable">불러오는 중…</div></div>
   <div id="view-auto" class="view hidden"><div class="htwrap" id="autoTable">불러오는 중…</div></div>
+  <div id="view-settings" class="view hidden">
+    <div class="mcard">
+      <h3>LLM 설정 <button class="copy" id="setModelRefresh" style="margin-left:6px">모델 목록 새로고침</button></h3>
+      <p class="set-note">빈 값은 기본값. 저장 즉시 다음 호출부터 적용.</p>
+      <div class="set-grid">
+        <div class="set-site">
+          <h4><span class="hmk" style="background:var(--lg-teal)"></span>태스크 요약 <span class="dim">— 세션 카드 한 줄 요약</span></h4>
+          <label>프로바이더
+            <select id="set-summary-provider" class="hsel" data-site="summary">
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select></label>
+          <label>모델 <select id="set-summary-model" class="hsel" data-site="summary"><option value="">기본</option></select></label>
+          <label>에포트 <select id="set-summary-effort" class="hsel"><option value="">기본</option></select></label>
+        </div>
+        <div class="set-site">
+          <h4><span class="hmk" style="background:var(--lg-blue)"></span>업무 리포트 <span class="dim">— 일일/주간 리포트 생성</span></h4>
+          <label>프로바이더
+            <select id="set-report-provider" class="hsel" data-site="report">
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select></label>
+          <label>모델 <select id="set-report-model" class="hsel" data-site="report"><option value="">기본</option></select></label>
+          <label>에포트 <select id="set-report-effort" class="hsel"><option value="">기본</option></select></label>
+        </div>
+      </div>
+    </div>
+    <div class="mcard">
+      <h3>실행 경로</h3>
+      <p class="set-note">CLI가 표준 위치에 없으면 절대경로 지정.</p>
+      <div class="set-grid">
+        <label>claude <input id="set-claude-bin" class="hsel set-path" placeholder=""></label>
+        <label>codex <input id="set-codex-bin" class="hsel set-path" placeholder="codex"></label>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <button class="copy act-primary" id="setSave">저장</button>
+      <span id="setMsg" class="dim" style="font-size:12px"></span>
+    </div>
+  </div>
+
   <footer class="foot">
     <span class="foot-brand">Multi-Agent &amp; Device Integrated Supervision, Operations &amp; Networking — 다중 에이전트 및 기기 통합 감독 시스템</span>
     <span class="mono" id="footInfo"></span>
@@ -924,6 +978,8 @@
         HIST.autoSessions = rows.filter(function (s) { return s.frontend === 'auto'; });
         renderAuto();
       }).catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
+    } else if (v === 'settings') {
+      loadSettings();
     }
   }
 
@@ -980,6 +1036,119 @@
       '</div>' +
       table(['ID', '경로', '프로젝트', '태스크', '상태', '생성 → 수신'], html);
   }
+
+  // ── 설정 탭 ──
+  var SET_KEYS = ['summary.provider', 'summary.model', 'summary.effort',
+                  'report.provider', 'report.model', 'report.effort', 'claude_bin', 'codex_bin'];
+  var SET_MODELS = { claude: null, codex: null };   // /api/llm-models 결과 캐시
+  var SET_DEFAULTS = null;
+  function setElId(k) { return 'set-' + k.replace('.', '-').replace('_', '-'); }
+  function setEl(site, f) { return document.getElementById('set-' + site + '-' + f); }
+
+  function fillModelSel(site) {
+    // 프로바이더의 계정 모델 목록으로 모델 드롭다운 구성 — 저장된 값이 목록에 없어도 유지
+    var prov = setEl(site, 'provider').value || 'claude';
+    var sel = setEl(site, 'model');
+    var want = sel.dataset.want !== undefined ? sel.dataset.want : sel.value;
+    delete sel.dataset.want;
+    var info = SET_MODELS[prov];
+    var defTxt = prov === 'claude' && SET_DEFAULTS ? ' (' + SET_DEFAULTS[site].model + ')' : ' (CLI 기본)';
+    var html = '<option value="">기본' + defTxt + '</option>';
+    var seen = false;
+    ((info && info.models) || []).forEach(function (m) {
+      if (m.id === want) seen = true;
+      html += '<option value="' + esc(m.id) + '">' + esc(m.display_name) +
+        (m.display_name === m.id ? '' : ' · ' + esc(m.id)) + '</option>';
+    });
+    if (want && !seen) html += '<option value="' + esc(want) + '">' + esc(want) + ' (목록 외)</option>';
+    sel.innerHTML = html;
+    sel.value = want || '';
+    if (info && info.error) document.getElementById('setMsg').textContent = prov + ': ' + info.error;
+    fillEffortSel(site);
+  }
+
+  function fillEffortSel(site) {
+    // 선택한 모델이 지원하는 에포트만 노출 (모델 미선택이면 기본 모델 기준)
+    var prov = setEl(site, 'provider').value || 'claude';
+    var sel = setEl(site, 'effort');
+    var want = sel.dataset.want !== undefined ? sel.dataset.want : sel.value;
+    delete sel.dataset.want;
+    var mid = setEl(site, 'model').value;
+    var list = (SET_MODELS[prov] && SET_MODELS[prov].models) || [];
+    var m = null;
+    list.forEach(function (x) { if (x.id === mid || (!mid && x.is_default)) m = m || x; });
+    var efforts = (m && m.efforts.length) ? m.efforts : ['low', 'medium', 'high', 'xhigh'];
+    var html = '<option value="">기본</option>';
+    efforts.forEach(function (e2) { html += '<option>' + esc(e2) + '</option>'; });
+    if (want && efforts.indexOf(want) < 0) html += '<option>' + esc(want) + '</option>';
+    sel.innerHTML = html;
+    sel.value = want || '';
+  }
+
+  function loadModelLists(refresh) {
+    var qs = refresh ? '&refresh=1' : '';
+    return Promise.all(['claude', 'codex'].map(function (p) {
+      return getJSON('/api/llm-models?provider=' + p + qs)
+        .then(function (r) { SET_MODELS[p] = r; })
+        .catch(function () { SET_MODELS[p] = { models: [], error: '조회 실패' }; });
+    }));
+  }
+
+  function loadSettings() {
+    document.getElementById('setMsg').textContent = '모델 목록 불러오는 중…';
+    Promise.all([getJSON('/api/settings'), loadModelLists(false)]).then(function (res) {
+      var s = res[0];
+      SET_DEFAULTS = s.defaults;
+      SET_KEYS.forEach(function (k) {
+        var el = document.getElementById(setElId(k));
+        if (!el) return;
+        var v = s.stored['llm.' + k] || (k.indexOf('provider') > -1 ? 'claude' : '');
+        if (el.tagName === 'SELECT' && k.indexOf('provider') < 0) el.dataset.want = v;  // 목록 구성 후 반영
+        else el.value = v;
+      });
+      document.getElementById('set-claude-bin').placeholder = s.effective.summary.claude_bin;
+      document.getElementById('set-codex-bin').placeholder = s.effective.summary.codex_bin;
+      document.getElementById('setMsg').textContent = '';
+      fillModelSel('summary'); fillModelSel('report');
+    }).catch(function () { document.getElementById('setMsg').textContent = '설정 불러오기 실패'; });
+  }
+
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    if (!el.dataset || !el.dataset.site) return;
+    if (el.id.indexOf('provider') > -1) fillModelSel(el.dataset.site);
+    else if (el.id.indexOf('model') > -1) fillEffortSel(el.dataset.site);
+  });
+  document.getElementById('setModelRefresh').addEventListener('click', function () {
+    var btn = this; btn.disabled = true;
+    document.getElementById('setMsg').textContent = 'CLI에서 모델 목록 재조회 중…';
+    loadModelLists(true).then(function () {
+      ['summary', 'report'].forEach(function (site) {
+        var sel = setEl(site, 'model'); sel.dataset.want = sel.value;
+        var ef = setEl(site, 'effort'); ef.dataset.want = ef.value;
+        fillModelSel(site);
+      });
+      document.getElementById('setMsg').textContent = '모델 목록 갱신됨';
+    }).finally(function () { btn.disabled = false; });
+  });
+  document.getElementById('setSave').addEventListener('click', function () {
+    var body = {};
+    SET_KEYS.forEach(function (k) {
+      var el = document.getElementById(setElId(k));
+      if (el) body['llm.' + k] = el.value.trim();
+    });
+    var btn = this, msg = document.getElementById('setMsg');
+    btn.disabled = true;
+    fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        msg.textContent = res.ok ? '저장됨 — 다음 요약/리포트 호출부터 적용' : '실패: ' + (res.j.detail || '오류');
+      })
+      .catch(function () { msg.textContent = '요청 실패'; })
+      .finally(function () { btn.disabled = false; });
+  });
 
   function renderAuto() {
     var rows = HIST.autoSessions || [];

@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import auth, db, state
+from . import auth, db, llm_meta, state
 from .config import CFG, REPO_ROOT
 
 app = FastAPI(title="MADISON", docs_url=None, redoc_url=None, openapi_url=None)
@@ -303,6 +303,80 @@ async def patch_handoff(request: Request, handoff_id: int):
     return {"ok": True}
 
 
+# ── 설정 (LLM 사용처별 provider/model/effort) ─────────
+# 대시보드 설정 탭에서 관리. settings 테이블 값이 .env 기본값을 덮는다.
+# provider는 이 프로젝트 전제(에이전트 CLI가 있는 기기)에 맞춰 claude/codex만.
+
+LLM_SITES = ("summary", "report")            # 요약 워커 · 업무 리포트
+LLM_SETTING_FIELDS = ("provider", "model", "effort")
+
+
+def _settings_all(c) -> dict:
+    return {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM settings")}
+
+
+def _llm_defaults(site: str) -> dict:
+    model = CFG.report_model if site == "report" else CFG.task_summary_model
+    return {"provider": "claude", "model": model, "effort": ""}
+
+
+def _llm_conf(site: str) -> dict:
+    """사이트별 실효 설정: settings 테이블 → 없으면 .env/기본값."""
+    with db.tx() as c:
+        stored = _settings_all(c)
+    conf = _llm_defaults(site)
+    for f in LLM_SETTING_FIELDS:
+        v = (stored.get(f"llm.{site}.{f}") or "").strip()
+        if v:
+            conf[f] = v
+    conf["claude_bin"] = (stored.get("llm.claude_bin") or "").strip() or CFG.task_summary_bin
+    conf["codex_bin"] = (stored.get("llm.codex_bin") or "").strip() or CFG.codex_bin
+    return conf
+
+
+@app.get("/api/settings")
+async def get_settings(request: Request):
+    _require(request, ("admin",))
+    with db.tx() as c:
+        stored = _settings_all(c)
+    out = {"stored": stored, "effective": {s: _llm_conf(s) for s in LLM_SITES},
+           "defaults": {s: _llm_defaults(s) for s in LLM_SITES}}
+    return out
+
+
+@app.get("/api/llm-models")
+async def llm_models(request: Request, provider: str = "claude", refresh: str = ""):
+    """설정 탭 모델 드롭다운 — CLI에서 계정별 모델 목록 조회 (1시간 캐시, refresh=1로 갱신)."""
+    _require(request, ("admin",))
+    if provider not in ("claude", "codex"):
+        raise HTTPException(400, "provider는 claude 또는 codex")
+    conf = _llm_conf("summary")  # bin 경로는 사이트 공통
+    bin_path = conf["claude_bin"] if provider == "claude" else conf["codex_bin"]
+    return llm_meta.get_models(provider, bin_path, refresh=refresh == "1")
+
+
+@app.post("/api/settings")
+async def save_settings(request: Request):
+    _require(request, ("admin",), state_change=True)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "객체 필요")
+    allowed = {f"llm.{s}.{f}" for s in LLM_SITES for f in LLM_SETTING_FIELDS}
+    allowed |= {"llm.claude_bin", "llm.codex_bin"}
+    with db.tx() as c:
+        for k, v in body.items():
+            if k not in allowed:
+                raise HTTPException(400, f"알 수 없는 설정 키: {k}")
+            v = str(v or "").strip()
+            if k.endswith(".provider") and v and v not in ("claude", "codex"):
+                raise HTTPException(400, "provider는 claude 또는 codex")
+            if v:
+                c.execute("INSERT INTO settings (key, value) VALUES (?,?)"
+                          " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+            else:  # 빈 값 = 기본값으로 복귀
+                c.execute("DELETE FROM settings WHERE key=?", (k,))
+    return {"ok": True}
+
 
 # ── 정적 서빙 ─────────────────────────────────────────
 
@@ -381,26 +455,52 @@ def _summarize_cached(prompt: str) -> str:
     return summary
 
 
-def _summarize_one(prompt: str) -> str:
+def _llm_cmd(site: str, prompt: str) -> list[str]:
+    """설정 탭의 provider/model/effort로 CLI 명령 구성 (claude -p / codex exec)."""
+    conf = _llm_conf(site)
+    if conf["provider"] == "codex":
+        cmd = [conf["codex_bin"], "exec", "--skip-git-repo-check"]  # 전용 cwd가 비-git이라 필요
+        if conf["model"]:
+            cmd += ["--model", conf["model"]]
+        if conf["effort"]:
+            cmd += ["-c", f'model_reasoning_effort="{conf["effort"]}"']
+        cmd.append(prompt)
+        return cmd
+    cmd = [conf["claude_bin"], "-p", prompt, "--output-format", "text"]
+    if conf["model"]:
+        cmd += ["--model", conf["model"]]
+    if conf["effort"]:
+        cmd += ["--effort", conf["effort"]]
+    return cmd
+
+
+def _llm_run(site: str, prompt: str, timeout: int) -> str:
+    """전용 cwd(비-git → 새어도 project='summarizer'로 자명) + 독립 프로세스 그룹
+    (허브 kickstart 재시작이 진행 중인 호출을 죽여 잔해를 남기지 않도록)."""
     try:
         SUMMARIZER_DIR.mkdir(parents=True, exist_ok=True)
-        # 전용 cwd(비-git → 새어도 project='summarizer'로 자명) + 독립 프로세스 그룹
-        # (허브 kickstart 재시작이 진행 중인 요약 프로세스를 죽여 잔해를 남기지 않도록)
+        cmd = _llm_cmd(site, prompt)
         out = subprocess.run(
-            [CFG.task_summary_bin, "-p", "--model", CFG.task_summary_model,
-             "아래는 AI 코딩 에이전트에게 준 지시문이다(길면 중간에 잘려 있을 수 있다)."
-             " 무슨 작업인지 한국어 한 문장(50자 이내)으로 요약하라."
-             " 잘림·불완전함에 대한 언급, 인사, 부연 설명 전부 금지 — 오직 요약 한 문장만 출력:"
-             f"\n\n{prompt}"],
-            capture_output=True, text=True, timeout=90,
+            cmd,
+            capture_output=True, text=True, timeout=timeout,
             cwd=str(SUMMARIZER_DIR), start_new_session=True,
-            env={**os.environ, "MADISON_SUPPRESS": "1"},
+            # CLI 디렉터리를 PATH 앞에 — launchd 최소 PATH에서 shebang(env node) 해석 실패 방지
+            env={**os.environ, "MADISON_SUPPRESS": "1",
+                 "PATH": os.path.dirname(cmd[0]) + os.pathsep + os.environ.get("PATH", "")},
         )
-        if out.returncode != 0:
-            return ""
-        return " ".join((out.stdout or "").split())[:90]
+        return (out.stdout or "").strip() if out.returncode == 0 else ""
     except Exception:
         return ""
+
+
+def _summarize_one(prompt: str) -> str:
+    out = _llm_run(
+        "summary",
+        "아래는 AI 코딩 에이전트에게 준 지시문이다(길면 중간에 잘려 있을 수 있다)."
+        " 무슨 작업인지 한국어 한 문장(50자 이내)으로 요약하라."
+        " 잘림·불완전함에 대한 언급, 인사, 부연 설명 전부 금지 — 오직 요약 한 문장만 출력:"
+        f"\n\n{prompt}", timeout=90)
+    return " ".join(out.split())[:90]
 
 
 def _summary_loop():
