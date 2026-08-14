@@ -49,7 +49,8 @@ push a piece of work from one machine to another without walking over to it.
 - **Session traceability** — every session id is one click away and can be resumed
   on its machine with `claude --resume <id>` or `codex resume <id>`.
 - **Handoff** — carry a task's context (git branch + a handoff doc) to another
-  machine; the target's SessionStart hook injects it so you can pick up where you left off.
+  machine; the target gets a desktop notification and every new session there is
+  briefed until you `/pickup` — in Claude Code or Codex, whichever you prefer.
 - **History** — devices, sessions, handoffs, and the raw event log, each
   filterable, behind tabs.
 - **Daily/weekly reports** — the hub condenses each period's work into a
@@ -161,8 +162,11 @@ Linux `install.sh` instead — that path is fully supported, not beta.
 ## Moving work between machines
 
 - **Handoff** (human continues): `/handoff <device>` commits a WIP branch, writes
-  a handoff doc, and queues it. When you open a session for that repo on the target
-  machine, its SessionStart hook injects the context. `/pickup` pulls it immediately.
+  a handoff doc, and queues it. The target machine shows a desktop notification
+  (within its 5-minute poll), and any new session for that repo — Claude Code or
+  Codex — is briefed at start. Nothing is consumed automatically: the handoff stays
+  *pending* until you approve starting it via `/pickup`, which marks it *delivered*
+  and, when the work is finished, *done*.
 
 ## Security model
 

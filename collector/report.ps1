@@ -43,7 +43,32 @@ function Flush-Spool {
     }
 }
 
+function Notify-Handoffs {
+    # 새 pending 핸드오프 → Windows 토스트 알림 (WinRT — 추가 모듈 불필요). 실패 무해.
+    try {
+        $stamp = Join-Path $MadDir "notified-handoffs"
+        $rows = Invoke-RestMethod -Uri "$($cfg.MADISON_URL)/api/handoffs?mine=1" -Headers $Headers -TimeoutSec 3
+        if (-not $rows) { return }
+        $seen = if (Test-Path $stamp) { @(Get-Content $stamp) } else { @() }
+        foreach ($h in @($rows)) {
+            if ("$($h.id)" -in $seen) { continue }
+            try {
+                [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(
+                    [Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+                $texts = $xml.GetElementsByTagName("text")
+                $texts.Item(0).AppendChild($xml.CreateTextNode("MADISON 핸드오프 도착 — $($h.from_name) → $($h.repo)")) | Out-Null
+                $texts.Item(1).AppendChild($xml.CreateTextNode("$($h.hf) $($h.summary) — /pickup으로 수령")) | Out-Null
+                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("MADISON").Show(
+                    [Windows.UI.Notifications.ToastNotification]::new($xml))
+            } catch {}
+            Add-Content $stamp "$($h.id)"
+        }
+    } catch {}
+}
+
 if ($EventName -eq "__flush") {
+    Notify-Handoffs
     if ($mutex.WaitOne(2000)) { try { Flush-Spool } finally { $mutex.ReleaseMutex() } }
     Bye
 }
