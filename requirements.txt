@@ -1,0 +1,5 @@
+# MADISON hub — runtime dependencies (Python 3.11+)
+fastapi>=0.110
+uvicorn>=0.29
+PyJWT>=2.8
+cryptography>=42
