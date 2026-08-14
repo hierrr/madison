@@ -195,7 +195,8 @@ else:
 config_path = hooks_path.with_name("config.toml")
 if config_path.exists():
     try:
-        if tomllib.loads(config_path.read_text()).get("hooks"):
+        # hooks.state는 Codex의 신뢰 해시 저장소일 뿐 훅 정의가 아니다 — 그 외 키가 있을 때만 안내
+        if any(k != "state" for k in tomllib.loads(config_path.read_text()).get("hooks", {})):
             print("[MADISON] 참고: config.toml inline hooks도 있어 Codex가 두 소스를 병합합니다")
     except tomllib.TOMLDecodeError:
         pass
