@@ -84,10 +84,34 @@ spool_flush() {  # 호출 전 락 획득 전제. rename-first로 동시(락 실�
   return 0
 }
 
+notify_handoffs() {  # 새 pending 핸드오프 → 데스크탑 알림 (macOS). 실패 무해 (§9)
+  [ "$(uname)" = "Darwin" ] || return 0
+  command -v osascript >/dev/null 2>&1 || return 0
+  local list stamp
+  stamp="$MAD_DIR/notified-handoffs"
+  list=$(curl -sS -m 3 -H "Authorization: Bearer $MADISON_TOKEN" \
+    "$MADISON_URL/api/handoffs?mine=1" 2>/dev/null) || return 0
+  printf '%s' "$list" | jq -e 'type=="array" and length>0' >/dev/null 2>&1 || return 0
+  touch "$stamp" 2>/dev/null
+  printf '%s' "$list" | jq -r '.[] |
+    "\(.id)\t\(.hf)\t\(.from_name // "다른 기기")\t\(.repo // "?")\t\((.summary // "요약 없음") | .[0:120])"' 2>/dev/null |
+  while IFS=$'\t' read -r hid hf from repo summary; do
+    [ -n "$hid" ] || continue
+    grep -qx "$hid" "$stamp" 2>/dev/null && continue
+    osascript -e 'on run argv
+      display notification (item 2 of argv) with title "MADISON 핸드오프 도착" subtitle (item 1 of argv)
+    end run' -- "$from → $repo" "$hf $summary — /pickup으로 수령" >/dev/null 2>&1
+    printf '%s\n' "$hid" >> "$stamp" 2>/dev/null
+  done
+  return 0
+}
+
 # ── flush 전용 모드 (flush.sh/launchd 플러셔가 호출) ────
 if [ "$EV" = "__flush" ]; then
-  [ -s "$SPOOL" ] || exit 0
-  if lock_acquire; then spool_flush; lock_release; fi
+  notify_handoffs
+  if [ -s "$SPOOL" ]; then
+    if lock_acquire; then spool_flush; lock_release; fi
+  fi
   exit 0
 fi
 

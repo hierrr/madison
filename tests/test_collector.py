@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -133,6 +134,37 @@ class CollectorTests(unittest.TestCase):
             self.assertIn("HF-007", proc.stdout)
             self.assertIn("/pickup", proc.stdout)
             self.assertNotIn("PATCH", log.read_text())
+
+    @unittest.skipUnless(sys.platform == "darwin", "osascript 알림은 macOS 전용")
+    def test_flush_notifies_new_handoffs_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            notified = root / "notify.log"
+            executable(
+                bindir / "osascript",
+                # 호출당 1줄만 남긴다 — 마지막 인자가 알림 본문
+                "#!/bin/bash\n"
+                "for last in \"$@\"; do :; done\n"
+                "printf '%s\\n' \"$last\" >> \"${MADISON_TEST_NOTIFY:-/dev/null}\"\n",
+            )
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
+                "MADISON_TEST_NOTIFY": str(notified),
+                "MADISON_TEST_HANDOFFS": json.dumps([{
+                    "id": 3, "hf": "HF-003", "from_name": "studio", "repo": "madison",
+                    "summary": "알림 테스트",
+                }]),
+            })
+            for _ in range(2):
+                subprocess.run(["bash", str(REPORT), "__flush"],
+                               env=env, cwd=REPO, check=True, capture_output=True, text=True)
+            lines = [line for line in notified.read_text().splitlines() if line]
+            self.assertEqual(len(lines), 1)
+            self.assertIn("HF-003", lines[0])
+            self.assertEqual((mad / "notified-handoffs").read_text().strip(), "3")
 
     def test_installer_merges_hooks_and_repairs_old_notify(self):
         with tempfile.TemporaryDirectory() as tmp:
