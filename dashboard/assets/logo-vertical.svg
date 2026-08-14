@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 640">
+  <!-- MADISON 수직 락업 v2 ("Logo Combined") — 원본: design/logo.pen. 배경 투명(원본 프레임 bg: 라이트 #F6F9FF / 다크 #0A0F1E) -->
+  <style>
+    .teal    { --c: #00A9C4; } .tealdeep{ --c: #007F94; } .blue  { --c: #2E62D9; }
+    .violet  { --c: #6A44E0; } .purple  { --c: #9C2FD6; } .gold  { --c: #E8A70C; }
+    .coral   { --c: #E83A72; } .slate   { --c: #B9C6DD; }
+    .g-teal  { --g: #00A9C42E; } .g-deep { --g: #007F9430; } .g-blue { --g: #2E62D938; }
+    .g-violet{ --g: #6A44E030; } .g-purple{ --g: #9C2FD630; } .g-gold { --g: #E8A70C30; }
+    .g-coral { --g: #E83A7230; }
+    @media (prefers-color-scheme: dark) {
+      .teal    { --c: #00E5FF; } .tealdeep{ --c: #00B3C6; } .blue  { --c: #3D7BFF; }
+      .violet  { --c: #8A5CFF; } .purple  { --c: #C44BFF; } .gold  { --c: #FFD60A; }
+      .coral   { --c: #FF4D8D; } .slate   { --c: #46587E; }
+      .g-teal  { --g: #00E5FF55; } .g-deep { --g: #00B3C666; } .g-blue { --g: #3D7BFF77; }
+      .g-violet{ --g: #8A5CFF66; } .g-purple{ --g: #C44BFF66; } .g-gold { --g: #FFD60A55; }
+      .g-coral { --g: #FF4D8D55; }
+    }
+    stop  { stop-color: var(--c); }
+    .nd   { fill: var(--c); }
+    .glow { filter: drop-shadow(0 0 var(--r, 7px) var(--g)); }
+    .word {
+      font-family: Montserrat, "Avenir Next", "Segoe UI", system-ui, sans-serif;
+      font-size: 56px; font-weight: 600; letter-spacing: 22px;
+    }
+  </style>
+  <defs>
+    <linearGradient id="hex"  gradientUnits="userSpaceOnUse" x1="400" y1="480" x2="400" y2="24">
+      <stop offset="0" class="purple"/><stop offset="1" class="teal"/>
+    </linearGradient>
+    <linearGradient id="blTl" gradientUnits="userSpaceOnUse" x1="270.1" y1="327" x2="270.1" y2="177">
+      <stop offset="0" class="tealdeep"/><stop offset="1" class="teal"/>
+    </linearGradient>
+    <linearGradient id="cTl"  gradientUnits="userSpaceOnUse" x1="270.1" y1="177" x2="400" y2="252">
+      <stop offset="0" class="teal"/><stop offset="1" class="blue"/>
+    </linearGradient>
+    <linearGradient id="cTr"  gradientUnits="userSpaceOnUse" x1="400" y1="252" x2="529.9" y2="177">
+      <stop offset="0" class="blue"/><stop offset="1" class="violet"/>
+    </linearGradient>
+    <linearGradient id="trBr" gradientUnits="userSpaceOnUse" x1="529.9" y1="327" x2="529.9" y2="177">
+      <stop offset="0" class="purple"/><stop offset="1" class="violet"/>
+    </linearGradient>
+    <linearGradient id="word" gradientUnits="userSpaceOnUse" x1="145" y1="574" x2="655" y2="574">
+      <stop offset="0" class="teal"/><stop offset="1" class="purple"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(160, 22)">
+    <path class="glow g-teal" style="--r:14px"
+          d="M240 2 437.4 116 437.4 344 240 458 42.6 344 42.6 116Z"
+          fill="none" stroke="url(#hex)" stroke-width="14" stroke-linejoin="round"/>
+    <g class="slate" fill="none" stroke-width="5" stroke-linecap="round" style="stroke: var(--c)">
+      <path d="M240 80 369.9 155"/><path d="M369.9 305 240 380"/>
+      <path d="M240 380 110.1 305"/><path d="M110.1 155 240 80"/>
+      <path d="M240 230 240 80"/><path d="M240 230 369.9 305"/>
+      <path d="M240 230 240 380"/><path d="M240 230 110.1 305"/>
+    </g>
+    <path class="glow g-teal"   d="M110.1 305 110.1 155" fill="none" stroke="url(#blTl)" stroke-width="10" stroke-linecap="round"/>
+    <path class="glow g-teal"   d="M110.1 155 240 230"   fill="none" stroke="url(#cTl)"  stroke-width="10" stroke-linecap="round"/>
+    <path class="glow g-blue"   d="M240 230 369.9 155"   fill="none" stroke="url(#cTr)"  stroke-width="10" stroke-linecap="round"/>
+    <path class="glow g-purple" d="M369.9 305 369.9 155" fill="none" stroke="url(#trBr)" stroke-width="10" stroke-linecap="round"/>
+    <circle class="nd gold glow g-gold"     cx="240"   cy="80"  r="20"/>
+    <circle class="nd violet glow g-violet" style="--r:8px" cx="369.9" cy="155" r="24"/>
+    <circle class="nd purple glow g-purple" style="--r:8px" cx="369.9" cy="305" r="24"/>
+    <circle class="nd coral glow g-coral"   cx="240"   cy="380" r="20"/>
+    <circle class="nd tealdeep glow g-deep" style="--r:8px" cx="110.1" cy="305" r="24"/>
+    <circle class="nd teal glow g-teal"     style="--r:8px" cx="110.1" cy="155" r="24"/>
+    <circle class="nd blue glow g-blue"     style="--r:11px" cx="240"   cy="230" r="32"/>
+  </g>
+
+  <text class="word glow g-teal" style="--r:9px" x="411" y="592" text-anchor="middle"
+        fill="url(#word)">MADISON</text>
+</svg>
