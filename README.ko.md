@@ -132,11 +132,12 @@ SSO로 보호하고, 기계용 API 호스트는 기기별 토큰으로 인증하
 ```bash
 curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
   --name studio --secret <ENROLL_SECRET> --hub https://madison-api.example.com
-# Codex도 쓰는 기기면 --with-codex 추가
+# Claude Code + Codex 수집이 모두 기본 — Codex를 빼려면 --no-codex
 ```
 
-이 명령은 기기를 등록하고(토큰은 서버에 해시로만 저장), 전역 훅을 설치하며(이미 있는 훅과는
-병합), 스풀 플러셔를 등록합니다. 이미 열려 있던 세션은 다시 시작해야 훅이 먹습니다. 기기를
+이 명령은 기기를 등록하고(토큰은 서버에 해시로만 저장), Claude Code 전역 훅을 설치하며
+(CLI·데스크탑앱·IDE 세션 공통, 이미 있는 훅과는 병합), `~/.codex/config.toml`이 있으면
+Codex `notify`도 체이닝하고, 스풀 플러셔를 등록합니다. 이미 열려 있던 세션은 다시 시작해야 훅이 먹습니다. 기기를
 전부 등록하고 나면 `ENROLL_SECRET`은 로테이트하세요.
 
 ### Windows (베타)
@@ -179,7 +180,7 @@ rm -f ~/Library/LaunchAgents/dev.madison.*.plist
 rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 
 # 3. 훅·Codex 설정을 설치 시 만든 백업으로 복원
-#    (settings.json.bak-madison-*, --with-codex를 썼다면 config.toml.bak-madison-*)
+#    (settings.json.bak-madison-*, Codex를 구성했다면 config.toml.bak-madison-*)
 #    또는 ~/.claude/settings.json에서 MADISON 훅 항목을 직접 지웁니다.
 ```
 

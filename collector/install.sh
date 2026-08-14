@@ -1,19 +1,21 @@
 #!/bin/bash
 # MADISON collector 설치 — 멱등 (IMPLEMENTATION.md §8.3)
 # 사용: curl -fsSL https://madison-api.example.com/install.sh | bash -s -- --name studio --secret <등록암호>
-# 옵션: --hub <URL> (허브 기기 자신은 http://127.0.0.1:8787), --with-codex
+# 옵션: --hub <URL> (허브 기기 자신은 http://127.0.0.1:8787), --no-codex (Codex 수집 제외)
+# Claude Code(CLI·데스크탑앱 공통 전역 훅)와 Codex(notify 체이닝) 수집이 모두 기본이다.
 set -euo pipefail
 
 HUB="https://madison-api.example.com"
 NAME=""
 SECRET="${MADISON_ENROLL_SECRET:-}"
-WITH_CODEX=0
+WITH_CODEX=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
     --secret) SECRET="$2"; shift 2 ;;
     --hub) HUB="$2"; shift 2 ;;
-    --with-codex) WITH_CODEX=1; shift ;;
+    --with-codex) WITH_CODEX=1; shift ;;   # 하위호환 — 이제 기본값
+    --no-codex) WITH_CODEX=0; shift ;;
     *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
   esac
 done
@@ -128,7 +130,10 @@ EOF
   note "스풀 플러셔 등록 (dev.madison.flush, 5분 주기)"
 fi
 
-# ── 5) Codex 수집 (옵션) ──
+# ── 5) Codex 수집 (기본 — --no-codex로 제외) ──
+if [ "$WITH_CODEX" = "1" ] && [ ! -f "$HOME/.codex/config.toml" ]; then
+  note "Codex 설정(~/.codex/config.toml) 없음 — Codex 수집 건너뜀 (Codex 로그인 후 재실행하면 자동 구성)"
+fi
 if [ "$WITH_CODEX" = "1" ] && [ -f "$HOME/.codex/config.toml" ]; then
   fetch codex-notify-wrapper.sh "$MAD_DIR/codex-notify-wrapper.sh"
   fetch codex-watch.sh "$MAD_DIR/bin/madison-codex-watch"

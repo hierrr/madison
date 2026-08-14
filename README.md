@@ -138,11 +138,13 @@ that machine's agent to run it for you:
 ```bash
 curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
   --name studio --secret <ENROLL_SECRET> --hub https://madison-api.example.com
-# add --with-codex on machines that also run Codex
+# Claude Code + Codex collection are both on by default; pass --no-codex to skip Codex
 ```
 
 This registers the device (a long-lived token, hashed on the server), installs the
-global hooks (merging with any you already have), and schedules the spool flusher.
+global Claude Code hooks (covering CLI, desktop app, and IDE sessions alike — merged
+with any hooks you already have), chains the Codex `notify` program when
+`~/.codex/config.toml` exists, and schedules the spool flusher.
 Restart any already-open sessions so the hooks take effect. Rotate `ENROLL_SECRET`
 once the whole fleet is enrolled.
 
@@ -188,7 +190,7 @@ rm -f ~/Library/LaunchAgents/dev.madison.*.plist
 rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 
 # 3. Restore hooks and Codex config from the backups the installer made
-#    (settings.json.bak-madison-* and, if --with-codex was used, config.toml.bak-madison-*)
+#    (settings.json.bak-madison-* and, if Codex was configured, config.toml.bak-madison-*)
 #    or delete the MADISON hook entries from ~/.claude/settings.json by hand.
 ```
 
