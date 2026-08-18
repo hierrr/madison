@@ -48,12 +48,16 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
 - **세션 추적** — 모든 세션의 id를 바로 볼 수 있고, 그 기기에서 `claude --resume <id>`
   또는 `codex resume <id>`로 이어서 열 수 있습니다.
 - **핸드오프** — 작업 맥락(핸드오프 문서 + 변경 diff)을 허브가 직접 날라 커밋·push 없이
-  다른 기기로 넘깁니다. 그 기기에 데스크탑 알림이 뜨고 새 세션마다 안내가 주입되며,
-  Claude Code든 Codex든 원하는 쪽에서 `/pickup`으로 이어받습니다.
+  다른 기기로 넘깁니다. 그 기기에 데스크탑 알림(macOS)이 뜨고 새 세션마다 안내가
+  주입되며, Claude Code든 Codex든 원하는 쪽에서 `/pickup`으로 이어받습니다.
 - **히스토리** — 기기·세션·핸드오프·이벤트 원장을 탭마다 필터링해 볼 수 있습니다.
 - **일일/주간 리포트** — 허브가 기간별 작업을 업무일지 스타일 마크다운(서비스별
-  묶음·중첩 불릿)으로 정리해 노션에 붙여넣을 수 있고, 사용 메트릭(턴·세션·활동
-  시간·스트릭 잔디)도 함께 보여줍니다.
+  묶음·중첩 불릿)으로 정리해 노션에 붙여넣을 수 있습니다. 주기 자동 갱신에 수동
+  갱신도 되고, 사용 메트릭(턴·세션·활동 시간·프로젝트별/시간대 분포·16주 스트릭
+  잔디)도 함께 보여줍니다.
+- **허브 LLM 선택** — 설정 탭에서 태스크 요약과 리포트 생성 각각의 프로바이더
+  (Claude Code/Codex)·모델·추론 강도를 고를 수 있고, 모델 목록은 허브에 설치된
+  CLI에서 그대로 불러옵니다.
 - **에이전트·실행 경로 구분** — `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` / `CODEX APP`
   세션을 가려서 보여 주고, 자동화(cron·launchd의 headless 실행) 세션은 전용 탭으로 분리합니다.
 - **로컬 우선, 메타데이터만** — 특정 벤더의 원격·클라우드 세션 인프라에 기대지 않습니다.
@@ -118,8 +122,22 @@ cp .env.example .env      # 편집: ENROLL_SECRET 설정, 터널로 노출할 �
 ```
 
 허브는 `127.0.0.1:8787`에서 대기합니다. 같은 기기에서는 <http://127.0.0.1:8787>로 엽니다.
-다른 기기에서 접근하려면 터널(예: Cloudflare Tunnel) 뒤에 둡니다. 사람용 대시보드 호스트는
-SSO로 보호하고, 기계용 API 호스트는 기기별 토큰으로 인증하는 식입니다. `.env.example`을 참고하세요.
+다른 기기에서 접근하는 구성은 두 갈래입니다:
+
+- **터널** (외부 접근): 허브를 터널 뒤에 둡니다 — 예: Cloudflare Tunnel. `.env`의
+  호스트명과 `CF_ACCESS_*` 키가 이 구성용입니다. 사람용 대시보드 호스트는 SSO로
+  보호하고, 기계용 API 호스트는 기기별 토큰으로 인증하는 식입니다. `.env.example`을
+  참고하세요.
+- **내부망 전용** (터널 없음): `HOST=0.0.0.0`으로 열고 터널 키는 비워둡니다. 수집기는
+  기기 토큰을 들고 `http://<허브IP>:8787`로 직접 보고하고, 온보딩도
+  `--hub http://<허브IP>:8787`로 하면 됩니다. 대시보드는 평범한 LAN 요청에는 닫혀
+  있으니(401이 정상) 허브 기기에서 열거나, 다른 기기에서는 SSH 포트포워딩
+  (`ssh -L 8787:127.0.0.1:8787 허브` 후 <http://127.0.0.1:8787>)으로 엽니다 — 허브에는
+  루프백 연결로 보여 관리자가 됩니다. 평문 HTTP이므로 신뢰할 수 있는 망에서만 쓰고,
+  필요하면 `IP_ALLOWLIST`로 기기 토큰을 IP에 추가로 묶을 수 있습니다.
+
+어느 쪽이든 프로세스와 포트는 하나이며, 역할 구분은 경로가 아니라 요청에 실린
+자격증명(기기 토큰 vs 관리자)으로 이뤄집니다.
 
 상주 서비스로 돌리려면 `scripts/launchd/madison-hub` 스텁을 LaunchAgent 잡으로 등록하세요
 (이 스텁이 `scripts/_launchd_wrapper.sh` → venv를 exec합니다. 스텁 파일명이 곧 로그인 항목의
@@ -156,7 +174,7 @@ macOS 수집기보다 기능이 뒤처지는** 베타입니다. 쓰는 방식은
 - **핸드오프**(사람이 이어받음): `/handoff <기기>`가 핸드오프 문서를 쓰고 미커밋 변경의
   diff(스태시·서브모듈 포함)를 떠서 허브 큐에 함께 올립니다 — 커밋·push가 필요 없습니다.
   미push 커밋 위의 작업, 상한 초과, 바이너리 변경만 `wip/` 브랜치 push로 폴백합니다.
-  대상 기기에는 데스크탑 알림(5분 폴링)이 가고, 그 리포의 새 세션마다 — Claude Code든
+  대상 기기에는 데스크탑 알림(macOS, 5분 폴링)이 가고, 그 리포의 새 세션마다 — Claude Code든
   Codex든 — 시작 시 안내가 주입됩니다. 자동으로 소비되는 것은 없습니다: 사용자가
   `/pickup`으로 착수를 승인할 때까지 *대기 중*으로 남고, 착수 시 diff를 적용(`git apply -3`)
   하며 *수신됨*, 작업이 끝나면 *완료*가 됩니다.
@@ -173,8 +191,10 @@ macOS 수집기보다 기능이 뒤처지는** 베타입니다. 쓰는 방식은
   않습니다. 터널 뒤에서 프록시된 인터넷 요청이 로컬인 척하지 못하도록 CF 헤더를 확인합니다.
 - **상태를 바꾸는 엔드포인트에는 CSRF 방어**(`Sec-Fetch-Site`)를 걸어, 허브 기기에서 열려
   있는 아무 웹페이지가 디스패처를 건드리지 못하게 했습니다.
-- 대시보드는 당신의 SSO(예: Cloudflare Access) 뒤에 두는 것을 전제로 하고, API 호스트는 기기를
-  토큰으로 인증합니다.
+- **관리자(대시보드) 접근**은 허브 기기의 루프백 연결 — SSH 포트포워딩이 이 경로입니다 —
+  과 검증된 Cloudflare Access JWT에 열려 있습니다. 허브 기기 위에 자체 인증 리버스
+  프록시를 얹는 세 번째 경로도 됩니다 — 허브가 루프백을 신뢰하므로 로그인은 프록시가
+  책임져야 합니다. API 쪽은 전송로와 무관하게 언제나 기기 토큰으로 인증합니다.
 
 ## 제거
 
@@ -185,8 +205,9 @@ macOS 수집기보다 기능이 뒤처지는** 베타입니다. 쓰는 방식은
 launchctl bootout "gui/$(id -u)/dev.madison.flush" 2>/dev/null
 rm -f ~/Library/LaunchAgents/dev.madison.*.plist
 
-# 2. 수집기·스킬 제거
-rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
+# 2. 수집기·스킬 제거 (Claude Code·Codex 양쪽)
+rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
+       ~/.codex/skills/handoff ~/.codex/skills/pickup
 
 # 3. 훅 설정을 설치 시 만든 백업으로 복원
 #    (settings.json.bak-madison-*, hooks.json.bak-madison-*, 구형 수집을 옮겼다면 config.toml 백업)
@@ -202,15 +223,22 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 | `HOST` / `PORT` | `127.0.0.1` / `8787` | 허브 바인드 주소 |
 | `DB_PATH` | `data/madison.db` | SQLite 파일 |
 | `ENROLL_SECRET` | — | 기기 등록용 공유 시크릿; 온보딩 후 비우거나 로테이트 |
-| `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | 터널 호스트명(사람용 vs 기계용) |
-| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | 대시보드용 Cloudflare Access JWT 검증 |
+| `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | 터널 구성 전용 — 사람용/기계용 호스트명 (허브 코드는 `API_HOST`만 검사해 그 호스트를 `/api/*`·설치 경로로 제한) |
+| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | 터널 구성 전용 — 대시보드용 Cloudflare Access JWT 검증. 내부망 전용이면 비워둠 |
 | `TTL_STALE_MIN` | `15` | 작업 중 세션이 *끊김 의심*이 되기까지의 무신호 분 |
 | `DEVICE_ONLINE_MIN` | `10` | 이 분 이내 신호가 있으면 기기를 온라인으로 |
 | `ENDED_HIDE_HOURS` | `24` | 종료 세션이 현황에서 사라지기까지의 시간 |
 | `EVENT_RETENTION_DAYS` | `90` | 이벤트 로그 보존 |
-| `TASK_SUMMARY` | `1` | 허브의 한 줄 요약 — 허브 기기에 `claude` CLI 필요(없으면 원문 발췌로 대체) |
-| `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | 요약 워커가 호출하는 모델·바이너리 |
+| `TASK_SUMMARY` | `1` | 허브의 한 줄 요약 — 허브 기기에 선택한 프로바이더의 CLI 필요(없으면 원문 발췌로 대체) |
+| `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | 요약 워커가 호출하는 모델·`claude` 바이너리 |
+| `CODEX_BIN` | 자동 탐색 | 프로바이더를 Codex로 고를 때 쓰는 `codex` 바이너리 (PATH → 최신 nvm 설치본 순) |
+| `REPORT` | `1` | 일일/주간 업무 리포트 |
+| `REPORT_MODEL` | `claude-sonnet-5` | 리포트 생성 모델 |
+| `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` | `90` / `360` | 일일/주간 리포트 자동 갱신 주기(분) |
 | `IP_ALLOWLIST` | *(off)* | 선택 — 기기 보고를 제한하는 `이름:ip` 목록 |
+
+프로바이더·모델·추론 강도·CLI 경로 같은 LLM 관련 값은 대시보드 **설정** 탭에서도
+바꿀 수 있습니다. 거기서 저장한 값은 허브에 보관되며 `.env` 기본값보다 우선합니다.
 
 ## 저장소 구조
 
@@ -220,6 +248,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
 | `dashboard/` | 단일 HTML 대시보드 + 로고 자산 |
 | `collector/` | 기기 쪽 전부 — Claude/Codex 훅·`report.sh`·멱등 설치 스크립트·`/handoff`·`/pickup` 스킬·Windows 베타 |
 | `scripts/` | launchd 스텁 (표준 패턴) |
+| `tests/` | 허브 상태 폴드·수집기 회귀 테스트 |
 | `assets/` | 프로젝트 로고 |
 
 ## 상태
