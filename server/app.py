@@ -609,7 +609,7 @@ def _gen_report(range_: str, day: str) -> dict:
             with db.tx() as c:
                 work = report.gather(c, range_, day)
             if not work:
-                md = "_이 기간에 기록된 작업이 없습니다._"
+                md = "이 기간에 기록된 작업이 없습니다."
             else:
                 md = _report_llm(report.build_prompt(range_, day, work)) or report.fallback_md(work)
             gen_at = state.utcnow()

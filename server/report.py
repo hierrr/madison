@@ -27,9 +27,9 @@ def gather(c, range_, day):
     지시 없거나 요약 없는 프로젝트는 제외."""
     pred = _pred(range_)
     rows = c.execute(
-        f"SELECT project, event, session_id, device_id, payload FROM events"
+        f"SELECT project, event, session_id, device_id, payload FROM events e"
         f" WHERE event IN ('prompt','turn_done') AND COALESCE(project,'') NOT IN ('','summarizer')"
-        f"   AND {pred} ORDER BY project, ts_hub", _params(range_, day)).fetchall()
+        f"   AND {pred} AND {NOT_AUTO} ORDER BY project, ts_hub", _params(range_, day)).fetchall()
     proj = {}
     for r in rows:
         d = proj.setdefault(r["project"], {"prompts": [], "sums": [], "turns": 0, "sess": set()})
@@ -107,11 +107,12 @@ def fallback_md(work):
     for p, v in work.items():
         out.append(f"- {p}")
         out += ["    - " + x[:100] for x in (v["sums"] or v["prompts"])[:6]]
-    return "\n".join(out).strip() or "_이 기간에 기록된 작업이 없습니다._"
+    return "\n".join(out).strip() or "이 기간에 기록된 작업이 없습니다."
 
 
 # 자동화(frontend='auto') 세션의 이벤트 제외 — 상시 감시 잡(phdkim-regular 등)이 수치를 압도해
-# 사람 작업 메트릭이 무의미해지는 것을 방지. 리포트 본문(gather)에는 포함(모니터링도 한 일).
+# 사람 작업 메트릭이 무의미해지는 것을 방지. 리포트 본문(gather)에서도 제외한다(2026-08-18 사용자 결정
+# — 반복 자동화는 업무일지에 쓸 내용이 아님).
 NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id"
             " AND s.agent=e.agent AND s.session_id=e.session_id AND s.frontend='auto')")
 
