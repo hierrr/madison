@@ -75,7 +75,7 @@
   /* ── top bar ── */
   /* 탑바: 로고 · 태그라인 · 기기/세션 스탯 · 싱크 — 너비에 따라 순서대로 줄바꿈 */
   .topbar { display: flex; align-items: center; gap: 10px 20px; flex-wrap: wrap; margin-bottom: 20px; }
-  .brand { display: flex; align-items: center; gap: 10px; flex: none; }
+  .brand { display: flex; align-items: center; gap: 10px; flex: none; cursor: pointer; }
   /* logo.pen "Logo Horizontal" 락업 통짜 사용 (태그라인은 푸터에) */
   .brand .lockup { height: 42px; width: auto; display: block; }
   .lockup .lk-word {
@@ -822,7 +822,7 @@
         }).join('')
       : '<li class="none" style="border:none;background:none">지금 나를 기다리는 세션 없음 ✓</li>';
 
-    // 핸드오프 — 활성(대기/수신)만 카운트, 끝난 건(완료/취소)은 흐리게 표시 후 24시간 뒤 자동 제거
+    // 핸드오프 — 현황엔 활성(대기/수신)만 표시. 완료/취소는 히스토리 핸드오프 탭에서 (2026-08-18 사용자 결정)
     var hfs = st.handoffs;
     document.getElementById('hfCount').textContent =
       hfs.filter(function (h) { return h.status === 'pending' || h.status === 'delivered'; }).length;
@@ -1047,6 +1047,8 @@
     var t = e.target.closest('.tab');
     if (t) setView(t.dataset.view);
   });
+  // 로고 클릭 = 현황으로
+  document.querySelector('.brand').addEventListener('click', function () { setView('main'); });
 
   function getJSON(url) {
     return fetch(url, { cache: 'no-store' }).then(function (r) {

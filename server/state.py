@@ -234,7 +234,6 @@ def assemble(c) -> dict:
         " LEFT JOIN devices fd ON fd.id = h.from_device"
         " JOIN devices td ON td.id = h.to_device"
         " WHERE h.status IN ('pending','delivered')"
-        "    OR h.created_at >= datetime('now','-1 day')"
         " ORDER BY h.id DESC LIMIT 10"):
         handoffs.append({
             "id": h["id"], "hf": f"HF-{h['id']:03d}",
