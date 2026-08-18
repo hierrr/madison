@@ -314,6 +314,10 @@
   .hfrepo { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); margin-top: 4px; }
   .hf p { margin: 3px 0 4px; font-size: 12.5px; color: var(--ink-2); }
   .hfmeta { font-size: 11px; color: var(--ink-3); }
+  .hfdoc summary { font-size: 11px; color: var(--ink-3); cursor: pointer; margin-top: 4px; }
+  .hfdoc pre { white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto;
+    font-size: 11px; margin: 4px 0 0; padding: 6px 8px; background: var(--surface-2);
+    border: 1px solid var(--line); border-radius: 6px; }
   /* ── 설정 탭 ── */
   .set-note { font-size: 12px; color: var(--ink-3); margin: 0 0 12px; }
   .set-grid { display: flex; gap: 22px; flex-wrap: wrap; }
@@ -1158,7 +1162,8 @@
       return '<tr><td class="mono dim">#' + h.id + '</td>' +
         '<td class="mono">' + esc(h.from_name || '?') + ' → ' + esc(h.to_name || '?') + '</td>' +
         '<td class="mono">' + esc(h.repo) + (h.branch ? ' <span class="dim">⎇ ' + esc(h.branch) + '</span>' : '') + '</td>' +
-        '<td class="wrapcell">' + esc(h.summary || '') + '</td>' +
+        '<td class="wrapcell">' + esc(h.summary || '') +
+          (h.doc ? '<details class="hfdoc"><summary>문서 보기</summary><pre>' + esc(h.doc) + '</pre></details>' : '') + '</td>' +
         '<td>' + sdot(HANDOFF_DOT[h.status] || 's-end') + esc(label) + '</td>' +
         '<td class="mono dim">' + fmtTs(h.created_at) + (h.delivered_at ? ' → ' + fmtTs(h.delivered_at) : '') + '</td></tr>';
     });

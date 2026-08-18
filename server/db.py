@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS handoffs (
   from_device INTEGER, to_device INTEGER NOT NULL,
   repo TEXT NOT NULL, origin TEXT, branch TEXT, doc_path TEXT,
   summary TEXT,
+  doc TEXT,               -- 핸드오프 문서 본문 (허브 운반 — 64KB 상한은 API에서)
+  patches TEXT,           -- JSON [{repo, base, diff}] (1MB 상한은 API에서)
   status TEXT DEFAULT 'pending',
   created_at TEXT, delivered_at TEXT
 );
@@ -87,7 +89,9 @@ def conn() -> sqlite3.Connection:
                     "ALTER TABLE sessions ADD COLUMN model TEXT",
                     "ALTER TABLE sessions ADD COLUMN effort TEXT",
                     "ALTER TABLE sessions ADD COLUMN frontend TEXT",
-                    "ALTER TABLE sessions ADD COLUMN collection_mode TEXT"):
+                    "ALTER TABLE sessions ADD COLUMN collection_mode TEXT",
+                    "ALTER TABLE handoffs ADD COLUMN doc TEXT",
+                    "ALTER TABLE handoffs ADD COLUMN patches TEXT"):
             try:
                 _conn.execute(ddl)
             except sqlite3.OperationalError:

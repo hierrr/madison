@@ -333,7 +333,7 @@ if [ "$EV" = "session_start" ]; then
         # 그래서 픽업 전까지는 새 세션마다(에이전트 무관) 같은 안내가 반복 주입된다.
         printf '%s' "$HLIST" | jq -r '.[] |
           "[MADISON] \(.from_name // "다른 기기")발 핸드오프 \(.hf) 대기 중: \(.summary // "요약 없음") " +
-          "(브랜치 \(.branch // "?"), 문서 \(.doc_path // "?")). " +
+          "(리포 \(.repo // "?"), 브랜치 \(.branch // "?")). " +
           "이어받을지 사용자에게 확인하고, 승인하면 pickup 스킬(/pickup) 절차로 진행하세요."' 2>/dev/null
       fi
       ;;

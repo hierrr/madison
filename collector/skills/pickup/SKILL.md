@@ -1,6 +1,6 @@
 ---
 name: pickup
-description: 이 기기로 온 MADISON 핸드오프를 지금 즉시 가져와 이어서 작업한다 — 대기 중인 핸드오프 조회, 브랜치 체크아웃, 핸드오프 문서 낭독, 진행 계획 제시. 사용법 /pickup.
+description: 이 기기로 온 MADISON 핸드오프를 지금 즉시 가져와 이어서 작업한다 — 대기 중인 핸드오프 조회, 문서 낭독, 사용자 승인 시 patch 적용·착수. 사용법 /pickup.
 ---
 
 # /pickup — 핸드오프 즉시 수령
@@ -19,14 +19,18 @@ description: 이 기기로 온 MADISON 핸드오프를 지금 즉시 가져와 �
      "$MADISON_URL/api/handoffs?mine=1${REPO:+&repo=$REPO}"
    ```
    - 비어 있으면: 리포 필터 없이 한 번 더 조회해 다른 리포 대상 건이 있는지 알려주고 종료.
-3. **내용 확인** (상태 변경·체크아웃 없이): 가져온 각 건에 대해
-   - 해당 리포가 아니면 그 리포 디렉터리로 이동(없으면 clone 여부를 사용자에게 확인).
-   - `git fetch origin <branch>` 후 `git show origin/<branch>:<doc_path>` 로 핸드오프 문서를 읽고
-     **목표/완료/미완/주의/다음 단계를 요약해 사용자에게 보고**한다.
+3. **내용 확인** (상태 변경·워킹트리 부작용 없음): 가져온 각 건에 대해
+   - 응답의 `doc`(핸드오프 문서 본문)을 읽고 **목표/완료/미완/주의/다음 단계를 요약해 사용자에게 보고**한다.
+   - `patches`(JSON 문자열 — `[{repo, base, diff}]`)가 있으면 리포별 대상·기준 커밋·diff 크기를 함께 알린다.
+   - 구버전 건(doc 없음, doc_path만 있음)은 `git fetch` 후 `git show origin/<branch>:<doc_path>`로 읽는다.
    - 이 단계에서는 허브 상태를 바꾸지 않는다 — pending으로 남아 다른 세션·기기에서도 계속 보인다.
 4. **착수 = 수신 처리**: 문서의 "다음 단계"를 기준으로 진행 계획을 제시하고 사용자 확인을 받는다.
-   - 사용자가 착수를 지시한 **그 시점에** `git checkout <branch> && git pull` 로 브랜치를 맞추고,
-     `curl -sS -m 5 -H "Authorization: Bearer $MADISON_TOKEN" -H 'Content-Type: application/json' -X PATCH "$MADISON_URL/api/handoffs/<id>" --data-binary '{"status":"delivered"}'`
+   사용자가 착수를 지시한 **그 시점에**:
+   - 해당 리포 디렉터리로 이동(없으면 clone 여부를 사용자에게 확인) 후 `git fetch`,
+     핸드오프의 branch로 `git checkout <branch> && git pull`.
+   - patches 각 항목에 대해: 기준 커밋 존재 확인(`git cat-file -e <base>` — 없으면 fetch 후 재시도),
+     diff를 임시 파일로 저장해 해당 리포에서 `git apply -3 <파일>` (3-way). 실패하면 중단하고 충돌 상황을 사용자에게 보고.
+   - `curl -sS -m 5 -H "Authorization: Bearer $MADISON_TOKEN" -H 'Content-Type: application/json' -X PATCH "$MADISON_URL/api/handoffs/<id>" --data-binary '{"status":"delivered"}'`
      로 수신됨을 표시한 뒤 작업을 시작한다.
    - 사용자가 보류하면 아무것도 바꾸지 않고 종료한다(대기 중으로 남는다).
    - 작업이 끝나면 해당 핸드오프를 `{"status":"done"}`으로 갱신한다.

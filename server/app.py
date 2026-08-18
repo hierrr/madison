@@ -1,6 +1,7 @@
 """MADISON 허브 — 단일 FastAPI 앱이 API와 대시보드를 함께 서빙한다."""
 import datetime
 import hashlib
+import json
 import os
 import subprocess
 import threading
@@ -248,16 +249,32 @@ async def create_handoff(request: Request):
     repo = str(body.get("repo") or "").strip()
     if not to_name or not repo:
         raise HTTPException(400, "to(기기명)와 repo는 필수")
+    # 허브 운반 페이로드 — 문서 본문 + 리포별 patch. 상한 초과는 git 경로(wip 브랜치 push)로 유도.
+    doc = str(body.get("doc") or "")
+    if len(doc.encode()) > 65536:
+        raise HTTPException(400, "doc이 64KB 상한 초과 — git 경로(wip 브랜치 push + 문서 축약)로 넘기세요")
+    patches = body.get("patches")
+    patches_json = None
+    if patches:
+        if not isinstance(patches, list) or not all(
+            isinstance(p, dict) and isinstance(p.get("repo"), str)
+            and isinstance(p.get("base"), str) and isinstance(p.get("diff"), str)
+            for p in patches
+        ):
+            raise HTTPException(400, "patches는 [{repo, base, diff}] 배열이어야 함")
+        patches_json = json.dumps(patches, ensure_ascii=False)
+        if len(patches_json.encode()) > 1_000_000:
+            raise HTTPException(400, "patches가 1MB 상한 초과 — git 경로(wip 브랜치 push)로 넘기세요")
     with db.tx() as c:
         to = c.execute("SELECT id FROM devices WHERE name=? AND revoked=0", (to_name,)).fetchone()
         if not to:
             raise HTTPException(404, f"기기 '{to_name}' 없음")
         cur = c.execute(
             "INSERT INTO handoffs (from_device, to_device, repo, origin, branch, doc_path,"
-            " summary, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            " summary, doc, patches, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (actor["device"]["id"] if actor["device"] else None, to["id"], repo,
              body.get("origin"), body.get("branch"), body.get("doc_path"),
-             str(body.get("summary") or "")[:300], state.utcnow()),
+             str(body.get("summary") or "")[:300], doc or None, patches_json, state.utcnow()),
         )
     return {"id": cur.lastrowid, "hf": f"HF-{cur.lastrowid:03d}"}
 
