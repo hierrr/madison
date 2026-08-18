@@ -49,14 +49,19 @@ push a piece of work from one machine to another without walking over to it.
 - **Session traceability** — every session id is one click away and can be resumed
   on its machine with `claude --resume <id>` or `codex resume <id>`.
 - **Handoff** — carry a task's context (handoff doc + change diffs, hub-carried,
-  no commit or push) to another machine; the target gets a desktop notification and
-  every new session there is briefed until you `/pickup` — in Claude Code or Codex,
-  whichever you prefer.
+  no commit or push) to another machine; the target gets a desktop notification
+  (macOS) and every new session there is briefed until you `/pickup` — in Claude
+  Code or Codex, whichever you prefer.
 - **History** — devices, sessions, handoffs, and the raw event log, each
   filterable, behind tabs.
 - **Daily/weekly reports** — the hub condenses each period's work into a
   work-journal style markdown (grouped by service, nested bullets) you can paste
-  into Notion, plus usage metrics (turns, sessions, active hours, a streak grid).
+  into Notion, regenerated on a schedule and on demand, plus usage metrics:
+  turns, sessions, active hours, per-project and hourly distributions, and a
+  16-week streak grid.
+- **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
+  Codex), model, and reasoning effort separately for task summaries and report
+  generation, with model lists pulled live from the CLIs installed on the hub.
 - **Agent + surface aware** — tells `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` /
   `CODEX APP` sessions apart, and separates automated headless runs (cron/launchd)
   into their own tab.
@@ -124,9 +129,23 @@ cp .env.example .env      # then edit: set ENROLL_SECRET, and hostnames if expos
 ```
 
 The hub listens on `127.0.0.1:8787`. On the same machine, open
-<http://127.0.0.1:8787>. To reach it from other machines, put it behind a tunnel
-(e.g. Cloudflare Tunnel) — a human dashboard host protected by your SSO, and a
-machine API host authenticated by per-device tokens. See `.env.example`.
+<http://127.0.0.1:8787>. To reach it from other machines there are two setups:
+
+- **Tunnel** (internet access): put the hub behind a tunnel — e.g. Cloudflare
+  Tunnel, which is what the `.env` hostnames and `CF_ACCESS_*` keys are for —
+  with a human dashboard host protected by SSO and a machine API host
+  authenticated by per-device tokens. See `.env.example`.
+- **LAN only** (no tunnel): set `HOST=0.0.0.0` and leave the tunnel keys empty.
+  Collectors report straight to `http://<hub-ip>:8787` with their device tokens;
+  onboard with `--hub http://<hub-ip>:8787`. The dashboard stays closed to plain
+  LAN requests (a 401 is expected) — open it on the hub machine itself, or from
+  another machine via SSH port-forwarding (`ssh -L 8787:127.0.0.1:8787 hub`,
+  then <http://127.0.0.1:8787>), which the hub sees as loopback and therefore
+  admin. Traffic is plain HTTP, so use this only on a network you trust;
+  `IP_ALLOWLIST` can additionally pin each device token to an IP.
+
+Either way it is the same single process and port — roles are told apart by the
+credentials on each request (device token vs admin), not by the route.
 
 For a persistent service, register a LaunchAgent that runs `scripts/launchd/madison-hub`
 (which execs `scripts/_launchd_wrapper.sh` → the venv). The stub's filename becomes the
@@ -166,7 +185,7 @@ Linux `install.sh` instead — that path is fully supported, not beta.
   extracts diffs of your uncommitted work (stashes and submodules included), then
   queues both on the hub — no commit or push needed. Work sitting on unpushed
   commits, oversized, or binary changes fall back to a pushed `wip/` branch. The
-  target machine shows a desktop notification (within its 5-minute poll), and any
+  target machine shows a desktop notification (macOS, within its 5-minute poll), and any
   new session for that repo — Claude Code or Codex — is briefed at start. Nothing
   is consumed automatically: the handoff stays *pending* until you approve starting
   it via `/pickup`, which applies the diffs (`git apply -3`), marks it *delivered*,
@@ -185,8 +204,12 @@ Linux `install.sh` instead — that path is fully supported, not beta.
   are checked so a proxied internet request can't impersonate local.
 - **State-changing endpoints are CSRF-guarded** (`Sec-Fetch-Site`), so a random web
   page open on the hub machine can't drive the hub.
-- Dashboard access is meant to sit behind your own SSO (e.g. Cloudflare Access);
-  the API host authenticates devices by token.
+- **Admin (dashboard) access** is granted to loopback connections on the hub
+  machine — which is what SSH port-forwarding uses — and to requests carrying a
+  verified Cloudflare Access JWT. An authenticating reverse proxy running on the
+  hub machine works as a third path: the hub trusts loopback, so the proxy must
+  enforce the login itself. The API side always authenticates devices by token,
+  independent of transport.
 
 ## Uninstall
 
@@ -197,8 +220,9 @@ The installer touches global state, so here is how to undo it on a device (macOS
 launchctl bootout "gui/$(id -u)/dev.madison.flush" 2>/dev/null
 rm -f ~/Library/LaunchAgents/dev.madison.*.plist
 
-# 2. Remove the collector and skills
-rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup
+# 2. Remove the collector and skills (Claude Code and Codex sides)
+rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
+       ~/.codex/skills/handoff ~/.codex/skills/pickup
 
 # 3. Restore hook config from the backups the installer made
 #    (settings.json.bak-madison-*, hooks.json.bak-madison-*, and config.toml backups
@@ -215,15 +239,23 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `HOST` / `PORT` | `127.0.0.1` / `8787` | Hub bind address |
 | `DB_PATH` | `data/madison.db` | SQLite file |
 | `ENROLL_SECRET` | — | Shared secret for device enrollment; clear/rotate after onboarding |
-| `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | Tunnel hostnames (human vs machine) |
-| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | Cloudflare Access JWT verification for the dashboard |
+| `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | Tunnel setups only — human vs machine hostname (the hub itself checks only `API_HOST`, to limit that host to `/api/*` and installer paths) |
+| `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | Tunnel setups only — Cloudflare Access JWT verification for remote dashboard access; leave empty on a LAN-only hub |
 | `TTL_STALE_MIN` | `15` | Minutes of silence before a working session is *unconfirmed* |
 | `DEVICE_ONLINE_MIN` | `10` | Minutes since last signal to still count a device online |
 | `ENDED_HIDE_HOURS` | `24` | Hours before an ended session drops off the live view |
 | `EVENT_RETENTION_DAYS` | `90` | Event log retention |
-| `TASK_SUMMARY` | `1` | One-line summaries on the hub — needs the `claude` CLI on the hub machine (else it falls back to a raw excerpt) |
-| `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | Model and binary the summary worker calls |
+| `TASK_SUMMARY` | `1` | One-line summaries on the hub — needs the selected provider's CLI on the hub machine (else it falls back to a raw excerpt) |
+| `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | Model and `claude` binary the summary worker calls |
+| `CODEX_BIN` | auto-detected | `codex` binary, used when a provider is set to Codex (searches PATH, then the newest nvm install) |
+| `REPORT` | `1` | Daily/weekly work reports |
+| `REPORT_MODEL` | `claude-sonnet-5` | Model for report generation |
+| `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` | `90` / `360` | Auto-refresh cadence for the daily / weekly report, in minutes |
 | `IP_ALLOWLIST` | *(off)* | Optional `name:ip` list restricting device reporting |
+
+LLM choices — provider, model, effort, and CLI paths — can also be changed in the
+dashboard's **settings** tab; values saved there live on the hub and override the
+`.env` defaults.
 
 ## Repository layout
 
@@ -233,6 +265,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `dashboard/` | Single-file HTML dashboard + logo assets |
 | `collector/` | Everything device-side — Claude/Codex hooks, `report.sh`, idempotent installer, `/handoff` · `/pickup` skills, Windows beta scripts |
 | `scripts/` | launchd stubs (standard pattern) |
+| `tests/` | Regression tests for the hub's state fold and the collector |
 | `assets/` | Project logo |
 
 ## Status
