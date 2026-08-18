@@ -375,7 +375,7 @@
   .mbar { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 12px; }
   .mbar .lbl { width: 106px; flex: none; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mbar .track { flex: 1; height: 9px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
-  .mbar .fill { height: 100%; background: var(--lg-teal); border-radius: 5px; }
+  .mbar .fill { display: block; height: 100%; background: var(--lg-blue); opacity: .8; border-radius: 5px; }
   .mbar .val { width: 42px; flex: none; text-align: right; font-family: var(--mono); color: var(--ink-3); }
   .hours { display: flex; align-items: flex-end; gap: 2px; height: 46px; }
   .hours i { flex: 1; background: var(--lg-blue); opacity: .8; border-radius: 2px 2px 0 0; min-height: 2px; height: calc(var(--v) * 100%); }
@@ -952,10 +952,10 @@
     }
   });
 
-  // 스파크바 툴팁 — 위임
+  // 툴팁 — 위임 (스파크바·잔디·시간대 분포 등 data-d를 가진 요소 공통)
   var tip = document.getElementById('tip');
   document.addEventListener('mouseover', function (e) {
-    if (e.target.matches && e.target.matches('.spark i')) {
+    if (e.target.matches && e.target.matches('[data-d]')) {
       tip.textContent = e.target.dataset.d;
       tip.classList.add('show');
     }
@@ -967,7 +967,7 @@
     tip.style.top = (e.clientY - tip.offsetHeight - 10) + 'px';
   });
   document.addEventListener('mouseout', function (e) {
-    if (e.target.matches && e.target.matches('.spark i')) tip.classList.remove('show');
+    if (e.target.matches && e.target.matches('[data-d]')) tip.classList.remove('show');
   });
 
   // ── 탭 라우터 + 이력 페이지 ──
@@ -1528,7 +1528,8 @@
       var sun = new Date(mon); sun.setDate(sun.getDate() + 6);
       return (mon.getMonth() + 1) + '/' + mon.getDate() + ' ~ ' + (sun.getMonth() + 1) + '/' + sun.getDate() + ' · 주간';
     }
-    return RPT.date + ' · 일일';
+    var wd = '일월화수목금토'[new Date(RPT.date + 'T00:00:00').getDay()];
+    return RPT.date + ' (' + wd + ') · 일일';
   }
 
   function mdInline(s) {
@@ -1618,7 +1619,7 @@
       var dt = new Date(start); dt.setDate(dt.getDate() + d);
       var key = ymd(dt), n = streak[key] || 0;
       var lvl = n === 0 ? 0 : Math.max(1, Math.ceil(n / max * 4));
-      cells.push('<i class="' + (lvl ? 'l' + lvl : '') + '" title="' + key + ' · ' + n + '턴"></i>');
+      cells.push('<i class="' + (lvl ? 'l' + lvl : '') + '" data-d="' + key + ' · ' + n + '턴"></i>');
     }
     return '<div class="jandi">' + cells.join('') + '</div>';
   }
@@ -1632,7 +1633,7 @@
     }).join('') : '<div class="none">기록 없음</div>';
     var maxH = Math.max.apply(null, m.hourly.map(function (h) { return h.n; }).concat([1]));
     var hourBars = m.hourly.map(function (h) {
-      return '<i style="--v:' + Math.max(h.n / maxH, 0.02).toFixed(2) + '" title="' + h.hour + '시 · ' + h.n + '턴"></i>';
+      return '<i style="--v:' + Math.max(h.n / maxH, 0.02).toFixed(2) + '" data-d="' + h.hour + '시 · ' + h.n + '턴"></i>';
     }).join('');
     function stat(label, val) {
       return '<div class="mstat"><div class="ml">' + label + '</div><div class="mv">' + val + '</div></div>';
