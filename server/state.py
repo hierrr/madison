@@ -240,7 +240,7 @@ def assemble(c) -> dict:
             "id": h["id"], "hf": f"HF-{h['id']:03d}",
             "from": h["from_name"], "to": h["to_name"],
             "repo": h["repo"], "branch": h["branch"], "doc_path": h["doc_path"],
-            "summary": h["summary"], "status": h["status"],
+            "summary": h["summary"], "doc": h["doc"], "status": h["status"],
             "created_at": h["created_at"], "delivered_at": h["delivered_at"],
         })
 

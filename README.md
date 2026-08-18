@@ -48,9 +48,10 @@ push a piece of work from one machine to another without walking over to it.
   small model on the hub (never on the device, never in the hook's critical path).
 - **Session traceability** — every session id is one click away and can be resumed
   on its machine with `claude --resume <id>` or `codex resume <id>`.
-- **Handoff** — carry a task's context (git branch + a handoff doc) to another
-  machine; the target gets a desktop notification and every new session there is
-  briefed until you `/pickup` — in Claude Code or Codex, whichever you prefer.
+- **Handoff** — carry a task's context (handoff doc + change diffs, hub-carried,
+  no commit or push) to another machine; the target gets a desktop notification and
+  every new session there is briefed until you `/pickup` — in Claude Code or Codex,
+  whichever you prefer.
 - **History** — devices, sessions, handoffs, and the raw event log, each
   filterable, behind tabs.
 - **Daily/weekly reports** — the hub condenses each period's work into a
@@ -161,18 +162,23 @@ Linux `install.sh` instead — that path is fully supported, not beta.
 
 ## Moving work between machines
 
-- **Handoff** (human continues): `/handoff <device>` commits a WIP branch, writes
-  a handoff doc, and queues it. The target machine shows a desktop notification
-  (within its 5-minute poll), and any new session for that repo — Claude Code or
-  Codex — is briefed at start. Nothing is consumed automatically: the handoff stays
-  *pending* until you approve starting it via `/pickup`, which marks it *delivered*
+- **Handoff** (human continues): `/handoff <device>` writes a handoff doc and
+  extracts diffs of your uncommitted work (stashes and submodules included), then
+  queues both on the hub — no commit or push needed. Work sitting on unpushed
+  commits, oversized, or binary changes fall back to a pushed `wip/` branch. The
+  target machine shows a desktop notification (within its 5-minute poll), and any
+  new session for that repo — Claude Code or Codex — is briefed at start. Nothing
+  is consumed automatically: the handoff stays *pending* until you approve starting
+  it via `/pickup`, which applies the diffs (`git apply -3`), marks it *delivered*,
   and, when the work is finished, *done*.
 
 ## Security model
 
 - **Session transcripts never leave the device.** The hub stores metadata and short
   truncated excerpts only — up to ~600 chars of an instruction (for the summary)
-  and ≤200 chars of a reply/permission message.
+  and ≤200 chars of a reply/permission message. The one deliberate exception is
+  handoffs: `/handoff` uploads its doc and change diffs to the hub by explicit user
+  action (capped at 64KB / 1MB).
 - **Three request classes:** device (bearer token), admin (loopback on the hub
   machine, or an SSO-verified dashboard), and enrollment (a shared secret, meant to
   be rotated). Loopback alone is *not* trusted as admin behind a tunnel — CF headers
