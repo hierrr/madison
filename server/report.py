@@ -118,7 +118,8 @@ NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id
 
 
 def metrics(c, range_, day):
-    """활동 메트릭 — 윈도우 집계 + 프로젝트/시간대 분포 + 잔디(최근 112일, 윈도우 무관).
+    """활동 메트릭 — 윈도우 집계 + 프로젝트/시간대 분포 + 잔디(최근 91일=13주, 윈도우 무관).
+    잔디 기간은 EVENT_RETENTION_DAYS(기본 90일)와 정합 — 보존을 늘리면 함께 늘릴 것.
     자동화 세션은 전 수치에서 제외."""
     pred = _pred(range_)
     pr = _params(range_, day)
@@ -146,7 +147,7 @@ def metrics(c, range_, day):
         f" WHERE event='turn_done' AND {pred} AND {NOT_AUTO} GROUP BY h", pr)}
     streak = {r["d"]: r["n"] for r in c.execute(
         f"SELECT date(ts_hub,'localtime') d, COUNT(*) n FROM events e"
-        f" WHERE event='turn_done' AND ts_hub >= datetime('now','-112 days') AND {NOT_AUTO}"
+        f" WHERE event='turn_done' AND ts_hub >= datetime('now','-91 days') AND {NOT_AUTO}"
         f" GROUP BY d")}
     return {
         "range": range_, "day": day,
