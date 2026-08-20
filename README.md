@@ -253,6 +253,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `REPORT` | `1` | Daily/weekly/monthly work reports |
 | `REPORT_MODEL` | `claude-sonnet-5` | Model for report generation |
 | `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` / `REPORT_MONTHLY_MIN` | `60` / `1440` / `1440` | Auto-refresh cadence for the daily / weekly / monthly report, in minutes |
+| `REPORT_EXCLUDE_PROJECTS` | *(empty)* | Comma-separated projects to keep out of reports — drops the project's own section and any log line from other projects that mentions its name |
 | `IP_ALLOWLIST` | *(off)* | Optional `name:ip` list restricting device reporting |
 
 LLM choices — provider, model, effort, and CLI paths — can also be changed in the

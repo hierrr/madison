@@ -236,6 +236,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 | `REPORT` | `1` | 일일/주간/월간 업무 리포트 |
 | `REPORT_MODEL` | `claude-sonnet-5` | 리포트 생성 모델 |
 | `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` / `REPORT_MONTHLY_MIN` | `60` / `1440` / `1440` | 일일/주간/월간 리포트 자동 갱신 주기(분) |
+| `REPORT_EXCLUDE_PROJECTS` | *(없음)* | 리포트에서 제외할 프로젝트(콤마 구분) — 해당 프로젝트 섹션과, 다른 프로젝트 로그에서 그 이름이 언급된 줄까지 뺀다 |
 | `IP_ALLOWLIST` | *(off)* | 선택 — 기기 보고를 제한하는 `이름:ip` 목록 |
 
 프로바이더·모델·추론 강도·CLI 경로 같은 LLM 관련 값은 대시보드 **설정** 탭에서도
