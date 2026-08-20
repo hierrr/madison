@@ -1610,7 +1610,7 @@
   }
 
   function buildJandi(streak) {
-    var days = 112, today = new Date(); today.setHours(0, 0, 0, 0);
+    var days = 91, today = new Date(); today.setHours(0, 0, 0, 0);   // 13주 — 이벤트 보존 90일과 정합
     var start = new Date(today); start.setDate(start.getDate() - (days - 1));
     // 진행바처럼 기간 내 최대치 대비 상대 스케일로 4단계 농도
     var max = 1;
@@ -1644,7 +1644,7 @@
       '<section class="panel"><h2><span class="hmk" style="background:var(--lg-teal)"></span>활동</h2>' +
         '<div class="mstat-grid">' + stat('세션', m.sessions) + stat('턴', m.turns) +
         stat('활동 시간', m.active_hours + 'h') + stat('프로젝트', m.projects) + '</div></section>' +
-      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-blue)"></span>스트릭 · 16주</h2>' +
+      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-blue)"></span>스트릭 · 13주</h2>' +
         buildJandi(m.streak) +
         '<div class="jandi-legend">적음 <i></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> 많음</div></section>' +
       '<section class="panel"><h2><span class="hmk" style="background:var(--lg-violet)"></span>프로젝트별 턴</h2>' + projBars + '</section>' +
