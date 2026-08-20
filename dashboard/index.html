@@ -1616,7 +1616,7 @@
   }
 
   function buildJandi(streak) {
-    var days = 91, today = new Date(); today.setHours(0, 0, 0, 0);   // 13주 — 이벤트 보존 90일과 정합
+    var days = 364, today = new Date(); today.setHours(0, 0, 0, 0);   // 52주 = 최근 1년
     var start = new Date(today); start.setDate(start.getDate() - (days - 1));
     // 진행바처럼 기간 내 최대치 대비 상대 스케일로 4단계 농도
     var max = 1;
@@ -1650,13 +1650,16 @@
       '<section class="panel"><h2><span class="hmk" style="background:var(--lg-teal)"></span>활동</h2>' +
         '<div class="mstat-grid">' + stat('세션', m.sessions) + stat('턴', m.turns) +
         stat('활동 시간', m.active_hours + 'h') + stat('프로젝트', m.projects) + '</div></section>' +
-      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-blue)"></span>스트릭 · 13주</h2>' +
+      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-blue)"></span>스트릭</h2>' +
         buildJandi(m.streak) +
         '<div class="jandi-legend">적음 <i></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> 많음</div></section>' +
       '<section class="panel"><h2><span class="hmk" style="background:var(--lg-violet)"></span>프로젝트별 턴</h2>' + projBars + '</section>' +
       '<section class="panel"><h2><span class="hmk" style="background:var(--lg-purple)"></span>시간대 분포</h2>' +
         '<div class="hours">' + hourBars + '</div>' +
         '<div class="hours-x"><span>0시</span><span>6</span><span>12</span><span>18</span><span>23시</span></div></section>';
+    // 잔디는 렌더 직후 최우측(오늘)이 보이도록 스크롤
+    var jandi = document.querySelector('#metricsBody .jandi');
+    if (jandi) jandi.scrollLeft = jandi.scrollWidth;
   }
   function loadMetrics() {
     getJSON('/api/metrics?range=' + RPT.range + '&date=' + RPT.date).then(renderMetrics)
