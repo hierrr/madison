@@ -54,8 +54,8 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
 - **일일/주간/월간 리포트** — 허브가 기간별 작업을 PM/오너 관점의 보고용 마크다운
   (서비스별 묶음·중첩 불릿)으로 정리해 노션에 붙여넣을 수 있습니다. 기간이 길수록
   나열 대신 더 포괄적으로 종합합니다. 주기 자동 갱신에 수동 갱신도 되고, 사용
-  메트릭(턴·세션·활동 시간·프로젝트별/시간대 분포·13주 스트릭 잔디)도 함께
-  보여줍니다.
+  메트릭(턴·세션·활동 시간·프로젝트별/시간대 분포·52주 스트릭 잔디 — 좌우
+  스크롤, 처음엔 최신 주가 보임)도 함께 보여줍니다.
 - **허브 LLM 선택** — 설정 탭에서 태스크 요약과 리포트 생성 각각의 프로바이더
   (Claude Code/Codex)·모델·추론 강도를 고를 수 있고, 모델 목록은 허브에 설치된
   CLI에서 그대로 불러옵니다.
@@ -229,7 +229,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 | `TTL_STALE_MIN` | `15` | 작업 중 세션이 *끊김 의심*이 되기까지의 무신호 분 |
 | `DEVICE_ONLINE_MIN` | `10` | 이 분 이내 신호가 있으면 기기를 온라인으로 |
 | `ENDED_HIDE_HOURS` | `24` | 종료 세션이 현황에서 사라지기까지의 시간 |
-| `EVENT_RETENTION_DAYS` | `90` | 이벤트 로그 보존 |
+| `EVENT_RETENTION_DAYS` | `0` | 이벤트 로그 보존 일수 — `0`이면 무기한 보존 |
 | `TASK_SUMMARY` | `1` | 허브의 한 줄 요약 — 허브 기기에 선택한 프로바이더의 CLI 필요(없으면 원문 발췌로 대체) |
 | `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | 요약 워커가 호출하는 모델·`claude` 바이너리 |
 | `CODEX_BIN` | 자동 탐색 | 프로바이더를 Codex로 고를 때 쓰는 `codex` 바이너리 (PATH → 최신 nvm 설치본 순) |
