@@ -5,9 +5,24 @@ events(prompt/turn_done)를 프로젝트별로 모아 업무일지용 마크다�
 LLM 호출은 app에서 주입한다 — 이 모듈은 순수 데이터/문자열만 다룬다.
 """
 import json
+import re
+
+from .config import CFG
 
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
+
+# 제외 프로젝트 이름의 정규형(하이픈·공백·언더스코어 등 구분자 무시) — 언급 줄 필터용
+_EXCL_NORM = tuple(n for n in (re.sub(r"[^0-9a-z가-힣]", "", p.lower())
+                               for p in CFG.report_exclude_projects) if n)
+
+
+def _mentions_excluded(text):
+    """제외 프로젝트가 언급된 로그 줄인지 — 표기 차이('a-b'/'a b'/'a_b')를 무시하고 비교.
+    제외 프로젝트를 다룬 작업(정리·모니터링 등)의 로그가 다른 프로젝트 섹션을 타고
+    요약에 이름을 되살리는 것을 막는다."""
+    t = re.sub(r"[^0-9a-z가-힣]", "", text.lower())
+    return any(n in t for n in _EXCL_NORM)
 
 
 def _pred(range_):
@@ -26,12 +41,15 @@ def _params(range_, day):
 
 def gather(c, range_, day):
     """프로젝트별 작업 원재료: {project: {prompts, sums, turns, sessions}}.
-    지시 없거나 요약 없는 프로젝트는 제외."""
+    지시 없거나 요약 없는 프로젝트, REPORT_EXCLUDE_PROJECTS 프로젝트는 제외."""
     pred = _pred(range_)
+    skip = ("", "summarizer") + CFG.report_exclude_projects
     rows = c.execute(
         f"SELECT project, event, session_id, device_id, payload FROM events e"
-        f" WHERE event IN ('prompt','turn_done') AND COALESCE(project,'') NOT IN ('','summarizer')"
-        f"   AND {pred} AND {NOT_AUTO} ORDER BY project, ts_hub", _params(range_, day)).fetchall()
+        f" WHERE event IN ('prompt','turn_done')"
+        f"   AND COALESCE(project,'') NOT IN ({','.join('?' * len(skip))})"
+        f"   AND {pred} AND {NOT_AUTO} ORDER BY project, ts_hub",
+        skip + _params(range_, day)).fetchall()
     proj = {}
     for r in rows:
         d = proj.setdefault(r["project"], {"prompts": [], "sums": [], "turns": 0, "sess": set()})
@@ -39,12 +57,12 @@ def gather(c, range_, day):
         pl = json.loads(r["payload"] or "{}")
         if r["event"] == "prompt":
             t = (pl.get("prompt") or "").strip()
-            if t and not t.startswith(NOISE):
+            if t and not t.startswith(NOISE) and not _mentions_excluded(t):
                 d["prompts"].append(t[:240])
         else:
             d["turns"] += 1
             s = (pl.get("summary") or "").strip()
-            if s:
+            if s and not _mentions_excluded(s):
                 d["sums"].append(s[:240])
     return {p: {"prompts": v["prompts"], "sums": v["sums"], "turns": v["turns"],
                 "sessions": len(v["sess"])}

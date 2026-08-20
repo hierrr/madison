@@ -62,6 +62,10 @@ class Config:
         self.report_daily_min = int(get("REPORT_DAILY_MIN", "60"))       # 일일 리포트 자동 갱신 주기(분)
         self.report_weekly_min = int(get("REPORT_WEEKLY_MIN", "1440"))   # 주간 리포트 자동 갱신 주기(분) — 부팅 직후 + 주기
         self.report_monthly_min = int(get("REPORT_MONTHLY_MIN", "1440"))  # 월간 리포트 자동 갱신 주기(분)
+        # 리포트 제외 프로젝트(콤마 구분) — 해당 프로젝트 섹션은 물론, 다른 프로젝트 로그에서
+        # 그 이름이 언급된 줄까지 리포트 재료에서 뺀다 (언급이 요약에 되살아나는 재발 방지)
+        self.report_exclude_projects = tuple(
+            x.strip() for x in get("REPORT_EXCLUDE_PROJECTS").split(",") if x.strip())
         # "home:1.2.3.4, office:5.6.7.8" → {ip, ...} (이름은 로깅용)
         self.ip_allowlist = {}
         for item in get("IP_ALLOWLIST").split(","):
