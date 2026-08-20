@@ -59,8 +59,8 @@ push a piece of work from one machine to another without walking over to it.
   can paste into Notion — the longer the period, the more it synthesizes
   instead of listing. Regenerated on a schedule and on demand, plus usage
   metrics: turns, sessions, active hours, per-project and hourly
-  distributions, and a 13-week streak grid (matching the default event
-  retention).
+  distributions, and a 52-week streak grid (scrolls horizontally, lands on
+  the most recent week).
 - **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
   Codex), model, and reasoning effort separately for task summaries and report
   generation, with model lists pulled live from the CLIs installed on the hub.
@@ -246,7 +246,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `TTL_STALE_MIN` | `15` | Minutes of silence before a working session is *unconfirmed* |
 | `DEVICE_ONLINE_MIN` | `10` | Minutes since last signal to still count a device online |
 | `ENDED_HIDE_HOURS` | `24` | Hours before an ended session drops off the live view |
-| `EVENT_RETENTION_DAYS` | `90` | Event log retention |
+| `EVENT_RETENTION_DAYS` | `0` | Event log retention in days — `0` keeps events forever |
 | `TASK_SUMMARY` | `1` | One-line summaries on the hub — needs the selected provider's CLI on the hub machine (else it falls back to a raw excerpt) |
 | `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | Model and `claude` binary the summary worker calls |
 | `CODEX_BIN` | auto-detected | `codex` binary, used when a provider is set to Codex (searches PATH, then the newest nvm install) |
