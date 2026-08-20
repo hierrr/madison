@@ -66,8 +66,8 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 CREATE TABLE IF NOT EXISTS reports (
-  range TEXT NOT NULL,          -- 'day' | 'week'
-  day TEXT NOT NULL,            -- 기준 로컬 날짜 'YYYY-MM-DD'
+  range TEXT NOT NULL,          -- 'day' | 'week' | 'month'
+  day TEXT NOT NULL,            -- 기준 로컬 날짜 'YYYY-MM-DD' (week=월요일, month=1일)
   markdown TEXT,
   generated_at TEXT,
   PRIMARY KEY (range, day)

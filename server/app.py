@@ -645,17 +645,19 @@ def _gen_report(range_: str, day: str) -> dict:
 
 
 def _norm_range(r: str) -> str:
-    return "week" if r == "week" else "day"
+    return r if r in ("week", "month") else "day"
 
 
 def _norm_day(range_: str, day: str) -> str:
-    """주간은 달력 주(월~일) 고정 — 어떤 날짜로 조회해도 그 주 월요일 키로 정규화."""
-    if range_ != "week":
+    """주간은 달력 주(월~일), 월간은 달력 월 고정 — 어떤 날짜로 조회해도 기간 시작일 키로 정규화."""
+    if range_ == "day":
         return day
     try:
         d = datetime.date.fromisoformat(day)
     except ValueError:
         return day
+    if range_ == "month":
+        return d.replace(day=1).isoformat()
     return (d - datetime.timedelta(days=d.weekday())).isoformat()
 
 
@@ -701,19 +703,18 @@ async def get_metrics(request: Request, range: str = "day", date: str = ""):
 
 
 def _report_loop():
-    """일일·주간 리포트 자동 생성 — 둘 다 부팅 직후 1회 + 각자 주기(REPORT_DAILY_MIN·REPORT_WEEKLY_MIN).
+    """일일·주간·월간 리포트 자동 생성 — 모두 부팅 직후 1회 + 각자 주기(REPORT_*_MIN).
     특정 시각에 의존하지 않으므로 절전·재시작·아침 열람에도 항상 최신에 가깝게 준비된다."""
-    last_daily = 0.0
-    last_weekly = 0.0
+    period_min = {"day": CFG.report_daily_min, "week": CFG.report_weekly_min,
+                  "month": CFG.report_monthly_min}
+    last = {r: 0.0 for r in period_min}
     while True:
         try:
             today = _today_local()
-            if time.time() - last_daily >= CFG.report_daily_min * 60:
-                _gen_report("day", today)
-                last_daily = time.time()
-            if time.time() - last_weekly >= CFG.report_weekly_min * 60:
-                _gen_report("week", _norm_day("week", today))
-                last_weekly = time.time()
+            for r, mins in period_min.items():
+                if time.time() - last[r] >= mins * 60:
+                    _gen_report(r, _norm_day(r, today))
+                    last[r] = time.time()
         except Exception:
             pass
         time.sleep(300)

@@ -59,8 +59,9 @@ class Config:
         # 업무 리포트 — 프로젝트별 지시/완료를 허브 LLM으로 업무일지 마크다운 요약
         self.report_enabled = get("REPORT", "1") == "1"
         self.report_model = get("REPORT_MODEL", "claude-sonnet-5")   # 요약 품질 위해 haiku보다 상위
-        self.report_daily_min = int(get("REPORT_DAILY_MIN", "90"))     # 일일 리포트 자동 갱신 주기(분)
-        self.report_weekly_min = int(get("REPORT_WEEKLY_MIN", "360"))  # 주간 리포트 자동 갱신 주기(분) — 부팅 직후 + 주기
+        self.report_daily_min = int(get("REPORT_DAILY_MIN", "60"))       # 일일 리포트 자동 갱신 주기(분)
+        self.report_weekly_min = int(get("REPORT_WEEKLY_MIN", "1440"))   # 주간 리포트 자동 갱신 주기(분) — 부팅 직후 + 주기
+        self.report_monthly_min = int(get("REPORT_MONTHLY_MIN", "1440"))  # 월간 리포트 자동 갱신 주기(분)
         # "home:1.2.3.4, office:5.6.7.8" → {ip, ...} (이름은 로깅용)
         self.ip_allowlist = {}
         for item in get("IP_ALLOWLIST").split(","):
