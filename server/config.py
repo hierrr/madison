@@ -48,7 +48,7 @@ class Config:
         self.ttl_stale_min = int(get("TTL_STALE_MIN", "15"))
         self.device_online_min = int(get("DEVICE_ONLINE_MIN", "10"))
         self.ended_hide_hours = int(get("ENDED_HIDE_HOURS", "24"))
-        self.retention_days = int(get("EVENT_RETENTION_DAYS", "90"))
+        self.retention_days = int(get("EVENT_RETENTION_DAYS", "0"))  # 0 = 무기한 보존
         # 태스크 한 줄 요약 — 허브가 haiku로 중앙 요약 (훅 예산과 무관, 기기 부담 0)
         self.task_summary_enabled = get("TASK_SUMMARY", "1") == "1"
         self.task_summary_model = get("TASK_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
