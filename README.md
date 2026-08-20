@@ -54,11 +54,13 @@ push a piece of work from one machine to another without walking over to it.
   Code or Codex, whichever you prefer.
 - **History** — devices, sessions, handoffs, and the raw event log, each
   filterable, behind tabs.
-- **Daily/weekly reports** — the hub condenses each period's work into a
-  work-journal style markdown (grouped by service, nested bullets) you can paste
-  into Notion, regenerated on a schedule and on demand, plus usage metrics:
-  turns, sessions, active hours, per-project and hourly distributions, and a
-  16-week streak grid.
+- **Daily/weekly/monthly reports** — the hub condenses each period's work into
+  a PM/owner-oriented report markdown (grouped by service, nested bullets) you
+  can paste into Notion — the longer the period, the more it synthesizes
+  instead of listing. Regenerated on a schedule and on demand, plus usage
+  metrics: turns, sessions, active hours, per-project and hourly
+  distributions, and a 13-week streak grid (matching the default event
+  retention).
 - **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
   Codex), model, and reasoning effort separately for task summaries and report
   generation, with model lists pulled live from the CLIs installed on the hub.
@@ -248,9 +250,9 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `TASK_SUMMARY` | `1` | One-line summaries on the hub — needs the selected provider's CLI on the hub machine (else it falls back to a raw excerpt) |
 | `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | Model and `claude` binary the summary worker calls |
 | `CODEX_BIN` | auto-detected | `codex` binary, used when a provider is set to Codex (searches PATH, then the newest nvm install) |
-| `REPORT` | `1` | Daily/weekly work reports |
+| `REPORT` | `1` | Daily/weekly/monthly work reports |
 | `REPORT_MODEL` | `claude-sonnet-5` | Model for report generation |
-| `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` | `90` / `360` | Auto-refresh cadence for the daily / weekly report, in minutes |
+| `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` / `REPORT_MONTHLY_MIN` | `60` / `1440` / `1440` | Auto-refresh cadence for the daily / weekly / monthly report, in minutes |
 | `IP_ALLOWLIST` | *(off)* | Optional `name:ip` list restricting device reporting |
 
 LLM choices — provider, model, effort, and CLI paths — can also be changed in the
