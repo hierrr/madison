@@ -723,6 +723,7 @@ def _report_loop():
 # ── 보존 정리 스레드 ──────────────────────────────────
 
 def _retention_loop():
+    """EVENT_RETENTION_DAYS > 0일 때만 기동 — 0이면 이벤트를 무기한 보존."""
     while True:
         time.sleep(6 * 3600)
         try:
@@ -737,7 +738,8 @@ def _retention_loop():
 @app.on_event("startup")
 async def startup():
     db.conn()
-    threading.Thread(target=_retention_loop, daemon=True).start()
+    if CFG.retention_days > 0:
+        threading.Thread(target=_retention_loop, daemon=True).start()
     if CFG.task_summary_enabled:
         threading.Thread(target=_summary_loop, daemon=True).start()
     if CFG.report_enabled:
