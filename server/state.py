@@ -151,8 +151,17 @@ def assemble(c) -> dict:
             "id": d["id"], "name": d["name"],
             "last_seen_min": age,
             "online": age is not None and age <= CFG.device_online_min,
-            "week_turns": 0, "spark": [],
+            "week_turns": 0, "total_turns": 0, "spark": [],
         }
+
+    # 기기별 전체 누적 턴 — sessions.turns 합산 (turn_done마다 증분되는 카운터라
+    # events 스캔보다 싸고, 이벤트 보존 정리(EVENT_RETENTION_DAYS)와 무관하게 남는다)
+    for r in c.execute(
+        "SELECT device_id, SUM(turns) AS n FROM sessions"
+        " WHERE COALESCE(frontend,'') != 'auto' GROUP BY device_id"
+    ):
+        if r["device_id"] in devices:
+            devices[r["device_id"]]["total_turns"] = r["n"] or 0
 
     # 기기별 최근 7일 turn_done 스파크
     for d in devices.values():

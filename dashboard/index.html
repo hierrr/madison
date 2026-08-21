@@ -19,7 +19,7 @@
     --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.12);
     --shadow: 0 1px 2px rgba(11, 11, 11, 0.05);
     --shadow-up: 0 3px 10px rgba(11, 11, 11, 0.09);
-    --lg-teal: #00A9C4; --lg-tealdeep: #007F94; --lg-blue: #2E62D9; --lg-violet: #6A44E0;
+    --lg-green: #0FA968; --lg-teal: #00A9C4; --lg-tealdeep: #007F94; --lg-blue: #2E62D9; --lg-violet: #6A44E0;
     --lg-purple: #9C2FD6; --lg-gold: #E8A70C; --lg-coral: #E83A72; --lg-slate: #B9C6DD;
     --lg-glow-teal: #00A9C42E;
     --agent-claude: #C15F3C;   /* ai-dev-lite 대시보드의 --claude */
@@ -41,7 +41,7 @@
       --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.16);
       --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
       --shadow-up: 0 3px 10px rgba(0, 0, 0, 0.5);
-      --lg-teal: #00E5FF; --lg-tealdeep: #00B3C6; --lg-blue: #3D7BFF; --lg-violet: #8A5CFF;
+      --lg-green: #2EE58A; --lg-teal: #00E5FF; --lg-tealdeep: #00B3C6; --lg-blue: #3D7BFF; --lg-violet: #8A5CFF;
       --lg-purple: #C44BFF; --lg-gold: #FFD60A; --lg-coral: #FF4D8D; --lg-slate: #46587E;
       --lg-glow-teal: #00E5FF55;
     }
@@ -59,7 +59,7 @@
     --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.16);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-up: 0 3px 10px rgba(0, 0, 0, 0.5);
-    --lg-teal: #00E5FF; --lg-tealdeep: #00B3C6; --lg-blue: #3D7BFF; --lg-violet: #8A5CFF;
+    --lg-green: #2EE58A; --lg-teal: #00E5FF; --lg-tealdeep: #00B3C6; --lg-blue: #3D7BFF; --lg-violet: #8A5CFF;
     --lg-purple: #C44BFF; --lg-gold: #FFD60A; --lg-coral: #FF4D8D; --lg-slate: #46587E;
     --lg-glow-teal: #00E5FF55;
   }
@@ -375,10 +375,10 @@
   .mbar { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 12px; }
   .mbar .lbl { width: 106px; flex: none; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mbar .track { flex: 1; height: 9px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
-  .mbar .fill { display: block; height: 100%; background: var(--lg-blue); opacity: .8; border-radius: 5px; }
+  .mbar .fill { display: block; height: 100%; background: var(--bar, var(--lg-blue)); opacity: .8; border-radius: 5px; }
   .mbar .val { width: 42px; flex: none; text-align: right; font-family: var(--mono); color: var(--ink-3); }
   .hours { display: flex; align-items: flex-end; gap: 2px; height: 46px; }
-  .hours i { flex: 1; background: var(--lg-blue); opacity: .8; border-radius: 2px 2px 0 0; min-height: 2px; height: calc(var(--v) * 100%); }
+  .hours i { flex: 1; background: var(--bar, var(--lg-blue)); opacity: .8; border-radius: 2px 2px 0 0; min-height: 2px; height: calc(var(--v) * 100%); }
   .hours-x { display: flex; justify-content: space-between; font-size: 9px; color: var(--ink-3); margin-top: 3px; font-family: var(--mono); }
 
   .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
@@ -1411,7 +1411,7 @@
         '<td class="mono">' + esc(d.name) + '</td>' +
         '<td>' + (r.cat === 'revoked' ? sdot('s-revoked') + '<span class="dim">폐기됨</span>' : r.cat === 'online' ? sdot('s-on') + '온라인' : sdot('s-off') + '<span class="dim">무신호</span>') + '</td>' +
         '<td class="mono dim">' + (live.last_seen_min != null ? age(live.last_seen_min) : '기록 없음') + '</td>' +
-        '<td class="mono">' + (live.week_turns != null ? live.week_turns + '턴' : '-') + '</td>' +
+        '<td class="mono">' + (live.total_turns != null ? live.total_turns + '턴' : '-') + '</td>' +
         '<td class="mono dim">' + fmtTs(d.created_at) + '</td>' +
         '<td><button class="copy" data-devtasks="' + esc(d.name) + '" title="이 기기의 세션 이력을 태스크 탭에서 보기">태스크</button>' +
         (d.revoked ? '' : ' <button class="copy act-danger" data-revoke="' + d.id + '" data-name="' + esc(d.name) + '">폐기</button>') +
@@ -1420,7 +1420,7 @@
     document.getElementById('devicesTable').innerHTML =
       '<div class="htbar">' + fchipH('온라인', 'online') + fchipH('무신호', 'quiet') + fchipH('폐기', 'revoked') + '</div>' +
       '<table class="ht"><thead><tr><th>ID</th><th>기기</th><th>상태</th>' +
-      '<th class="sortable" data-sort="seen">마지막 신호' + arrow('seen') + '</th><th>주간</th>' +
+      '<th class="sortable" data-sort="seen">마지막 신호' + arrow('seen') + '</th><th>누적</th>' +
       '<th class="sortable" data-sort="created">등록일' + arrow('created') + '</th><th></th></tr></thead><tbody>' +
       (rows.join('') || '<tr><td class="dim" colspan="7">표시할 기기 없음</td></tr>') + '</tbody></table>';
   }
@@ -1633,12 +1633,16 @@
   }
 
   function renderMetrics(m) {
-    var maxP = Math.max.apply(null, m.per_project.map(function (p) { return p.turns; }).concat([1]));
-    var projBars = m.per_project.length ? m.per_project.map(function (p) {
-      return '<div class="mbar"><span class="lbl" title="' + esc(p.project) + '">' + esc(p.project) + '</span>' +
-        '<span class="track"><span class="fill" style="width:' + (p.turns / maxP * 100) + '%"></span></span>' +
-        '<span class="val">' + p.turns + '</span></div>';
-    }).join('') : '<div class="none">기록 없음</div>';
+    function mbars(items, key) {
+      var max = Math.max.apply(null, items.map(function (it) { return it.turns; }).concat([1]));
+      return items.length ? items.map(function (it) {
+        return '<div class="mbar"><span class="lbl" title="' + esc(it[key]) + '">' + esc(it[key]) + '</span>' +
+          '<span class="track"><span class="fill" style="width:' + (it.turns / max * 100) + '%"></span></span>' +
+          '<span class="val">' + it.turns + '</span></div>';
+      }).join('') : '<div class="none">기록 없음</div>';
+    }
+    var projBars = mbars(m.per_project, 'project');
+    var devBars = mbars(m.per_device || [], 'device');
     var maxH = Math.max.apply(null, m.hourly.map(function (h) { return h.n; }).concat([1]));
     var hourBars = m.hourly.map(function (h) {
       return '<i style="--v:' + Math.max(h.n / maxH, 0.02).toFixed(2) + '" data-d="' + h.hour + '시 · ' + h.n + '턴"></i>';
@@ -1647,14 +1651,15 @@
       return '<div class="mstat"><div class="ml">' + label + '</div><div class="mv">' + val + '</div></div>';
     }
     document.getElementById('metricsBody').innerHTML =
-      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-teal)"></span>활동</h2>' +
+      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-green)"></span>활동</h2>' +
         '<div class="mstat-grid">' + stat('세션', m.sessions) + stat('턴', m.turns) +
         stat('활동 시간', m.active_hours + 'h') + stat('프로젝트', m.projects) + '</div></section>' +
-      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-blue)"></span>스트릭</h2>' +
+      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-teal)"></span>스트릭</h2>' +
         buildJandi(m.streak) +
         '<div class="jandi-legend">적음 <i></i><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i> 많음</div></section>' +
-      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-violet)"></span>프로젝트별 턴</h2>' + projBars + '</section>' +
-      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-purple)"></span>시간대 분포</h2>' +
+      '<section class="panel"><h2><span class="hmk" style="background:var(--lg-blue)"></span>프로젝트별 턴</h2>' + projBars + '</section>' +
+      '<section class="panel" style="--bar:var(--lg-violet)"><h2><span class="hmk" style="background:var(--lg-violet)"></span>기기별 턴</h2>' + devBars + '</section>' +
+      '<section class="panel" style="--bar:var(--lg-purple)"><h2><span class="hmk" style="background:var(--lg-purple)"></span>시간대 분포</h2>' +
         '<div class="hours">' + hourBars + '</div>' +
         '<div class="hours-x"><span>0시</span><span>6</span><span>12</span><span>18</span><span>23시</span></div></section>';
     // 잔디는 렌더 직후 최우측(오늘)이 보이도록 스크롤

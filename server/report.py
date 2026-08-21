@@ -147,7 +147,7 @@ NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id
 
 
 def metrics(c, range_, day):
-    """활동 메트릭 — 윈도우 집계 + 프로젝트/시간대 분포 + 잔디(최근 364일=52주, 윈도우 무관).
+    """활동 메트릭 — 윈도우 집계 + 프로젝트·기기/시간대 분포 + 잔디(최근 364일=52주, 윈도우 무관).
     잔디 기간은 52주 고정 — EVENT_RETENTION_DAYS를 유한하게 두면 그보다 짧게 유지할 것.
     자동화 세션은 전 수치에서 제외."""
     pred = _pred(range_)
@@ -171,6 +171,11 @@ def metrics(c, range_, day):
         f"SELECT project, COUNT(*) turns FROM events e WHERE event='turn_done'"
         f" AND COALESCE(project,'') NOT IN ('','summarizer') AND {pred} AND {NOT_AUTO}"
         f" GROUP BY project ORDER BY turns DESC", pr)]
+    per_device = [dict(r) for r in c.execute(
+        f"SELECT d.name AS device, COUNT(*) turns FROM events e"
+        f" JOIN devices d ON d.id=e.device_id"
+        f" WHERE event='turn_done' AND {pred} AND {NOT_AUTO}"
+        f" GROUP BY d.name ORDER BY turns DESC", pr)]
     hourly = {r["h"]: r["n"] for r in c.execute(
         f"SELECT strftime('%H',ts_hub,'localtime') h, COUNT(*) n FROM events e"
         f" WHERE event='turn_done' AND {pred} AND {NOT_AUTO} GROUP BY h", pr)}
@@ -183,6 +188,7 @@ def metrics(c, range_, day):
         "turns": turns, "sessions": sessions, "projects": projects,
         "active_hours": round(slots * 0.5, 1),
         "per_project": per_project,
+        "per_device": per_device,
         "hourly": [{"hour": f"{i:02d}", "n": hourly.get(f"{i:02d}", 0)} for i in range(24)],
         "streak": streak,
     }
