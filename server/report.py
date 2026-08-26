@@ -17,6 +17,32 @@ _EXCL_NORM = tuple(n for n in (re.sub(r"[^0-9a-z가-힣]", "", p.lower())
                                for p in CFG.report_exclude_projects) if n)
 
 
+def _service(project):
+    """프로젝트 → 리포트 최상위 서비스명. REPORT_SERVICE_MAP에 없으면 프로젝트명 그대로.
+    최상위 묶음을 설정으로 고정해, 이름이 비슷하다는 이유로 별개 서비스가 흡수되는 것을 막는다."""
+    return CFG.report_service_map.get(project, project)
+
+
+def _clip(text, n=240):
+    """로그 한 줄 상한. 잘렸으면 잘렸다고 표시 — 표시가 없으면 모델이 '로그가 중간에 잘려 있다'며
+    본문 대신 안내문을 쓰거나 남은 프로젝트를 통째로 건너뛴다(2026-08-26 일일 리포트 사고)."""
+    return text if len(text) <= n else text[:n].rstrip() + " …(이하 생략)"
+
+
+_BULLET = re.compile(r"^\s*[-*+] ")
+
+
+def strip_meta(md):
+    """모델이 붙인 머리말·맺음말을 잘라내고 불릿 마크다운만 남긴다.
+    프롬프트로 금지해도 로그가 잘려 보이면 '확인 가능한 범위까지만 정리했습니다' 류를 앞에 붙인다.
+    불릿이 하나도 없으면(작업 없음 안내 등) 원문 그대로 둔다."""
+    lines = md.splitlines()
+    at = [i for i, line in enumerate(lines) if _BULLET.match(line)]
+    if not at:
+        return md.strip()
+    return "\n".join(lines[at[0]:at[-1] + 1]).strip()
+
+
 def _mentions_excluded(text):
     """제외 프로젝트가 언급된 로그 줄인지 — 표기 차이('a-b'/'a b'/'a_b')를 무시하고 비교.
     제외 프로젝트를 다룬 작업(정리·모니터링 등)의 로그가 다른 프로젝트 섹션을 타고
@@ -58,24 +84,44 @@ def gather(c, range_, day):
         if r["event"] == "prompt":
             t = (pl.get("prompt") or "").strip()
             if t and not t.startswith(NOISE) and not _mentions_excluded(t):
-                d["prompts"].append(t[:240])
+                d["prompts"].append(_clip(t))
         else:
             d["turns"] += 1
             s = (pl.get("summary") or "").strip()
             if s and not _mentions_excluded(s):
-                d["sums"].append(s[:240])
+                d["sums"].append(_clip(s))
     return {p: {"prompts": v["prompts"], "sums": v["sums"], "turns": v["turns"],
                 "sessions": len(v["sess"])}
             for p, v in proj.items() if v["prompts"] or v["sums"]}
 
 
-def build_prompt(range_, day, work):
+def known_services(c, days=120, min_events=20):
+    """최근 로그에 실제로 나타난 프로젝트를 서비스명으로 환산한 목록(빈도순).
+    작업 대상이 로그가 수집된 프로젝트와 다를 때(예: 어느 서비스 저장소를 열어둔 채 허브 결함을 확인),
+    모델이 이름을 새로 짓지 않고 이 표기 중 하나를 쓰도록 프롬프트에 함께 넣는다.
+    잡다한 임시 디렉터리명이 끼지 않게 최소 이벤트 수로 거른다."""
+    rows = c.execute(
+        f"SELECT project, COUNT(*) n FROM events e"
+        f" WHERE COALESCE(project,'') NOT IN ('','summarizer')"
+        f"   AND ts_hub >= datetime('now',?) AND {NOT_AUTO}"
+        f" GROUP BY project HAVING n >= ? ORDER BY n DESC", (f"-{days} days", min_events))
+    out = []
+    for r in rows:
+        if r["project"] in CFG.report_exclude_projects:
+            continue
+        svc = _service(r["project"])
+        if svc not in out:
+            out.append(svc)
+    return out
+
+
+def build_prompt(range_, day, work, services=()):
     """프로젝트별 로그를 하나의 마크다운 요청으로 (LLM 1회 호출).
     출력은 PM/PO 관점의 보고용 마크다운 — 기간이 길수록 나열이 아니라 더 포괄적인 종합."""
     cap = {"day": 20, "week": 40, "month": 60}[range_]   # 기간이 길수록 로그가 많다 — 상한 완화
     blocks = []
-    for p, v in work.items():
-        b = [f"=== 프로젝트: {p} (턴 {v['turns']}) ==="]
+    for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0])):
+        b = [f"=== 서비스: {_service(p)} | 프로젝트: {p} (턴 {v['turns']}) ==="]
         if v["prompts"]:
             b.append("[지시]\n" + "\n".join("- " + x for x in v["prompts"][:cap]))
         if v["sums"]:
@@ -114,9 +160,18 @@ def build_prompt(range_, day, work):
     return (
         head +
         "구조 — 헤더(#) 없이 전부 불릿, 3단계 중첩:\n"
-        "- **최상위 불릿(들여쓰기 0)** = 서비스명. 제품/서비스 단위로 묶는다. 여러 프로젝트가 같은\n"
-        "  서비스면 하나로 합친다(서비스명은 작업 내용에 드러나는 제품명, 예: web/api 저장소 → 하나의 제품명;\n"
-        "  불명확하면 프로젝트명). 서비스명은 이름만 짧게 — 괄호 부연·설명·볼드(**) 금지.\n"
+        "- **최상위 불릿(들여쓰기 0)** = 각 로그 블록 머리에 적힌 **서비스명 그대로**. 이름을 바꾸거나\n"
+        "  줄이거나 새로 짓지 않는다. **서비스명이 다른 블록은 절대 합치지 않는다** — 이름이 비슷해도\n"
+        "  (예: 서로 다른 서비스인데 접두어만 같은 경우) 각각 별도 최상위 불릿으로 둔다.\n"
+        "  같은 서비스명이 붙은 블록이 여러 개일 때만 하나로 합친다.\n"
+        "  서비스명은 이름만 짧게 — 괄호 부연·설명·볼드(**) 금지.\n"
+        "  단, 보고할 내용이 없는 블록(잡담·중단된 지시뿐)은 **최상위 불릿 자체를 만들지 않는다** —\n"
+        "  '기록 없음' 같은 빈 항목을 채워 넣지 말고 통째로 생략한다.\n"
+        "- 어느 블록에 담을지는 **작업의 대상** 기준이다. 로그는 그때 열려 있던 저장소에 붙어 수집되므로,\n"
+        "  A 저장소에서 일하다 **다른 서비스 B의 결함·개선을 확인·처리**했다면 그 항목은 A가 아니라\n"
+        "  B 아래에 둔다 (예: 서비스 저장소에서 작업 중 발견한 협업 도구 자체의 알림 문제 → 그 도구).\n"
+        "  이때 B가 그 기간에 블록이 없어도 최상위 불릿을 새로 만들어도 된다. B의 이름은 아래\n"
+        "  '알려진 서비스' 표기를 그대로 쓰고, 목록에 없으면 옮기지 말고 원래 블록에 둔다.\n"
         "- **4칸 들여쓴 불릿** = 기능/영역/주제 (예: 결제, 모바일앱, 워커 배치).\n"
         "- **8칸 들여쓴 불릿** = 구체적으로 한 일. 더 세부는 12칸.\n\n"
         + period_rules +
@@ -124,17 +179,26 @@ def build_prompt(range_, day, work):
         "- 프로덕트/프로젝트 매니저·오너가 읽는 보고서다. 함수명·변수명·파일명·내부 구현 용어를 쓰지\n"
         "  말고, **무엇이 달라졌는지 / 어떤 결정이 났는지 / 어디까지 진행됐는지**로 표현한다.\n"
         "- 간결한 명사구·완료형. `주제; 세부`, `→ 결과·전환` 표기를 활용해도 좋다.\n"
+        "- 핸드오프·환경 설정·도구 정비처럼 수단·프로세스 성격의 작업은 **무엇에 대한 작업이었는지**\n"
+        "  (대상 기능·과제)를 반드시 함께 적는다 — '기기 간 작업 이관'처럼 대상 없이 수단만 적지 않는다.\n"
         "- 잡담·질문·메타 대화·시스템 알림·불완전 지시는 제외. 실제 수행·결정한 것만, 추측 금지.\n"
-        "- 머리말·맺음말·총평·인사·헤더(#) 없이 불릿 마크다운만 출력.\n\n"
-        "로그:\n" + "\n\n".join(blocks)
+        "- 로그 항목은 길면 끝에 '…(이하 생략)'이 붙어 있다. 잘린 항목도 드러난 범위까지 반영하되,\n"
+        "  **잘림 자체는 언급하지 않는다**. 로그가 부족해 보여도 되묻지 말고 확인되는 것만 정리한다.\n"
+        "- 머리말·맺음말·총평·인사·안내문·사과·헤더(#) 없이 **불릿만** 출력한다. 첫 글자는 반드시 '- '.\n"
+        "  모든 블록을 빠짐없이 다룬다 — 일부 블록만 정리하고 나머지를 남기지 않는다.\n\n"
+        + (("알려진 서비스(다른 서비스 대상 항목을 옮길 때 이 표기를 그대로 쓴다):\n- "
+            + ", ".join(services) + "\n\n") if services else "")
+        + "로그:\n" + "\n\n".join(blocks)
     )
 
 
 def fallback_md(work):
     """LLM 실패/미가용 시 — 원재료 기반 최소 마크다운(요약 없이 나열)."""
-    out = []
-    for p, v in work.items():
-        out.append(f"- {p}")
+    out, seen = [], None
+    for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0])):
+        if _service(p) != seen:                       # 같은 서비스로 매핑된 프로젝트는 한 불릿 아래로
+            seen = _service(p)
+            out.append(f"- {seen}")
         out += ["    - " + x[:100] for x in (v["sums"] or v["prompts"])[:6]]
     return "\n".join(out).strip() or "이 기간에 기록된 작업이 없습니다."
 

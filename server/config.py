@@ -66,6 +66,14 @@ class Config:
         # 그 이름이 언급된 줄까지 리포트 재료에서 뺀다 (언급이 요약에 되살아나는 재발 방지)
         self.report_exclude_projects = tuple(
             x.strip() for x in get("REPORT_EXCLUDE_PROJECTS").split(",") if x.strip())
+        # 프로젝트 → 리포트 최상위 서비스명 매핑("proj=서비스, proj2=서비스").
+        # 최상위 묶음을 LLM 추측이 아니라 설정으로 고정한다 — 매핑이 없으면 프로젝트명을 그대로 쓴다.
+        # (같은 접두어라고 임의로 합치던 동작 때문에 별개 서비스가 흡수되는 문제를 막기 위함)
+        self.report_service_map = {}
+        for item in get("REPORT_SERVICE_MAP").split(","):
+            proj, _, svc = item.strip().partition("=")
+            if proj.strip() and svc.strip():
+                self.report_service_map[proj.strip()] = svc.strip()
         # "home:1.2.3.4, office:5.6.7.8" → {ip, ...} (이름은 로깅용)
         self.ip_allowlist = {}
         for item in get("IP_ALLOWLIST").split(","):

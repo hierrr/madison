@@ -614,7 +614,8 @@ def _strip_fences(md: str) -> str:
 
 
 def _report_llm(prompt: str) -> str:
-    return _strip_fences(_llm_run("report", prompt, timeout=300))
+    # 펜스 → 머리말/맺음말 순으로 벗긴다 (모델이 리포트 앞뒤에 붙이는 안내문 방어)
+    return report.strip_meta(_strip_fences(_llm_run("report", prompt, timeout=300)))
 
 
 def _gen_report(range_: str, day: str) -> dict:
@@ -627,10 +628,12 @@ def _gen_report(range_: str, day: str) -> dict:
         with _gen_lock:
             with db.tx() as c:
                 work = report.gather(c, range_, day)
+                services = report.known_services(c) if work else []
             if not work:
                 md = "이 기간에 기록된 작업이 없습니다."
             else:
-                md = _report_llm(report.build_prompt(range_, day, work)) or report.fallback_md(work)
+                md = (_report_llm(report.build_prompt(range_, day, work, services))
+                      or report.fallback_md(work))
             gen_at = state.utcnow()
             with db.tx() as c:
                 c.execute(

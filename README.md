@@ -57,10 +57,12 @@ push a piece of work from one machine to another without walking over to it.
 - **Daily/weekly/monthly reports** — the hub condenses each period's work into
   a PM/owner-oriented report markdown (grouped by service, nested bullets) you
   can paste into Notion — the longer the period, the more it synthesizes
-  instead of listing. Regenerated on a schedule and on demand, plus usage
+  instead of listing. Service grouping is fixed by `REPORT_SERVICE_MAP`, not
+  guessed by the model, and an item is filed under the service it is *about* —
+  a hub bug you hit while another repo was open lands under the hub, not that repo. Regenerated on a schedule and on demand, plus usage
   metrics: turns, sessions, active hours, per-project and hourly
-  distributions, and a 52-week streak grid (scrolls horizontally, lands on
-  the most recent week).
+  distributions, and a 52-week streak grid with month labels (scrolls
+  horizontally, lands on the most recent week).
 - **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
   Codex), model, and reasoning effort separately for task summaries and report
   generation, with model lists pulled live from the CLIs installed on the hub.
@@ -254,6 +256,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `REPORT_MODEL` | `claude-sonnet-5` | Model for report generation |
 | `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` / `REPORT_MONTHLY_MIN` | `60` / `1440` / `1440` | Auto-refresh cadence for the daily / weekly / monthly report, in minutes |
 | `REPORT_EXCLUDE_PROJECTS` | *(empty)* | Comma-separated projects to keep out of reports — drops the project's own section and any log line from other projects that mentions its name |
+| `REPORT_SERVICE_MAP` | *(empty)* | Comma-separated `project=service` pairs setting each report's top-level grouping (e.g. `web=Acme, api=Acme`). Unmapped projects use their own name; projects with different service names are never merged |
 | `IP_ALLOWLIST` | *(off)* | Optional `name:ip` list restricting device reporting |
 
 LLM choices — provider, model, effort, and CLI paths — can also be changed in the
