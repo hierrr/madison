@@ -12,6 +12,24 @@ from .config import CFG
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
 
+# 다만 task-notification의 <summary>만은 배경 맥락으로 살린다 — 그 시각 돌던 백그라운드 작업의
+# 제목이라, 이어지는 작업의 대상('무슨 데이터'·'어느 기능')이 그날의 지시·완료요약에서 빠져 있을 때
+# 이름을 되찾아 준다(2026-08-23 일일 리포트에 대상 없는 '데이터 재수집'만 남은 사례).
+_NOTE_SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.S)
+_NOTE_LABEL = re.compile(r'"([^"]{4,})"')
+
+
+def _note(text):
+    """알림 원문 → 배경 한 줄. 제목이 따옴표로 묶여 있으면 그 제목만 취해
+    같은 작업의 시작·종료 알림이 한 줄로 합쳐지게 한다."""
+    m = _NOTE_SUMMARY.search(text)
+    if not m:
+        return ""
+    s = " ".join(m.group(1).split())
+    q = _NOTE_LABEL.search(s)
+    return (q.group(1) if q else s).strip()
+
+
 # 제외 프로젝트 이름의 정규형(하이픈·공백·언더스코어 등 구분자 무시) — 언급 줄 필터용
 _EXCL_NORM = tuple(n for n in (re.sub(r"[^0-9a-z가-힣]", "", p.lower())
                                for p in CFG.report_exclude_projects) if n)
@@ -78,20 +96,27 @@ def gather(c, range_, day):
         skip + _params(range_, day)).fetchall()
     proj = {}
     for r in rows:
-        d = proj.setdefault(r["project"], {"prompts": [], "sums": [], "turns": 0, "sess": set()})
+        d = proj.setdefault(r["project"],
+                            {"prompts": [], "sums": [], "notes": [], "turns": 0, "sess": set()})
         d["sess"].add((r["device_id"], r["session_id"]))
         pl = json.loads(r["payload"] or "{}")
         if r["event"] == "prompt":
             t = (pl.get("prompt") or "").strip()
-            if t and not t.startswith(NOISE) and not _mentions_excluded(t):
+            if not t or _mentions_excluded(t):
+                continue
+            if t.startswith("<task-notification"):
+                n = _note(t)
+                if n and n not in d["notes"]:
+                    d["notes"].append(_clip(n, 120))
+            elif not t.startswith(NOISE):
                 d["prompts"].append(_clip(t))
         else:
             d["turns"] += 1
             s = (pl.get("summary") or "").strip()
             if s and not _mentions_excluded(s):
                 d["sums"].append(_clip(s))
-    return {p: {"prompts": v["prompts"], "sums": v["sums"], "turns": v["turns"],
-                "sessions": len(v["sess"])}
+    return {p: {"prompts": v["prompts"], "sums": v["sums"], "notes": v["notes"],
+                "turns": v["turns"], "sessions": len(v["sess"])}
             for p, v in proj.items() if v["prompts"] or v["sums"]}
 
 
@@ -126,6 +151,8 @@ def build_prompt(range_, day, work, services=()):
             b.append("[지시]\n" + "\n".join("- " + x for x in v["prompts"][:cap]))
         if v["sums"]:
             b.append("[완료요약]\n" + "\n".join("- " + x for x in v["sums"][:cap]))
+        if v.get("notes"):
+            b.append("[배경]\n" + "\n".join("- " + x for x in v["notes"][:cap]))
         blocks.append("\n".join(b))
     label = {"day": "하루", "week": "한 주(월~일)", "month": "한 달"}[range_]
     kind = {"day": "업무일지", "week": "주간보고", "month": "월간보고"}[range_]
@@ -181,6 +208,11 @@ def build_prompt(range_, day, work, services=()):
         "- 간결한 명사구·완료형. `주제; 세부`, `→ 결과·전환` 표기를 활용해도 좋다.\n"
         "- 핸드오프·환경 설정·도구 정비처럼 수단·프로세스 성격의 작업은 **무엇에 대한 작업이었는지**\n"
         "  (대상 기능·과제)를 반드시 함께 적는다 — '기기 간 작업 이관'처럼 대상 없이 수단만 적지 않는다.\n"
+        "- 각 항목은 그 리포트만 읽고도 무엇에 대한 작업인지 알 수 있어야 한다 — '데이터 수집',\n"
+        "  '전량 분석', '오류 수정'처럼 **대상이 빠진 표기 금지**. 무슨 데이터·어느 화면·어느 기능인지를\n"
+        "  항목이나 그 상위 불릿에 드러낸다. 대상은 같은 블록의 다른 로그나 [배경]에서 찾는다.\n"
+        "- [배경]은 그 시각 돌던 백그라운드 작업의 제목이다. 항목의 **대상·맥락을 식별하는 데만** 쓰고,\n"
+        "  지시·완료요약에 없는 일을 배경만 보고 새 항목으로 만들지 않는다.\n"
         "- 잡담·질문·메타 대화·시스템 알림·불완전 지시는 제외. 실제 수행·결정한 것만, 추측 금지.\n"
         "- 로그 항목은 길면 끝에 '…(이하 생략)'이 붙어 있다. 잘린 항목도 드러난 범위까지 반영하되,\n"
         "  **잘림 자체는 언급하지 않는다**. 로그가 부족해 보여도 되묻지 말고 확인되는 것만 정리한다.\n"
