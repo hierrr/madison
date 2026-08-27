@@ -74,6 +74,14 @@ class Config:
             proj, _, svc = item.strip().partition("=")
             if proj.strip() and svc.strip():
                 self.report_service_map[proj.strip()] = svc.strip()
+        # 자기 프로젝트가 없는 서비스("서비스=식별 단서; 서비스2") — 다른 서비스의 저장소(모노리포 등) 안에서
+        # 작업되는 경우. 세미콜론 구분(단서에 콤마를 쓸 수 있게). 프롬프트의 '알려진 서비스' 목록에 단서와
+        # 함께 실려, 모델이 그 서비스 대상 항목을 로그가 붙은 서비스가 아니라 이 이름 밑으로 옮길 수 있게 한다.
+        self.report_known_services = {}
+        for item in get("REPORT_KNOWN_SERVICES").split(";"):
+            name, _, hint = item.strip().partition("=")
+            if name.strip():
+                self.report_known_services[name.strip()] = hint.strip()
         # "home:1.2.3.4, office:5.6.7.8" → {ip, ...} (이름은 로깅용)
         self.ip_allowlist = {}
         for item in get("IP_ALLOWLIST").split(","):

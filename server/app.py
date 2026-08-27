@@ -590,10 +590,11 @@ def _summary_loop():
 
 
 # ── 업무 리포트 + 사용 메트릭 ──────────────────────────
-# events(prompt/turn_done)를 프로젝트별로 모아 허브 LLM으로 업무일지 마크다운 생성.
-# 일일=주기적 자동 갱신, 주간=매일 밤 갱신, 대시보드에서 수동 갱신도 가능.
+# 일일: events(prompt/turn_done)를 프로젝트→세션→턴으로 모아 허브 LLM으로 업무일지 마크다운 생성.
+# 주간·월간: 저장된 일일 업무일지를 재료로 종합(빠졌거나 오래된 최근 일일은 그 자리에서 생성).
+# 일일=주기적 자동 갱신, 주간·월간=매일 갱신, 대시보드에서 수동 갱신도 가능.
 
-_gen_lock = threading.Lock()          # LLM 생성 직렬화 (동시 2건 방지)
+_gen_lock = threading.RLock()         # LLM 생성 직렬화 (동시 2건 방지) — 주간·월간이 안에서 일일을 만들므로 재진입
 _gen_active: set = set()              # 생성 중인 (range, day) — 상태 표시용
 _gen_active_lock = threading.Lock()
 
@@ -613,38 +614,99 @@ def _strip_fences(md: str) -> str:
     return t
 
 
-def _report_llm(prompt: str) -> str:
+def _report_llm(prompt: str, timeout: int = 300) -> str:
     # 펜스 → 머리말/맺음말 순으로 벗긴다 (모델이 리포트 앞뒤에 붙이는 안내문 방어)
-    return report.strip_meta(_strip_fences(_llm_run("report", prompt, timeout=300)))
+    return report.strip_meta(_strip_fences(_llm_run("report", prompt, timeout=timeout)))
+
+
+class _active:
+    """생성 중 표시 — 대시보드가 (range, day)를 '생성 중'으로 본다."""
+    def __init__(self, key):
+        self.key = key
+
+    def __enter__(self):
+        with _gen_active_lock:
+            _gen_active.add(self.key)
+
+    def __exit__(self, *exc):
+        with _gen_active_lock:
+            _gen_active.discard(self.key)
+
+
+def _store_report(range_: str, day: str, md: str) -> str:
+    gen_at = state.utcnow()
+    with db.tx() as c:
+        c.execute(
+            "INSERT INTO reports (range, day, markdown, generated_at) VALUES (?,?,?,?)"
+            " ON CONFLICT(range, day) DO UPDATE SET"
+            " markdown=excluded.markdown, generated_at=excluded.generated_at",
+            (range_, day, md, gen_at))
+    return gen_at
+
+
+def _prev_daily(c, day: str, back: int = 3):
+    """직전 업무일지 (날짜, md) — 최근 back일 안에서 내용 있는 가장 가까운 것. 주말 뒤 월요일도 금요일을 잇는다."""
+    d = datetime.date.fromisoformat(day)
+    for i in range(1, back + 1):
+        pd = (d - datetime.timedelta(days=i)).isoformat()
+        row = c.execute("SELECT markdown FROM reports WHERE range='day' AND day=?", (pd,)).fetchone()
+        if row and row["markdown"] and row["markdown"] != report.EMPTY_MD:
+            return pd, row["markdown"]
+    return None
+
+
+def _gen_day_md(day: str) -> str:
+    with db.tx() as c:
+        work = report.gather(c, "day", day)
+        services = report.known_services(c) if work else []
+        prev = _prev_daily(c, day) if work else None
+    if not work:
+        return report.EMPTY_MD
+    # 예산을 넘는 프로젝트는 긴 세션부터 미리 압축(세션당 LLM 1회) — 잘라내지 않는다
+    report.compress(work, lambda pr: _strip_fences(_llm_run("report", pr, timeout=180)))
+    return (_report_llm(report.build_day_prompt(day, work, services, prev))
+            or report.fallback_md(work))
+
+
+def _daily_for(day: str, today: str) -> str:
+    """주간·월간 재료용 일일 업무일지. 없으면 생성하고, **어제** 것은 마지막 지시·응답보다 오래됐으면 재생성한다
+    (일일 자동 갱신은 '오늘'만 돌아서, 마지막 시간별 갱신과 자정 사이의 작업이나 허브가 꺼져 있던 저녁의 작업은
+    빠진 채 굳는다). 오늘 것은 매시간 루프가 갱신하므로 저장본을 쓰고, 더 오래된 날도 저장본 그대로 —
+    손으로 고친 리포트를 덮지 않는다."""
+    with db.tx() as c:
+        row = c.execute("SELECT markdown, generated_at FROM reports WHERE range='day' AND day=?",
+                        (day,)).fetchone()
+        stale = False
+        if row and day == (datetime.date.fromisoformat(today) - datetime.timedelta(days=1)).isoformat():
+            last = report.last_event_at(c, day)
+            stale = bool(last and last > (row["generated_at"] or ""))
+    if row and not stale:
+        return row["markdown"] or ""
+    with _active(("day", day)):
+        md = _gen_day_md(day)
+        _store_report("day", day, md)
+    return md
+
+
+def _gen_period_md(range_: str, day: str) -> str:
+    today = _today_local()
+    dailies = [(d, md) for d in report.period_days(range_, day, today)
+               for md in [_daily_for(d, today)] if md and md != report.EMPTY_MD]
+    if not dailies:
+        return report.EMPTY_MD
+    with db.tx() as c:
+        services = report.known_services(c)
+    return (_report_llm(report.build_period_prompt(range_, day, dailies, services))
+            or report.fallback_period_md(dailies))
 
 
 def _gen_report(range_: str, day: str) -> dict:
     """기간 리포트 생성·저장. 생성 중 표시(_gen_active) + LLM 직렬화(_gen_lock).
     백그라운드 루프·수동 갱신 어느 경로든 이 함수를 통하므로 대시보드가 '생성 중'을 본다."""
-    key = (range_, day)
-    with _gen_active_lock:
-        _gen_active.add(key)
-    try:
-        with _gen_lock:
-            with db.tx() as c:
-                work = report.gather(c, range_, day)
-                services = report.known_services(c) if work else []
-            if not work:
-                md = "이 기간에 기록된 작업이 없습니다."
-            else:
-                md = (_report_llm(report.build_prompt(range_, day, work, services))
-                      or report.fallback_md(work))
-            gen_at = state.utcnow()
-            with db.tx() as c:
-                c.execute(
-                    "INSERT INTO reports (range, day, markdown, generated_at) VALUES (?,?,?,?)"
-                    " ON CONFLICT(range, day) DO UPDATE SET"
-                    " markdown=excluded.markdown, generated_at=excluded.generated_at",
-                    (range_, day, md, gen_at))
-        return {"range": range_, "day": day, "markdown": md, "generated_at": gen_at}
-    finally:
-        with _gen_active_lock:
-            _gen_active.discard(key)
+    with _active((range_, day)), _gen_lock:
+        md = _gen_day_md(day) if range_ == "day" else _gen_period_md(range_, day)
+        gen_at = _store_report(range_, day, md)
+    return {"range": range_, "day": day, "markdown": md, "generated_at": gen_at}
 
 
 def _norm_range(r: str) -> str:
@@ -718,6 +780,12 @@ def _report_loop():
                 if time.time() - last[r] >= mins * 60:
                     _gen_report(r, _norm_day(r, today))
                     last[r] = time.time()
+                    if r == "day":
+                        # 어제 일지가 마지막 갱신 뒤의 작업을 놓쳤으면 한 번 더 — 아침에 봐도 온전하게
+                        yesterday = (datetime.date.fromisoformat(today)
+                                     - datetime.timedelta(days=1)).isoformat()
+                        with _gen_lock:
+                            _daily_for(yesterday, today)
         except Exception:
             pass
         time.sleep(300)

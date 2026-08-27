@@ -1,19 +1,28 @@
 """일일/주간/월간 업무 리포트 + 사용 메트릭.
 
-events(prompt/turn_done)를 프로젝트별로 모아 업무일지용 마크다운으로 요약하고,
-에이전트 사용 메트릭(세션·턴·활동시간·시간대·잔디)을 집계한다.
+일일: events(prompt/turn_done)를 프로젝트 → 세션 → 턴(지시·응답 짝)으로 묶어 업무일지 마크다운으로 요약한다.
+주간·월간: 저장된 **일일 업무일지**를 재료로 종합한다 — 원본 로그를 다시 읽지 않는다. 기간이 길수록
+로그가 상한을 넘겨 뒷부분이 통째로 잘리던 문제가 없어지고, 일일에서 정한 서비스·주제 이름이 그대로 이어진다.
+에이전트 사용 메트릭(세션·턴·활동시간·시간대·잔디)도 여기서 집계한다.
 LLM 호출은 app에서 주입한다 — 이 모듈은 순수 데이터/문자열만 다룬다.
 """
+import datetime
 import json
 import re
 
 from .config import CFG
 
+EMPTY_MD = "이 기간에 기록된 작업이 없습니다."
+
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
 
-# 다만 task-notification의 <summary>만은 배경 맥락으로 살린다 — 그 시각 돌던 백그라운드 작업의
-# 제목이라, 이어지는 작업의 대상('무슨 데이터'·'어느 기능')이 그날의 지시·완료요약에서 빠져 있을 때
+# 내용 없는 응답 — 알림만 받고 할 일이 없던 턴의 정형 문구. 걸러내지 않으면 자리만 차지한다
+# (2026-08-27 일일: 45턴 중 13턴).
+_EMPTY_RESPONSES = ("no response requested",)
+
+# task-notification은 버리되 <summary>의 제목만 배경 맥락으로 살린다 — 그 시각 끝난 백그라운드 작업의
+# 제목이라, 이어지는 응답의 대상('무슨 데이터'·'어느 기능')이 그날의 지시·응답에서 빠져 있을 때
 # 이름을 되찾아 준다(2026-08-23 일일 리포트에 대상 없는 '데이터 재수집'만 남은 사례).
 _NOTE_SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.S)
 _NOTE_LABEL = re.compile(r'"([^"]{4,})"')
@@ -28,6 +37,11 @@ def _note(text):
     s = " ".join(m.group(1).split())
     q = _NOTE_LABEL.search(s)
     return (q.group(1) if q else s).strip()
+
+
+def _real_response(text):
+    t = text.strip().lower().rstrip(".!")
+    return bool(t) and not any(t.startswith(x) for x in _EMPTY_RESPONSES)
 
 
 # 제외 프로젝트 이름의 정규형(하이픈·공백·언더스코어 등 구분자 무시) — 언급 줄 필터용
@@ -61,6 +75,20 @@ def strip_meta(md):
     return "\n".join(lines[at[0]:at[-1] + 1]).strip()
 
 
+_INDENT = re.compile(r"^( *)[-*+] ")
+
+
+def topics(md, max_indent=4):
+    """업무일지에서 주제 수준(들여쓰기 ≤ max_indent) 불릿만 — 직전 일지를 맥락으로 넣을 때 쓴다.
+    세부(8칸 이상)는 넣지 않는다: 어제 한 일이 오늘 한 일로 되살아나는 것을 막는다."""
+    out = []
+    for line in md.splitlines():
+        m = _INDENT.match(line)
+        if m and len(m.group(1)) <= max_indent:
+            out.append(line.rstrip())
+    return "\n".join(out)
+
+
 def _mentions_excluded(text):
     """제외 프로젝트가 언급된 로그 줄인지 — 표기 차이('a-b'/'a b'/'a_b')를 무시하고 비교.
     제외 프로젝트를 다룬 작업(정리·모니터링 등)의 로그가 다른 프로젝트 섹션을 타고
@@ -83,47 +111,90 @@ def _params(range_, day):
     return (day, day) if range_ in ("week", "month") else (day,)
 
 
+def period_days(range_, day, today):
+    """기간에 속하는 로컬 날짜 목록(오늘까지). week=월요일 기준 7일, month=1일 기준 그 달."""
+    d = datetime.date.fromisoformat(day)
+    if range_ == "week":
+        end = d + datetime.timedelta(days=6)
+    elif range_ == "month":
+        end = (d.replace(day=28) + datetime.timedelta(days=4)).replace(day=1) - datetime.timedelta(days=1)
+    else:
+        end = d
+    end = min(end, datetime.date.fromisoformat(today))
+    return [(d + datetime.timedelta(days=i)).isoformat() for i in range((end - d).days + 1)]
+
+
+def _weekday(day):
+    return "월화수목금토일"[datetime.date.fromisoformat(day).weekday()]
+
+
+# ── 일일 원재료: 프로젝트 → 세션 → 턴 ─────────────────
+
 def gather(c, range_, day):
-    """프로젝트별 작업 원재료: {project: {prompts, sums, turns, sessions}}.
-    지시 없거나 요약 없는 프로젝트, REPORT_EXCLUDE_PROJECTS 프로젝트는 제외."""
+    """프로젝트별 작업 원재료 — {project: {sessions, turns, n_sessions}}.
+    sessions = [{device, start, end, turns: [{prompts, notes, response}]}] (세션·턴 모두 시간순).
+    한 턴 = 지시(들) → 응답. 같은 세션에서 응답이 붙기 전까지의 지시는 한 턴에 모은다(알림이 쌓이거나
+    실행 중 지시를 이어 보낸 경우). 지시도 응답도 없는 턴(알림만 받고 빈 응답)은 버린다.
+    지시·응답이 하나도 없는 프로젝트, REPORT_EXCLUDE_PROJECTS 프로젝트, 자동화 세션은 제외."""
     pred = _pred(range_)
     skip = ("", "summarizer") + CFG.report_exclude_projects
     rows = c.execute(
-        f"SELECT project, event, session_id, device_id, payload FROM events e"
-        f" WHERE event IN ('prompt','turn_done')"
-        f"   AND COALESCE(project,'') NOT IN ({','.join('?' * len(skip))})"
-        f"   AND {pred} AND {NOT_AUTO} ORDER BY project, ts_hub",
+        f"SELECT e.project, e.event, e.session_id, e.device_id, e.payload, d.name AS device,"
+        f" strftime('%m/%d %H:%M', e.ts_hub, 'localtime') AS t"
+        f" FROM events e LEFT JOIN devices d ON d.id=e.device_id"
+        f" WHERE e.event IN ('prompt','turn_done')"
+        f"   AND COALESCE(e.project,'') NOT IN ({','.join('?' * len(skip))})"
+        f"   AND {pred} AND {NOT_AUTO} ORDER BY e.ts_hub, e.id",
         skip + _params(range_, day)).fetchall()
     proj = {}
     for r in rows:
-        d = proj.setdefault(r["project"],
-                            {"prompts": [], "sums": [], "notes": [], "turns": 0, "sess": set()})
-        d["sess"].add((r["device_id"], r["session_id"]))
+        p = proj.setdefault(r["project"], {"sess": {}, "turns": 0})
+        s = p["sess"].setdefault(
+            (r["device_id"], r["session_id"]),
+            {"device": r["device"] or "?", "start": r["t"], "end": r["t"], "turns": []})
+        s["end"] = r["t"]
         pl = json.loads(r["payload"] or "{}")
+        cur = s["turns"][-1] if s["turns"] and s["turns"][-1]["response"] is None else None
         if r["event"] == "prompt":
             t = (pl.get("prompt") or "").strip()
             if not t or _mentions_excluded(t):
                 continue
+            if cur is None:
+                cur = {"prompts": [], "notes": [], "response": None}
+                s["turns"].append(cur)
             if t.startswith("<task-notification"):
                 n = _note(t)
-                if n and n not in d["notes"]:
-                    d["notes"].append(_clip(n, 120))
+                if n and n not in cur["notes"]:
+                    cur["notes"].append(_clip(n, 120))
             elif not t.startswith(NOISE):
-                d["prompts"].append(_clip(t))
+                cur["prompts"].append(_clip(t))
         else:
-            d["turns"] += 1
-            s = (pl.get("summary") or "").strip()
-            if s and not _mentions_excluded(s):
-                d["sums"].append(_clip(s))
-    return {p: {"prompts": v["prompts"], "sums": v["sums"], "notes": v["notes"],
-                "turns": v["turns"], "sessions": len(v["sess"])}
-            for p, v in proj.items() if v["prompts"] or v["sums"]}
+            p["turns"] += 1
+            resp = (pl.get("summary") or "").strip()
+            if not _real_response(resp) or _mentions_excluded(resp):
+                resp = ""
+            if cur is None:
+                cur = {"prompts": [], "notes": [], "response": None}
+                s["turns"].append(cur)
+            cur["response"] = _clip(resp)
+    out = {}
+    for name, p in proj.items():
+        sessions = []
+        for s in p["sess"].values():
+            turns = [t for t in s["turns"] if t["prompts"] or t["response"]]
+            for t in turns:
+                t["response"] = t["response"] or ""
+            if turns:
+                sessions.append({**s, "turns": turns})
+        if sessions:
+            out[name] = {"sessions": sessions, "turns": p["turns"], "n_sessions": len(p["sess"])}
+    return out
 
 
 def known_services(c, days=120, min_events=20):
-    """최근 로그에 실제로 나타난 프로젝트를 서비스명으로 환산한 목록(빈도순).
-    작업 대상이 로그가 수집된 프로젝트와 다를 때(예: 어느 서비스 저장소를 열어둔 채 허브 결함을 확인),
-    모델이 이름을 새로 짓지 않고 이 표기 중 하나를 쓰도록 프롬프트에 함께 넣는다.
+    """최근 로그에 실제로 나타난 프로젝트를 서비스명으로 환산한 목록(빈도순) + REPORT_KNOWN_SERVICES.
+    작업 대상이 로그가 수집된 프로젝트와 다를 때(예: 어느 서비스 저장소를 열어둔 채 허브 결함을 확인,
+    모노리포 안에서 다른 서비스를 작업), 모델이 이름을 새로 짓지 않고 이 표기 중 하나를 쓰도록 프롬프트에 넣는다.
     잡다한 임시 디렉터리명이 끼지 않게 최소 이벤트 수로 거른다."""
     rows = c.execute(
         f"SELECT project, COUNT(*) n FROM events e"
@@ -137,102 +208,226 @@ def known_services(c, days=120, min_events=20):
         svc = _service(r["project"])
         if svc not in out:
             out.append(svc)
+    for name in CFG.report_known_services:          # 프로젝트가 없는 서비스도 항상 후보에
+        if name not in out:
+            out.append(name)
     return out
 
 
-def build_prompt(range_, day, work, services=()):
-    """프로젝트별 로그를 하나의 마크다운 요청으로 (LLM 1회 호출).
-    출력은 PM/PO 관점의 보고용 마크다운 — 기간이 길수록 나열이 아니라 더 포괄적인 종합."""
-    cap = {"day": 20, "week": 40, "month": 60}[range_]   # 기간이 길수록 로그가 많다 — 상한 완화
-    blocks = []
-    for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0])):
-        b = [f"=== 서비스: {_service(p)} | 프로젝트: {p} (턴 {v['turns']}) ==="]
-        if v["prompts"]:
-            b.append("[지시]\n" + "\n".join("- " + x for x in v["prompts"][:cap]))
-        if v["sums"]:
-            b.append("[완료요약]\n" + "\n".join("- " + x for x in v["sums"][:cap]))
-        if v.get("notes"):
-            b.append("[배경]\n" + "\n".join("- " + x for x in v["notes"][:cap]))
-        blocks.append("\n".join(b))
-    label = {"day": "하루", "week": "한 주(월~일)", "month": "한 달"}[range_]
-    kind = {"day": "업무일지", "week": "주간보고", "month": "월간보고"}[range_]
-    head = (
-        f"아래는 {label}({day} 기준) 동안 AI 코딩 에이전트에게 준 지시와 완료 로그를 프로젝트별로 모은 것이다.\n"
-        f"이걸 **{kind}용 마크다운**으로 정리하라. 읽는 사람은 프로덕트/프로젝트 매니저·오너다 —\n"
-        "개발 구현 디테일이 아니라 **제품에 무엇이 달라졌고 어디까지 왔는지**를 명확하고 간결하게 서술한다.\n\n"
-    )
-    period_rules = {
-        "day": (
-            "일일 정리 규칙 (세션·턴의 나열이 아니라 기능 단위 정리):\n"
-            "- 같은 서비스/기능을 하루에 여러 번 다뤘으면 **하나로 합쳐** 결과 중심으로 정리한다.\n"
-            "- 구현 중 방향 전환·보류·취소가 있었으면 과정을 늘어놓지 말고 최종 상태로 표기한다\n"
-            "  (예: '~ 구현 → 접근 변경', '~ 시도 → 보류', '~ 추가했다 제거').\n\n"
-        ),
-        "week": (
-            "주간 종합 규칙 (중요 — 일일의 나열이 아니라 한 주의 종합·보고):\n"
-            "- 한 주 동안 같은 작업이 만들어졌다 수정·번복·재정리된 경우, 과정을 나열하지 말고\n"
-            "  **주말 기준 최종 상태 한 줄**로 정리한다 (예: 색을 3번 바꿨어도 '색상 체계 확정' 하나).\n"
-            "- 기간 내 여러 프로젝트/기능이 같은 흐름이면 통합해 서술한다 — 기능당 불릿 1~3개,\n"
-            "  지엽적 수정은 묶거나 생략. 항목 수는 일일보다 줄어야 정상이다.\n"
-            "- 12칸 세부 단계는 꼭 필요한 경우에만. 전체가 한 화면에 들어올 분량을 지향한다.\n\n"
-        ),
-        "month": (
-            "월간 종합 규칙 (중요 — 주간보다 한 단계 더 포괄적인 종합·보고):\n"
-            "- 일·주 단위 사건이 아니라 **한 달의 성과와 진척**을 쓴다. 여러 기능/프로젝트가 하나의\n"
-            "  방향이면 묶어서 '무엇이 어디까지 왔는지'로 서술한다 (예: '결제 개편 — 설계부터 구현까지 완료').\n"
-            "- 서비스당 굵직한 주제 2~4개, 주제당 불릿 1~2개. 지엽적 수정·시행착오·중간 과정은 쓰지 않는다.\n"
-            "- 12칸 세부 단계 금지. 분량은 주간과 비슷하거나 짧아야 한다 — 기간이 길다고 길어지면 실패다.\n\n"
-        ),
-    }[range_]
+# ── 렌더링·압축 ───────────────────────────────────────
+
+def _render_turn(t):
+    if t["prompts"]:
+        head = "- 지시: " + " / ".join(t["prompts"])
+        if t["notes"]:
+            head += "  (알림: " + "; ".join(t["notes"]) + ")"
+    elif t["notes"]:
+        head = "- 알림: " + "; ".join(t["notes"])
+    else:
+        head = "- (지시 기록 없음)"
+    return head + ("\n  응답: " + t["response"] if t["response"] else "")
+
+
+def _render_session(s):
+    head = f"[세션 · {s['device']} · {s['start']}~{s['end']} · 턴 {len(s['turns'])}]"
+    if s.get("digest"):
+        return head + " (압축 요약)\n" + s["digest"]
+    return "\n".join([head] + [_render_turn(t) for t in s["turns"]])
+
+
+def _render_block(p, v):
+    head = f"=== 서비스: {_service(p)} | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ==="
+    return "\n\n".join([head] + [_render_session(s) for s in v["sessions"]])
+
+
+BLOCK_BUDGET = 40_000   # 프로젝트 블록당 문자 예산 — 평소 하루는 여유 있게 들어가고, 넘치면 압축
+
+
+def digest_prompt(project, s):
+    n = max(8, min(30, len(s["turns"]) // 3))
     return (
-        head +
-        "구조 — 헤더(#) 없이 전부 불릿, 3단계 중첩:\n"
-        "- **최상위 불릿(들여쓰기 0)** = 각 로그 블록 머리에 적힌 **서비스명 그대로**. 이름을 바꾸거나\n"
-        "  줄이거나 새로 짓지 않는다. **서비스명이 다른 블록은 절대 합치지 않는다** — 이름이 비슷해도\n"
-        "  (예: 서로 다른 서비스인데 접두어만 같은 경우) 각각 별도 최상위 불릿으로 둔다.\n"
-        "  같은 서비스명이 붙은 블록이 여러 개일 때만 하나로 합친다.\n"
-        "  서비스명은 이름만 짧게 — 괄호 부연·설명·볼드(**) 금지.\n"
-        "  단, 보고할 내용이 없는 블록(잡담·중단된 지시뿐)은 **최상위 불릿 자체를 만들지 않는다** —\n"
-        "  '기록 없음' 같은 빈 항목을 채워 넣지 말고 통째로 생략한다.\n"
+        f"아래는 프로젝트 '{project}'의 한 세션에서 AI 코딩 에이전트에게 준 지시와 응답의 시간순 기록이다.\n"
+        f"나중에 업무일지로 정리할 재료로 쓰이도록 **시간순 불릿 {n}개 이내**로 압축하라.\n"
+        "- 무엇을 했고(대상 데이터·화면·기능 이름 포함) 어떤 결정·결과·수치가 나왔는지, 최종 상태가 무엇인지 보존한다.\n"
+        "- 대기·확인·잡담·되묻기 응답은 버린다. 방향이 바뀐 작업은 과정 대신 최종 상태로 적는다.\n"
+        "- 머리말·맺음말 없이 불릿만 출력한다. 첫 글자는 반드시 '- '.\n\n"
+        + _render_session(s))
+
+
+def compress(work, llm, budget=BLOCK_BUDGET):
+    """블록이 예산을 넘는 프로젝트는 긴 세션부터 llm(prompt)→str 압축 요약(digest)으로 바꿔 예산 안에 넣는다.
+    잘라내지 않는다 — 상한으로 뒷부분을 버리면 그날 오후 작업이 통째로 사라진다(2026-08-27 사고).
+    llm이 빈 문자열을 돌려주면 그 세션은 원문을 유지하고 다음 세션으로 넘어간다."""
+    for p, v in work.items():
+        for s in sorted(v["sessions"], key=lambda x: -len(_render_session(x))):
+            if len(_render_block(p, v)) <= budget:
+                break
+            if s.get("digest") or len(s["turns"]) < 3:
+                continue
+            d = strip_meta(llm(digest_prompt(p, s)))
+            if d:
+                s["digest"] = d
+
+
+# ── 프롬프트 ──────────────────────────────────────────
+
+_AUDIENCE = (
+    "읽는 사람은 프로덕트/프로젝트 매니저·오너다 —\n"
+    "개발 구현 디테일이 아니라 **제품에 무엇이 달라졌고 어디까지 왔는지**를 명확하고 간결하게 서술한다.\n\n"
+)
+
+_STRUCTURE_HEAD = (
+    "구조 — 헤더(#) 없이 전부 불릿, 3단계 중첩:\n"
+    "- **최상위 불릿(들여쓰기 0)** = 각 로그 블록 머리에 적힌 **서비스명 그대로**. 이름을 바꾸거나\n"
+    "  줄이거나 새로 짓지 않는다. **서비스명이 다른 블록은 절대 합치지 않는다** — 이름이 비슷해도\n"
+    "  (예: 서로 다른 서비스인데 접두어만 같은 경우) 각각 별도 최상위 불릿으로 둔다.\n"
+    "  같은 서비스명이 붙은 블록이 여러 개일 때만 하나로 합친다.\n"
+    "  서비스명은 이름만 짧게 — 괄호 부연·설명·볼드(**) 금지.\n"
+    "  단, 보고할 내용이 없는 블록(잡담·중단된 지시뿐)은 **최상위 불릿 자체를 만들지 않는다** —\n"
+    "  '기록 없음' 같은 빈 항목을 채워 넣지 말고 통째로 생략한다.\n"
+)
+
+_STRUCTURE_TAIL = (
+    "- **4칸 들여쓴 불릿** = 과제/기능/영역 (예: 결제, 모바일앱, 워커 배치).\n"
+    "- **8칸 들여쓴 불릿** = 구체적으로 한 일. 더 세부는 12칸.\n\n"
+)
+
+_STYLE = (
+    "서술 규칙:\n"
+    "- 프로덕트/프로젝트 매니저·오너가 읽는 보고서다. 함수명·변수명·파일명·내부 구현 용어를 쓰지\n"
+    "  말고, **무엇이 달라졌는지 / 어떤 결정이 났는지 / 어디까지 진행됐는지**로 표현한다.\n"
+    "- 간결한 명사구·완료형. `주제; 세부`, `→ 결과·전환` 표기를 활용해도 좋다.\n"
+    "- 핸드오프·환경 설정·도구 정비처럼 수단·프로세스 성격의 작업은 **무엇에 대한 작업이었는지**\n"
+    "  (대상 기능·과제)를 반드시 함께 적는다 — '기기 간 작업 이관'처럼 대상 없이 수단만 적지 않는다.\n"
+    "- 각 항목은 그 리포트만 읽고도 무엇에 대한 작업인지 알 수 있어야 한다 — '데이터 수집',\n"
+    "  '전량 분석', '오류 수정'처럼 **대상이 빠진 표기 금지**. 무슨 데이터·어느 화면·어느 기능인지를\n"
+    "  항목이나 그 상위 불릿에 드러낸다.\n"
+    "- 잡담·질문·메타 대화·시스템 알림·불완전 지시는 제외. 실제 수행·결정한 것만, 추측 금지.\n"
+    "- 상태 표현을 보존한다 — 검토·권장·예정·진행 중인 것을 결정·완료로 격상하지 않는다.\n"
+    "- 머리말·맺음말·총평·인사·안내문·사과·헤더(#) 없이 **불릿만** 출력한다. 첫 글자는 반드시 '- '.\n"
+    "  모든 블록을 빠짐없이 다룬다 — 일부 블록만 정리하고 나머지를 남기지 않는다.\n\n"
+)
+
+
+def _services_note(services):
+    if not services:
+        return ""
+    lines = []
+    for s in services:
+        hint = CFG.report_known_services.get(s, "")
+        lines.append(f"- {s}" + (f" — {hint}" if hint else ""))
+    return ("알려진 서비스 — 항목의 **작업 대상**이 이 중 하나면 로그 블록의 서비스명 대신 이 이름으로 최상위\n"
+            "불릿을 세운다(표기 그대로). 단서가 적힌 서비스는 그 단서로 식별하고, 같은 세션에서 앞 지시가 밝힌\n"
+            "대상·단서가 뒤 작업에도 이어지는지 흐름으로 판단한다:\n" + "\n".join(lines) + "\n\n")
+
+
+def build_day_prompt(day, work, services=(), prev=None):
+    """하루치 원재료(gather → compress) → 업무일지 요청 (LLM 1회 호출).
+    prev=(날짜, 직전 업무일지 md): 주제 목록만 넣어 이어지는 작업의 이름·묶음을 잇게 한다."""
+    blocks = [_render_block(p, v)
+              for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0]))]
+    head = (
+        f"아래는 하루({day}) 동안 AI 코딩 에이전트에게 준 지시와 그 응답을 프로젝트 → 세션 → 시간순으로\n"
+        "모은 것이다. 이걸 **업무일지용 마크다운**으로 정리하라. " + _AUDIENCE
+    )
+    context = ""
+    if prev:
+        context = (
+            f"직전 업무일지({prev[0]})의 주제 목록 — 오늘 작업의 맥락이다:\n{topics(prev[1])}\n"
+            "오늘 항목이 이 주제의 연장이면 **같은 서비스·기능 이름을 이어 쓰고** 하나의 흐름으로 묶는다.\n"
+            "이 목록의 일을 오늘 한 일로 다시 쓰지는 않는다 — 오늘 로그에 있는 것만 쓴다.\n\n"
+        )
+    structure = (
+        _STRUCTURE_HEAD +
         "- 어느 블록에 담을지는 **작업의 대상** 기준이다. 로그는 그때 열려 있던 저장소에 붙어 수집되므로,\n"
         "  A 저장소에서 일하다 **다른 서비스 B의 결함·개선을 확인·처리**했다면 그 항목은 A가 아니라\n"
         "  B 아래에 둔다 (예: 서비스 저장소에서 작업 중 발견한 협업 도구 자체의 알림 문제 → 그 도구).\n"
         "  이때 B가 그 기간에 블록이 없어도 최상위 불릿을 새로 만들어도 된다. B의 이름은 아래\n"
         "  '알려진 서비스' 표기를 그대로 쓰고, 목록에 없으면 옮기지 말고 원래 블록에 둔다.\n"
-        "- **4칸 들여쓴 불릿** = 기능/영역/주제 (예: 결제, 모바일앱, 워커 배치).\n"
-        "- **8칸 들여쓴 불릿** = 구체적으로 한 일. 더 세부는 12칸.\n\n"
-        + period_rules +
-        "서술 규칙:\n"
-        "- 프로덕트/프로젝트 매니저·오너가 읽는 보고서다. 함수명·변수명·파일명·내부 구현 용어를 쓰지\n"
-        "  말고, **무엇이 달라졌는지 / 어떤 결정이 났는지 / 어디까지 진행됐는지**로 표현한다.\n"
-        "- 간결한 명사구·완료형. `주제; 세부`, `→ 결과·전환` 표기를 활용해도 좋다.\n"
-        "- 핸드오프·환경 설정·도구 정비처럼 수단·프로세스 성격의 작업은 **무엇에 대한 작업이었는지**\n"
-        "  (대상 기능·과제)를 반드시 함께 적는다 — '기기 간 작업 이관'처럼 대상 없이 수단만 적지 않는다.\n"
-        "- 각 항목은 그 리포트만 읽고도 무엇에 대한 작업인지 알 수 있어야 한다 — '데이터 수집',\n"
-        "  '전량 분석', '오류 수정'처럼 **대상이 빠진 표기 금지**. 무슨 데이터·어느 화면·어느 기능인지를\n"
-        "  항목이나 그 상위 불릿에 드러낸다. 대상은 같은 블록의 다른 로그나 [배경]에서 찾는다.\n"
-        "- [배경]은 그 시각 돌던 백그라운드 작업의 제목이다. 항목의 **대상·맥락을 식별하는 데만** 쓰고,\n"
-        "  지시·완료요약에 없는 일을 배경만 보고 새 항목으로 만들지 않는다.\n"
-        "- 잡담·질문·메타 대화·시스템 알림·불완전 지시는 제외. 실제 수행·결정한 것만, 추측 금지.\n"
-        "- 로그 항목은 길면 끝에 '…(이하 생략)'이 붙어 있다. 잘린 항목도 드러난 범위까지 반영하되,\n"
-        "  **잘림 자체는 언급하지 않는다**. 로그가 부족해 보여도 되묻지 말고 확인되는 것만 정리한다.\n"
-        "- 머리말·맺음말·총평·인사·안내문·사과·헤더(#) 없이 **불릿만** 출력한다. 첫 글자는 반드시 '- '.\n"
-        "  모든 블록을 빠짐없이 다룬다 — 일부 블록만 정리하고 나머지를 남기지 않는다.\n\n"
-        + (("알려진 서비스(다른 서비스 대상 항목을 옮길 때 이 표기를 그대로 쓴다):\n- "
-            + ", ".join(services) + "\n\n") if services else "")
-        + "로그:\n" + "\n\n".join(blocks)
+        + _STRUCTURE_TAIL
     )
+    rules = (
+        "일일 정리 규칙 (세션·턴의 나열이 아니라 과제 단위 정리):\n"
+        "- 한 세션의 지시·응답은 **하나의 이어지는 작업 흐름**이다. 턴마다 항목을 만들지 말고, 그 흐름이\n"
+        "  무엇을 위한 작업이었는지(과제·대상)를 4칸 주제로 잡고 세부를 8칸·12칸에 둔다.\n"
+        "- 4칸 주제는 **과제 단위**다. 한 과제의 검증·수정·되돌림·후속 검토·운영 방식 검토는 그 과제\n"
+        "  하나 아래에 둔다 — 단계나 작업 성격(검토/운영/데이터)마다 주제를 쪼개지 않는다.\n"
+        "  하루 종일 한 과제를 다뤘으면 4칸 주제가 한둘인 것이 정상이다.\n"
+        "- 같은 서비스/과제를 여러 세션에서 다뤘으면 **하나로 합쳐** 결과 중심으로 정리한다.\n"
+        "- 구현 중 방향 전환·보류·취소가 있었으면 과정을 늘어놓지 말고 최종 상태로 표기한다\n"
+        "  (예: '~ 구현 → 접근 변경', '~ 시도 → 보류', '~ 추가했다 제거').\n\n"
+    )
+    log_notes = (
+        "로그 읽는 법:\n"
+        "- '지시:'는 사람이 준 지시, '응답:'은 그 턴의 에이전트 마지막 응답이다. 둘은 한 짝이다.\n"
+        "- '알림:'으로 시작하는 턴은 그 시각 끝난 백그라운드 작업의 제목이고 뒤의 응답이 그 결과 처리다.\n"
+        "  알림은 응답의 **대상·맥락을 식별하는 데만** 쓰고, 지시·응답에 없는 일을 알림만 보고 항목으로\n"
+        "  만들지 않는다.\n"
+        "- '(압축 요약)' 세션은 긴 세션을 미리 불릿으로 줄인 것이다 — 원문 턴과 같은 무게로 다룬다.\n"
+        "- 항목이 길면 끝에 '…(이하 생략)'이 붙어 있다. 잘린 항목도 드러난 범위까지 반영하되,\n"
+        "  **잘림 자체는 언급하지 않는다**. 로그가 부족해 보여도 되묻지 말고 확인되는 것만 정리한다.\n\n"
+    )
+    return (head + context + structure + rules + _STYLE + log_notes + _services_note(services)
+            + "로그:\n" + "\n\n".join(blocks))
+
+
+def build_period_prompt(range_, day, dailies, services=()):
+    """주간·월간: 일일 업무일지 모음 → 종합 보고 요청 (LLM 1회 호출).
+    dailies = [(날짜, 업무일지 md)] 날짜순. 원본 로그가 아니라 일일 결과를 재료로 쓴다."""
+    label = {"week": "한 주(월~일)", "month": "한 달"}[range_]
+    kind = {"week": "주간보고", "month": "월간보고"}[range_]
+    head = (
+        f"아래는 {label}({day} 시작) 동안의 **일일 업무일지**를 날짜순으로 모은 것이다. 각 업무일지는\n"
+        "서비스 > 과제 > 세부의 3단계 불릿이다. 이걸 **" + kind + "용 마크다운**으로 종합하라. " + _AUDIENCE
+    )
+    structure = (
+        _STRUCTURE_HEAD.replace("각 로그 블록 머리에 적힌", "업무일지의 최상위 불릿에 적힌")
+        .replace("같은 서비스명이 붙은 블록이 여러 개일 때만 하나로 합친다.",
+                 "날짜가 달라도 같은 서비스명이면 하나로 합친다.")
+        .replace("보고할 내용이 없는 블록(잡담·중단된 지시뿐)", "보고할 내용이 없는 서비스")
+        + _STRUCTURE_TAIL
+    )
+    rules = {
+        "week": (
+            "주간 종합 규칙 (중요 — 일일의 나열이 아니라 한 주의 종합·보고):\n"
+            "- 한 주 동안 같은 작업이 만들어졌다 수정·번복·재정리된 경우, 과정을 나열하지 말고\n"
+            "  **주말 기준 최종 상태 한 줄**로 정리한다 (예: 색을 3번 바꿨어도 '색상 체계 확정' 하나).\n"
+            "- 여러 날에 걸친 같은 과제는 일일의 주제 이름을 이어 받아 하나로 묶는다 — 과제당 불릿 1~3개,\n"
+            "  지엽적 수정은 묶거나 생략. 항목 수는 일일 합계보다 훨씬 줄어야 정상이다.\n"
+            "- 12칸 세부 단계는 꼭 필요한 경우에만. 전체가 한 화면에 들어올 분량을 지향한다.\n\n"
+        ),
+        "month": (
+            "월간 종합 규칙 (중요 — 주간보다 한 단계 더 포괄적인 종합·보고):\n"
+            "- 일·주 단위 사건이 아니라 **한 달의 성과와 진척**을 쓴다. 여러 과제/프로젝트가 하나의\n"
+            "  방향이면 묶어서 '무엇이 어디까지 왔는지'로 서술한다 (예: '결제 개편 — 설계부터 구현까지 완료').\n"
+            "- 서비스당 굵직한 주제 2~4개, 주제당 불릿 1~2개. 지엽적 수정·시행착오·중간 과정은 쓰지 않는다.\n"
+            "- 12칸 세부 단계 금지. 분량은 주간과 비슷하거나 짧아야 한다 — 기간이 길다고 길어지면 실패다.\n\n"
+        ),
+    }[range_]
+    body = "\n\n".join(f"=== {d} ({_weekday(d)}) ===\n{md}" for d, md in dailies)
+    return (head + structure + rules + _STYLE + _services_note(services) + "업무일지:\n" + body)
 
 
 def fallback_md(work):
-    """LLM 실패/미가용 시 — 원재료 기반 최소 마크다운(요약 없이 나열)."""
+    """일일 LLM 실패/미가용 시 — 원재료 기반 최소 마크다운(요약 없이 나열)."""
     out, seen = [], None
     for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0])):
         if _service(p) != seen:                       # 같은 서비스로 매핑된 프로젝트는 한 불릿 아래로
             seen = _service(p)
             out.append(f"- {seen}")
-        out += ["    - " + x[:100] for x in (v["sums"] or v["prompts"])[:6]]
-    return "\n".join(out).strip() or "이 기간에 기록된 작업이 없습니다."
+        lines = [t["response"] or " / ".join(t["prompts"])
+                 for s in v["sessions"] for t in s["turns"]]
+        out += ["    - " + x[:100] for x in lines[:6]]
+    return "\n".join(out).strip() or EMPTY_MD
+
+
+def fallback_period_md(dailies):
+    """주간·월간 LLM 실패 시 — 일일 업무일지를 날짜 아래 그대로 나열."""
+    out = []
+    for d, md in dailies:
+        out.append(f"- {d} ({_weekday(d)})")
+        out += ["    " + line for line in md.splitlines() if line.strip()]
+    return "\n".join(out).strip() or EMPTY_MD
 
 
 # 자동화(frontend='auto') 세션의 이벤트 제외 — 분 단위로 도는 상시 감시 잡이 수치를 압도해
@@ -240,6 +435,13 @@ def fallback_md(work):
 # — 반복 자동화는 업무일지에 쓸 내용이 아님).
 NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id"
             " AND s.agent=e.agent AND s.session_id=e.session_id AND s.frontend='auto')")
+
+
+def last_event_at(c, day):
+    """그날(로컬) 사람 세션의 마지막 지시·응답 시각(UTC ISO) — 저장된 일일 리포트가 그보다 오래됐으면 재생성 대상."""
+    return c.execute(
+        f"SELECT MAX(ts_hub) m FROM events e WHERE event IN ('prompt','turn_done')"
+        f" AND date(ts_hub,'localtime') = date(?) AND {NOT_AUTO}", (day,)).fetchone()["m"]
 
 
 def metrics(c, range_, day):

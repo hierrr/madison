@@ -57,9 +57,15 @@ push a piece of work from one machine to another without walking over to it.
 - **Daily/weekly/monthly reports** — the hub condenses each period's work into
   a PM/owner-oriented report markdown (grouped by service, nested bullets) you
   can paste into Notion — the longer the period, the more it synthesizes
-  instead of listing. Service grouping is fixed by `REPORT_SERVICE_MAP`, not
-  guessed by the model, and an item is filed under the service it is *about* —
-  a hub bug you hit while another repo was open lands under the hub, not that repo. Regenerated on a schedule and on demand, plus usage
+  instead of listing. The daily report reads the day as session flows
+  (instruction → response pairs, background-task titles for context) with the
+  previous day's topics as continuity, so a follow-up question lands under the
+  task it belongs to; nothing is truncated — an oversized session is condensed
+  first instead of cut. Weekly and monthly reports are synthesized from the
+  stored daily reports, not from raw logs. Service grouping is fixed by
+  `REPORT_SERVICE_MAP`, not guessed by the model, and an item is filed under
+  the service it is *about* — a hub bug you hit while another repo was open
+  lands under the hub, not that repo. Regenerated on a schedule and on demand, plus usage
   metrics: turns, sessions, active hours, per-project and hourly
   distributions, and a 52-week streak grid with month labels (scrolls
   horizontally, lands on the most recent week).
@@ -257,6 +263,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` / `REPORT_MONTHLY_MIN` | `60` / `1440` / `1440` | Auto-refresh cadence for the daily / weekly / monthly report, in minutes |
 | `REPORT_EXCLUDE_PROJECTS` | *(empty)* | Comma-separated projects to keep out of reports — drops the project's own section and any log line from other projects that mentions its name |
 | `REPORT_SERVICE_MAP` | *(empty)* | Comma-separated `project=service` pairs setting each report's top-level grouping (e.g. `web=Acme, api=Acme`). Unmapped projects use their own name; projects with different service names are never merged |
+| `REPORT_KNOWN_SERVICES` | *(empty)* | Semicolon-separated `service=hint` entries for services that have no project of their own — work done inside another service's repo, such as a monorepo. Listed in the report prompt with the hint so the model files those items under the right service (e.g. `Acme Pro=lives in the Acme monorepo, ap- prefixed screens, Billing menu`) |
 | `IP_ALLOWLIST` | *(off)* | Optional `name:ip` list restricting device reporting |
 
 LLM choices — provider, model, effort, and CLI paths — can also be changed in the
