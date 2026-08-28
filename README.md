@@ -62,16 +62,23 @@ push a piece of work from one machine to another without walking over to it.
   previous day's topics as continuity, so a follow-up question lands under the
   task it belongs to; nothing is truncated — an oversized session is condensed
   first instead of cut. Weekly and monthly reports are synthesized from the
-  stored daily reports, not from raw logs. Service grouping is fixed by
-  `REPORT_SERVICE_MAP`, not guessed by the model, and an item is filed under
-  the service it is *about* — a hub bug you hit while another repo was open
-  lands under the hub, not that repo. Regenerated on a schedule and on demand, plus usage
-  metrics: turns, sessions, active hours, per-project and hourly
-  distributions, and a 52-week streak grid with month labels (scrolls
+  stored daily reports, not from raw logs. Top-level grouping uses a service
+  registry the writer maintains itself (seeded from `.env`, see below), an item
+  is filed under the service it is *about* — a hub bug you hit while another
+  repo was open lands under the hub, not that repo — and every report passes a
+  deterministic validator before it is stored. Regenerated on a cron schedule
+  only when something changed, in a separate worker process, or on demand; a
+  failed generation never overwrites a good report, and a report can be pinned.
+  Plus usage metrics: turns, sessions, active hours, per-service, per-project and
+  hourly distributions, and a 52-week streak grid with month labels (scrolls
   horizontally, lands on the most recent week).
+- **Subscription usage** — the overview shows Claude Code and Codex rate-limit
+  windows (5-hour, weekly, reset credits) with bars and warning colors; the hub
+  reads them itself from the providers' own endpoints (see Security model).
 - **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
-  Codex), model, and reasoning effort separately for task summaries and report
-  generation, with model lists pulled live from the CLIs installed on the hub.
+  Codex), model, and reasoning effort separately for task summaries, session
+  digests, and report generation, with model lists pulled live from the CLIs
+  installed on the hub. Every call is logged (`llm_runs`).
 - **Agent + surface aware** — tells `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` /
   `CODEX APP` sessions apart, and separates automated headless runs (cron/launchd)
   into their own tab.
@@ -100,7 +107,8 @@ flowchart LR
   written to never block or slow a session (always `exit 0`).
 - **Hub** (one machine): a single FastAPI process serves both the JSON API and the
   dashboard, backed by one SQLite file. Runs under launchd (stubs included), or any
-  supervisor (systemd, etc.) on Linux.
+  supervisor (systemd, etc.) on Linux. Report generation runs in short-lived worker
+  processes it launches, so the hub itself can restart at any time.
 - **Dashboard**: a single self-contained HTML page that polls `/api/state` every
   five seconds.
 
@@ -201,17 +209,54 @@ Linux `install.sh` instead — that path is fully supported, not beta.
   it via `/pickup`, which applies the diffs (`git apply -3`), marks it *delivered*,
   and, when the work is finished, *done*.
 
+## Service registry (report top-level names)
+
+Reports group work by *service*, not by repository. The set of service names lives in the hub
+database (`services`, `project_map`) and is maintained by the report writer itself — there is no
+settings UI for it:
+
+- Each daily report is **one structured LLM call** returning `{markdown, assignments, proposals}`.
+  Top-level bullets must be names from the registry; when the writer needs a new one it returns a
+  proposal with evidence and the hub registers it (guards: repository/directory names, excluded names
+  and names a person previously rejected are refused; at most 3 per day).
+- **Project → service map** with a *strength*: `strong` for product repositories, `weak` for scratch
+  directories whose work is filed under whatever service it is really about. Unmapped projects whose
+  sessions consistently land on one service are learned as weak mappings automatically.
+- A deterministic validator checks the markdown (allowed top-level names, indentation, no headers, no
+  truncation/meta phrases, no excluded names); violations trigger one repair call and anything left is
+  shown as *검토 필요* on the report.
+- Per-session assignments (service, task, why) and human corrections are stored; corrections made via
+  the API (`POST /api/report/relabel`) are fed to later runs as precedents and outrank the writer's cues.
+
+`REPORT_SERVICE_MAP` / `REPORT_KNOWN_SERVICES` / `REPORT_WEAK_PROJECTS` in `.env` seed an empty registry
+once. Adjust the registry through the admin API when needed (`/api/services`, `/api/project-map`,
+`/api/services/export` for a backup in `.env` format) — for example by asking an agent on the hub machine.
+The last 5 generated versions of each report are kept (`report_versions`, restorable with
+`POST /api/report/restore`); a restored or pinned report is excluded from automatic regeneration.
+Pinning is a button on the report tab.
+
 ## Security model
 
 - **Session transcripts never leave the device.** The hub stores metadata and short
-  truncated excerpts only — up to ~600 chars of an instruction (for the summary)
-  and ≤200 chars of a reply/permission message. The one deliberate exception is
+  truncated excerpts only — up to ~600 chars of an instruction (for the summary),
+  up to 2,000 chars of the final reply of a turn (head 1,500 + tail 500 when longer —
+  the report writer needs the conclusion and the next steps, not the middle), ≤200 chars of a
+  permission message, and path-level metadata: the repository name, branch, git remote URL and
+  the working directory's path inside the repository. No file contents. The one deliberate exception is
   handoffs: `/handoff` uploads its doc and change diffs to the hub by explicit user
   action (capped at 64KB / 1MB).
 - **Three request classes:** device (bearer token), admin (loopback on the hub
   machine, or an SSO-verified dashboard), and enrollment (a shared secret, meant to
   be rotated). Loopback alone is *not* trusted as admin behind a tunnel — CF headers
   are checked so a proxied internet request can't impersonate local.
+- **Report generation runs in a separate worker process** (`python -m server.genworker`), so restarting or
+  redeploying the hub never loses an in-flight LLM call; the hub only launches workers and shows their state
+  (`report_jobs`). One worker at a time.
+- **Hub LLM calls are isolated.** `claude -p` runs with `--safe-mode --tools "" --no-session-persistence
+  --disable-slash-commands` (codex: `--ephemeral -s read-only`) from a non-repository directory, so the
+  user's CLAUDE.md, plugins, hooks, MCP servers and skills never reach the summarizer or the report
+  writer, and no session transcripts are written. Every call is logged to `llm_runs` (site, model,
+  duration, exit code) and readable via `GET /api/llm-runs`.
 - **State-changing endpoints are CSRF-guarded** (`Sec-Fetch-Site`), so a random web
   page open on the hub machine can't drive the hub.
 - **Admin (dashboard) access** is granted to loopback connections on the hub
@@ -260,9 +305,14 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `CODEX_BIN` | auto-detected | `codex` binary, used when a provider is set to Codex (searches PATH, then the newest nvm install) |
 | `REPORT` | `1` | Daily/weekly/monthly work reports |
 | `REPORT_MODEL` | `claude-sonnet-5` | Model for report generation |
-| `REPORT_DAILY_MIN` / `REPORT_WEEKLY_MIN` / `REPORT_MONTHLY_MIN` | `60` / `1440` / `1440` | Auto-refresh cadence for the daily / weekly / monthly report, in minutes |
+| `DIGEST_MODEL` | `claude-sonnet-5` | Model that pre-compresses long sessions when a project block exceeds its budget — extraction work, so a cheaper model than the report model is fine |
+| `LLM_TIMEOUT_SUMMARY` / `LLM_TIMEOUT_DIGEST` / `LLM_TIMEOUT_REPORT` | `90` / `300` / `900` | Per-site timeout (seconds) for hub LLM calls. A failed or timed-out call never overwrites a stored report — the failure is recorded and shown instead |
+| `LLM_CWD` | `~/.madison/llm-cwd` | Working directory for hub LLM calls — outside any repository so the CLI sees no git context |
+| `USAGE` / `USAGE_POLL_SEC` | `1` / `180` | Claude / Codex subscription-limit tiles on the overview. The hub reads them itself: Claude via the OAuth token Claude Code keeps in the macOS Keychain (read-only usage endpoint, token never stored), Codex via `codex app-server` RPC. `USAGE=0` hides the tiles |
+| `REPORT_DAILY_CRON` / `REPORT_WEEKLY_CRON` / `REPORT_MONTHLY_CRON` | `0 * * * *` / `15 */4 * * *` / `45 */8 * * *` | Local-time cron (5 fields) at which each report is regenerated — only if something changed since the last version. A brand-new day/week/month gets its first report immediately; a hub restart never triggers generation. Generation runs in a separate worker process |
 | `REPORT_EXCLUDE_PROJECTS` | *(empty)* | Comma-separated projects to keep out of reports — drops the project's own section and any log line from other projects that mentions its name |
 | `REPORT_SERVICE_MAP` | *(empty)* | Comma-separated `project=service` pairs setting each report's top-level grouping (e.g. `web=Acme, api=Acme`). Unmapped projects use their own name; projects with different service names are never merged |
+| `REPORT_WEAK_PROJECTS` | *(empty)* | Comma-separated scratch directories (e.g. `dev,new-chat`) whose `REPORT_SERVICE_MAP` entry is only a *weak* default — the report writer moves their work to the service it is actually about |
 | `REPORT_KNOWN_SERVICES` | *(empty)* | Semicolon-separated `service=hint` entries for services that have no project of their own — work done inside another service's repo, such as a monorepo. Listed in the report prompt with the hint so the model files those items under the right service (e.g. `Acme Pro=lives in the Acme monorepo, ap- prefixed screens, Billing menu`) |
 | `IP_ALLOWLIST` | *(off)* | Optional `name:ip` list restricting device reporting |
 
@@ -274,7 +324,7 @@ dashboard's **settings** tab; values saved there live on the hub and override th
 
 | Path | What |
 |---|---|
-| `server/` | Hub — FastAPI + SQLite (enroll, ingest, state fold, TTL, handoff queue, reports, summary worker) |
+| `server/` | Hub — FastAPI + SQLite. `app.py` routes · `state.py` ingest/fold/TTL · `llm.py` CLI calls · `summary.py` task summaries · `report.py` report material/prompts/validator · `reporting.py` + `genworker.py` generation workers · `cron.py` schedule · `registry.py` service names · `usage.py` subscription limits |
 | `dashboard/` | Single-file HTML dashboard + logo assets |
 | `collector/` | Everything device-side — Claude/Codex hooks, `report.sh`, idempotent installer, `/handoff` · `/pickup` skills, Windows beta scripts |
 | `scripts/` | launchd stubs (standard pattern) |

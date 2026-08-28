@@ -3,6 +3,12 @@ import sqlite3
 import unittest
 
 from server import db, report
+from server.registry import Registry
+
+
+def _reg(names=(), pm=None):
+    return Registry([{"id": i, "name": n, "kind": "product", "description": "", "cues": []}
+                     for i, n in enumerate(names, 1)], (), pm or {})
 
 
 def _ev(c, ts, event, payload, session="s1", device=1, project="proj"):
@@ -37,6 +43,17 @@ class GatherTests(unittest.TestCase):
         self.assertEqual(t["prompts"], ["A를 고쳐줘"])
         self.assertEqual(t["response"], "A를 고쳤습니다")
         self.assertEqual(v["sessions"][0]["device"], "workstation")
+        self.assertEqual([s["key"] for s in v["sessions"]], ["S1", "S2"])   # 프롬프트의 세션 표기
+        self.assertEqual(v["sessions"][0]["session_id"], "s1")
+
+    def test_long_response_keeps_head_and_tail(self):
+        long = "머리" + "x" * 3000 + "꼬리"
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "긴 작업"})
+        _ev(self.c, "2026-08-27T01:05:00Z", "turn_done", {"summary": long})
+        resp = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]["response"]
+        self.assertTrue(resp.startswith("머리") and resp.endswith("꼬리"))
+        self.assertIn("…(중략)…", resp)
+        self.assertLess(len(resp), report.RESPONSE_CLIP + 20)
 
     def test_notification_turn_keeps_title_and_drops_empty_response(self):
         note = '<task-notification><summary>Monitor event: "야간 배치 수집 감시"</summary></task-notification>'
@@ -93,8 +110,8 @@ class CompressTests(unittest.TestCase):
         self.assertIn("지시 29", calls[0])
         s = work["proj"]["sessions"][1]
         self.assertEqual(s["digest"], "- 압축 불릿 1\n- 압축 불릿 2")   # 머리말·맺음말 제거
-        self.assertLessEqual(len(report._render_block("proj", work["proj"])), 6000)
-        self.assertIn("(압축 요약)", report.build_day_prompt("2026-08-27", work))
+        self.assertLessEqual(len(report._render_block("proj", work["proj"], _reg())), 6000)
+        self.assertIn("(압축 요약)", report.build_day_prompt("2026-08-27", work, _reg()))
 
     def test_under_budget_makes_no_calls_and_failed_llm_keeps_raw(self):
         work = {"proj": {"sessions": [_session(3)], "turns": 3, "n_sessions": 1}}
@@ -107,21 +124,31 @@ class PromptTests(unittest.TestCase):
     def test_day_prompt_injects_previous_topics_only(self):
         prev_md = "- Acme\n    - 고객 데이터 확충\n        - 세부 한 일 A\n- MADISON\n    - 리포트 품질"
         work = {"proj": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}
-        p = report.build_day_prompt("2026-08-27", work, ["Acme"], prev=("2026-08-26", prev_md))
+        p = report.build_day_prompt("2026-08-27", work, _reg(["Acme"]), prev=("2026-08-26", prev_md))
         self.assertIn("직전 업무일지(2026-08-26)", p)
         self.assertIn("    - 고객 데이터 확충", p)
         self.assertNotIn("세부 한 일 A", p)
-        self.assertIn("[세션 · workstation · 09:00~10:00 · 턴 1]", p)
-        self.assertIn("알려진 서비스", p)
+        self.assertIn("[S? · workstation · 09:00~10:00 · 턴 1]", p)
+        self.assertIn("서비스 목록", p)
+        self.assertIn("- Acme", p)
+        self.assertIn("proposals", p)
+
+    def test_block_header_shows_mapping_strength(self):
+        work = {"scratch": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}
+        weak = _reg(["Acme"], {"scratch": {"service": "Acme", "strength": "weak"}})
+        self.assertIn("서비스: Acme (약한 기본값", report.build_day_prompt("2026-08-27", work, weak))
+        strong = _reg(["Acme"], {"scratch": {"service": "Acme", "strength": "strong"}})
+        self.assertIn("=== 서비스: Acme | 프로젝트: scratch", report.build_day_prompt("2026-08-27", work, strong))
+        self.assertIn("서비스: scratch (매핑 없음", report.build_day_prompt("2026-08-27", work, _reg(["Acme"])))
 
     def test_period_prompt_uses_dailies(self):
         dailies = [("2026-08-24", "- Acme\n    - A"), ("2026-08-25", "- Acme\n    - B")]
-        p = report.build_period_prompt("week", "2026-08-24", dailies, [])
+        p = report.build_period_prompt("week", "2026-08-24", dailies, _reg())
         self.assertIn("=== 2026-08-24 (월) ===", p)
         self.assertIn("=== 2026-08-25 (화) ===", p)
         self.assertIn("주간보고", p)
         self.assertIn("업무일지의 최상위 불릿에 적힌", p)
-        self.assertNotIn("로그 블록", p)
+        self.assertNotIn("로그:", p)
 
     def test_period_days_clamps_to_today(self):
         self.assertEqual(report.period_days("week", "2026-08-24", "2026-08-27"),
@@ -132,27 +159,105 @@ class PromptTests(unittest.TestCase):
 
     def test_fallbacks(self):
         work = {"proj": {"sessions": [_session(2)], "turns": 2, "n_sessions": 1}}
-        self.assertTrue(report.fallback_md(work).startswith("- proj\n    - 응답 "))
+        self.assertTrue(report.fallback_md(work, _reg()).startswith("- proj\n    - 응답 "))
         self.assertEqual(report.fallback_period_md([("2026-08-24", "- Acme\n    - A")]),
                          "- 2026-08-24 (월)\n    - Acme\n        - A")
         self.assertEqual(report.fallback_period_md([]), report.EMPTY_MD)
 
 
-class KnownServicesTests(unittest.TestCase):
-    def test_configured_services_are_listed_with_hints(self):
-        from server.config import CFG
-        old = CFG.report_known_services
-        CFG.report_known_services = {"Acme Pro": "acme-pro, ap- 접두"}
-        try:
-            note = report._services_note(["Acme", "Acme Pro"])
-            self.assertIn("- Acme\n- Acme Pro — acme-pro, ap- 접두", note)
-            c = sqlite3.connect(":memory:")
-            c.row_factory = sqlite3.Row
-            c.executescript(db.SCHEMA)
-            self.assertEqual(report.known_services(c), ["Acme Pro"])   # 프로젝트가 없어도 후보에
-        finally:
-            CFG.report_known_services = old
+class ExcludeMaskTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = report._EXCL_RES
+        report._EXCL_RES = (report._excl_pattern("acme-hunter"),)
+
+    def tearDown(self):
+        report._EXCL_RES = self._saved
+
+    def test_masks_mention_with_separator_variants_but_keeps_the_line(self):
+        for form in ("acme-hunter", "acme hunter", "acme_hunter", "AcmeHunter", "acme.hunter"):
+            out = report.mask_excluded(f"오늘 {form} 배치를 손봤다")
+            self.assertEqual(out, f"오늘 {report.EXCL_MASK} 배치를 손봤다", form)
+
+    def test_word_boundary_prevents_partial_matches(self):
+        self.assertEqual(report.mask_excluded("acme-hunters 팀"), "acme-hunters 팀")       # 뒤에 글자
+        self.assertEqual(report.mask_excluded("xacme-hunter"), "xacme-hunter")           # 앞에 글자
+        self.assertEqual(report.mask_excluded("(acme-hunter)"), f"({report.EXCL_MASK})")
+
+    def test_gather_masks_instead_of_dropping(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        c.execute("INSERT INTO devices (id,name,token_hash,created_at) VALUES (1,'w','x','2026-08-27T00:00:00Z')")
+        _ev(c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "긴 지시 — acme-hunter 언급 포함, 본론은 결제 화면"})
+        _ev(c, "2026-08-27T01:05:00Z", "turn_done", {"summary": "결제 화면 수정"})
+        t = report.gather(c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual(t["prompts"], [f"긴 지시 — {report.EXCL_MASK} 언급 포함, 본론은 결제 화면"])
+
+
+class LastEventTests(unittest.TestCase):
+    def test_period_last_event(self):
+        c = sqlite3.connect(":memory:")
+        c.row_factory = sqlite3.Row
+        c.executescript(db.SCHEMA)
+        c.execute("INSERT INTO devices (id,name,token_hash,created_at) VALUES (1,'w','x','2026-08-27T00:00:00Z')")
+        _ev(c, "2026-08-25T01:00:00Z", "prompt", {"prompt": "x"})
+        _ev(c, "2026-08-27T03:00:00Z", "turn_done", {"summary": "y"})
+        _ev(c, "2026-09-02T03:00:00Z", "turn_done", {"summary": "z"})
+        self.assertEqual(report.last_event_in(c, "week", "2026-08-24"), "2026-08-27T03:00:00Z")
+        self.assertEqual(report.last_event_in(c, "month", "2026-08-01"), "2026-08-27T03:00:00Z")
+        self.assertIsNone(report.last_event_in(c, "week", "2026-08-10"))
+
+
+class ValidateTests(unittest.TestCase):
+    ALLOWED = ["Acme", "MADISON"]
+
+    def test_clean_report_passes(self):
+        md = "- Acme\n    - 결제\n        - 카드 결제 오류 수정\n- MADISON\n    - 리포트\n        - 검증기 추가"
+        self.assertEqual(report.validate(md, self.ALLOWED), [])
+
+    def test_unknown_top_level_and_headers_and_indent(self):
+        md = "## 제목\n- Acme\n    - 결제\n- 신규서비스\n   - 세 칸\n        - x\n일반 문장"
+        probs = report.validate(md, self.ALLOWED)
+        self.assertTrue(any("헤더" in x for x in probs))
+        self.assertTrue(any("'신규서비스'" in x for x in probs))
+        self.assertTrue(any("들여쓰기 3칸" in x for x in probs))
+        self.assertTrue(any("불릿이 아닌 줄" in x for x in probs))
+
+    def test_empty_top_level_meta_phrases_and_decoration(self):
+        md = "- Acme\n- MADISON (허브)\n    - 로그가 잘려 있어 확인 가능한 범위까지만 정리"
+        probs = report.validate(md, self.ALLOWED)
+        self.assertTrue(any("빈 최상위 'Acme'" in x for x in probs))
+        self.assertTrue(any("부연·볼드" in x for x in probs))
+        self.assertTrue(any("메타 문구" in x for x in probs))
+
+    def test_block_services_and_proposals_are_allowed(self):
+        md = "- 새제안\n    - 과제\n- proj\n    - 과제"
+        self.assertEqual(report.validate(md, self.ALLOWED + ["새제안"], block_services=["proj"]), [])
+
+    def test_repair_prompt_lists_problems(self):
+        p = report.repair_prompt("- x", ["1행: 헤더"])
+        self.assertIn("- 1행: 헤더", p)
+        self.assertIn("업무일지:\n- x", p)
+        self.assertEqual(report.top_level_names("- A\n    - a\n- B"), ["A", "B"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetaPhraseTests(unittest.TestCase):
+    def test_ordinary_words_are_not_meta(self):
+        md = "- Acme\n    - 광고 스트립 모바일 대응 — 고정 2행으로 글자 잘림 해소\n    - 이미지 중략 처리 옵션 추가"
+        self.assertEqual(report.validate(md, ["Acme"]), [])
+
+    def test_log_complaints_are_meta(self):
+        for line in ("로그가 잘려 있어 확인 가능한 범위까지만 정리", "나머지 기록을 보내 주세요", "…(중략)… 이후 작업"):
+            probs = report.validate(f"- Acme\n    - {line}", ["Acme"])
+            self.assertTrue(any("메타 문구" in x for x in probs), line)
+
+    def test_period_prompt_forbids_proposals(self):
+        p = report.build_period_prompt("week", "2026-08-24", [("2026-08-24", "- Acme\n    - A")], _reg(["Acme"]))
+        self.assertNotIn("proposals에", p)
+        self.assertIn("목록에 없는 이름은 최상위로 쓰지 않는다", p)
+        d = report.build_day_prompt("2026-08-24", {"proj": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}, _reg(["Acme"]))
+        self.assertIn("저장소·디렉터리 이름은", d)

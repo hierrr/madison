@@ -2,6 +2,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+from . import usage
 from .config import CFG
 
 # 전이 완결 규칙 (§4.1): 모든 이벤트가 상태를 정의한다
@@ -43,11 +44,13 @@ def ingest(c, device_id: int, ev: dict) -> str:
     branch = ev.get("branch")
     event_id = ev.get("event_id")
 
+    origin = (str(ev.get("origin") or "")[:200]) or None      # git remote — 개명·동명 저장소 구분 키
+    subdir = (str(ev.get("subdir") or "")[:200]) or None      # 저장소 안 상대 경로 — 모노리포 하위 서비스 식별
     cur = c.execute(
         "INSERT OR IGNORE INTO events (device_id, agent, session_id, event_id, event,"
-        " ts_device, ts_hub, project, branch, payload) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " ts_device, ts_hub, project, branch, payload, origin, subdir) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (device_id, agent, session_id, event_id, event, ts_device, ts_hub,
-         project, branch, json.dumps(payload, ensure_ascii=False)),
+         project, branch, json.dumps(payload, ensure_ascii=False), origin, subdir),
     )
     if cur.rowcount == 0:
         return "duplicate"  # event_id UNIQUE — 재전송 중복 흡수 (§5)
@@ -271,6 +274,7 @@ def assemble(c) -> dict:
             "today_turns": today,
             "yesterday_turns_same_time": ydelta,
             "spark12": hours,
+            "usage": usage.snapshot() if CFG.usage_enabled else None,
         },
     }
 

@@ -4,15 +4,23 @@
 주간·월간: 저장된 **일일 업무일지**를 재료로 종합한다 — 원본 로그를 다시 읽지 않는다. 기간이 길수록
 로그가 상한을 넘겨 뒷부분이 통째로 잘리던 문제가 없어지고, 일일에서 정한 서비스·주제 이름이 그대로 이어진다.
 에이전트 사용 메트릭(세션·턴·활동시간·시간대·잔디)도 여기서 집계한다.
-LLM 호출은 app에서 주입한다 — 이 모듈은 순수 데이터/문자열만 다룬다.
+
+이름 공간은 registry.Registry 스냅샷으로 받는다(순수 함수 유지 — DB·LLM은 reporting이 주입).
+- 최상위 서비스명은 레지스트리(확정 + 제안 중)에서만 나온다. 모델이 새 이름이 필요하면 **제안**으로 내고,
+  코드가 접수·검증한다(닫힌 이름 공간을 사람이 .env로만 키우던 구조의 대체 — 2026-08-28).
+- 출력 형식·금칙어는 프롬프트 문구가 아니라 validate()가 결정적으로 검사한다.
 """
 import datetime
 import json
 import re
 
 from .config import CFG
+from .registry import Registry
 
 EMPTY_MD = "이 기간에 기록된 작업이 없습니다."
+
+# 프롬프트 판 — 문구를 바꾸면 올린다. reports.prompt_version에 기록되어 "어느 판으로 만든 리포트인지" 남는다.
+PROMPT_VERSION = "2026-08-28.1"
 
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
@@ -26,6 +34,13 @@ _EMPTY_RESPONSES = ("no response requested",)
 # 이름을 되찾아 준다(2026-08-23 일일 리포트에 대상 없는 '데이터 재수집'만 남은 사례).
 _NOTE_SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.S)
 _NOTE_LABEL = re.compile(r'"([^"]{4,})"')
+
+# 로그 한 줄 상한 — 지시는 훅이 600자로 보내고, 응답은 2,000자(2026-08-28 결정: 실측 p95 2,272자,
+# 200자 상한은 글자의 18.6%만 보존했다). 초과분은 머리·꼬리를 남긴다.
+PROMPT_CLIP = 600
+RESPONSE_CLIP = 2000
+RESPONSE_TAIL = 500
+BLOCK_BUDGET = 120_000   # 프로젝트 블록당 문자 예산 — 응답 2,000자 기준 하루가 여유 있게 들어가고, 넘치면 압축
 
 
 def _note(text):
@@ -44,21 +59,47 @@ def _real_response(text):
     return bool(t) and not any(t.startswith(x) for x in _EMPTY_RESPONSES)
 
 
-# 제외 프로젝트 이름의 정규형(하이픈·공백·언더스코어 등 구분자 무시) — 언급 줄 필터용
-_EXCL_NORM = tuple(n for n in (re.sub(r"[^0-9a-z가-힣]", "", p.lower())
-                               for p in CFG.report_exclude_projects) if n)
+# 제외 프로젝트 이름 매칭 — 표기 차이('a-b'/'a b'/'a_b'/'ab')를 허용하되 단어 경계를 지킨다
+# (부분 문자열 매치는 짧은 이름에서 오삭제를 폭증시킨다).
+_WORD = "0-9A-Za-z가-힣"
 
 
-def _service(project):
-    """프로젝트 → 리포트 최상위 서비스명. REPORT_SERVICE_MAP에 없으면 프로젝트명 그대로.
-    최상위 묶음을 설정으로 고정해, 이름이 비슷하다는 이유로 별개 서비스가 흡수되는 것을 막는다."""
-    return CFG.report_service_map.get(project, project)
+def _excl_pattern(name):
+    parts = [re.escape(x) for x in re.split(r"[^0-9A-Za-z가-힣]+", name) if x]
+    if not parts:
+        return None
+    return re.compile(rf"(?<![{_WORD}])" + r"[\s_\-.]*".join(parts) + rf"(?![{_WORD}])", re.I)
 
 
-def _clip(text, n=240):
+_EXCL_RES = tuple(p for p in (_excl_pattern(n) for n in CFG.report_exclude_projects) if p)
+EXCL_MASK = "[제외 프로젝트]"
+
+
+def mask_excluded(text):
+    """제외 프로젝트 이름이 언급된 부분을 가린다. 줄 전체를 버리지 않는다 — 긴 지시가 제외 프로젝트를
+    한 번 언급했다는 이유로 통째로 사라지던 문제(리뷰 2026-08-28). 이름이 다른 프로젝트 섹션을 타고
+    요약에 되살아나는 것은 여전히 막는다."""
+    for pat in _EXCL_RES:
+        text = pat.sub(EXCL_MASK, text)
+    return text
+
+
+def mentions_excluded(text) -> bool:
+    return any(p.search(text) for p in _EXCL_RES)
+
+
+def clip(text, n=RESPONSE_CLIP, tail=0):
     """로그 한 줄 상한. 잘렸으면 잘렸다고 표시 — 표시가 없으면 모델이 '로그가 중간에 잘려 있다'며
-    본문 대신 안내문을 쓰거나 남은 프로젝트를 통째로 건너뛴다(2026-08-26 일일 리포트 사고)."""
-    return text if len(text) <= n else text[:n].rstrip() + " …(이하 생략)"
+    본문 대신 안내문을 쓰거나 남은 프로젝트를 통째로 건너뛴다(2026-08-26 일일 리포트 사고).
+    tail>0이면 머리와 꼬리를 남긴다(응답: 결론은 앞에, 남은 일·다음 단계는 끝에 오는 구조)."""
+    if len(text) <= n:
+        return text
+    if tail and n > tail:
+        return text[:n - tail].rstrip() + " …(중략)… " + text[-tail:].lstrip()
+    return text[:n].rstrip() + " …(이하 생략)"
+
+
+_clip = clip   # 하위 호환
 
 
 _BULLET = re.compile(r"^\s*[-*+] ")
@@ -66,7 +107,6 @@ _BULLET = re.compile(r"^\s*[-*+] ")
 
 def strip_meta(md):
     """모델이 붙인 머리말·맺음말을 잘라내고 불릿 마크다운만 남긴다.
-    프롬프트로 금지해도 로그가 잘려 보이면 '확인 가능한 범위까지만 정리했습니다' 류를 앞에 붙인다.
     불릿이 하나도 없으면(작업 없음 안내 등) 원문 그대로 둔다."""
     lines = md.splitlines()
     at = [i for i, line in enumerate(lines) if _BULLET.match(line)]
@@ -89,12 +129,14 @@ def topics(md, max_indent=4):
     return "\n".join(out)
 
 
-def _mentions_excluded(text):
-    """제외 프로젝트가 언급된 로그 줄인지 — 표기 차이('a-b'/'a b'/'a_b')를 무시하고 비교.
-    제외 프로젝트를 다룬 작업(정리·모니터링 등)의 로그가 다른 프로젝트 섹션을 타고
-    요약에 이름을 되살리는 것을 막는다."""
-    t = re.sub(r"[^0-9a-z가-힣]", "", text.lower())
-    return any(n in t for n in _EXCL_NORM)
+def top_level_names(md) -> list:
+    """최상위(들여쓰기 0) 불릿의 이름들 — 서비스명 검증·표시용."""
+    out = []
+    for line in md.splitlines():
+        m = _INDENT.match(line)
+        if m and len(m.group(1)) == 0:
+            out.append(line[m.end():].strip())
+    return out
 
 
 def _pred(range_):
@@ -132,12 +174,13 @@ def _weekday(day):
 
 def gather(c, range_, day):
     """프로젝트별 작업 원재료 — {project: {sessions, turns, n_sessions}}.
-    sessions = [{device, start, end, turns: [{prompts, notes, response}]}] (세션·턴 모두 시간순).
+    sessions = [{key, device, session_id, start, end, turns: [{prompts, notes, response}]}] (세션·턴 모두 시간순).
+    key(S1, S2 …)는 프롬프트의 세션 표기 — 모델의 배치(assignments)가 이 키로 돌아온다.
     한 턴 = 지시(들) → 응답. 같은 세션에서 응답이 붙기 전까지의 지시는 한 턴에 모은다(알림이 쌓이거나
     실행 중 지시를 이어 보낸 경우). 지시도 응답도 없는 턴(알림만 받고 빈 응답)은 버린다.
     지시·응답이 하나도 없는 프로젝트, REPORT_EXCLUDE_PROJECTS 프로젝트, 자동화 세션은 제외."""
     pred = _pred(range_)
-    skip = ("", "summarizer") + CFG.report_exclude_projects
+    skip = ("", "summarizer", "llm-cwd") + CFG.report_exclude_projects
     rows = c.execute(
         f"SELECT e.project, e.event, e.session_id, e.device_id, e.payload, d.name AS device,"
         f" strftime('%m/%d %H:%M', e.ts_hub, 'localtime') AS t"
@@ -151,13 +194,14 @@ def gather(c, range_, day):
         p = proj.setdefault(r["project"], {"sess": {}, "turns": 0})
         s = p["sess"].setdefault(
             (r["device_id"], r["session_id"]),
-            {"device": r["device"] or "?", "start": r["t"], "end": r["t"], "turns": []})
+            {"device": r["device"] or "?", "session_id": r["session_id"],
+             "start": r["t"], "end": r["t"], "turns": []})
         s["end"] = r["t"]
         pl = json.loads(r["payload"] or "{}")
         cur = s["turns"][-1] if s["turns"] and s["turns"][-1]["response"] is None else None
         if r["event"] == "prompt":
-            t = (pl.get("prompt") or "").strip()
-            if not t or _mentions_excluded(t):
+            t = mask_excluded((pl.get("prompt") or "").strip())
+            if not t:
                 continue
             if cur is None:
                 cur = {"prompts": [], "notes": [], "response": None}
@@ -165,19 +209,20 @@ def gather(c, range_, day):
             if t.startswith("<task-notification"):
                 n = _note(t)
                 if n and n not in cur["notes"]:
-                    cur["notes"].append(_clip(n, 120))
+                    cur["notes"].append(clip(n, 120))
             elif not t.startswith(NOISE):
-                cur["prompts"].append(_clip(t))
+                cur["prompts"].append(clip(t, PROMPT_CLIP))
         else:
             p["turns"] += 1
-            resp = (pl.get("summary") or "").strip()
-            if not _real_response(resp) or _mentions_excluded(resp):
+            resp = mask_excluded((pl.get("summary") or "").strip())
+            if not _real_response(resp):
                 resp = ""
             if cur is None:
                 cur = {"prompts": [], "notes": [], "response": None}
                 s["turns"].append(cur)
-            cur["response"] = _clip(resp)
+            cur["response"] = clip(resp, RESPONSE_CLIP, RESPONSE_TAIL)
     out = {}
+    n = 0
     for name, p in proj.items():
         sessions = []
         for s in p["sess"].values():
@@ -185,33 +230,21 @@ def gather(c, range_, day):
             for t in turns:
                 t["response"] = t["response"] or ""
             if turns:
-                sessions.append({**s, "turns": turns})
+                n += 1
+                sessions.append({**s, "key": f"S{n}", "turns": turns})
         if sessions:
-            out[name] = {"sessions": sessions, "turns": p["turns"], "n_sessions": len(p["sess"])}
+            out[name] = {"sessions": sessions, "turns": p["turns"], "n_sessions": len(sessions)}
     return out
 
 
-def known_services(c, days=120, min_events=20):
-    """최근 로그에 실제로 나타난 프로젝트를 서비스명으로 환산한 목록(빈도순) + REPORT_KNOWN_SERVICES.
-    작업 대상이 로그가 수집된 프로젝트와 다를 때(예: 어느 서비스 저장소를 열어둔 채 허브 결함을 확인,
-    모노리포 안에서 다른 서비스를 작업), 모델이 이름을 새로 짓지 않고 이 표기 중 하나를 쓰도록 프롬프트에 넣는다.
-    잡다한 임시 디렉터리명이 끼지 않게 최소 이벤트 수로 거른다."""
-    rows = c.execute(
+def active_projects(c, days=120, min_events=20):
+    """최근 로그에 실제로 나타난 프로젝트(빈도순). 잡다한 임시 디렉터리명이 끼지 않게 최소 이벤트 수로 거른다."""
+    return [r["project"] for r in c.execute(
         f"SELECT project, COUNT(*) n FROM events e"
-        f" WHERE COALESCE(project,'') NOT IN ('','summarizer')"
+        f" WHERE COALESCE(project,'') NOT IN ('','summarizer','llm-cwd')"
         f"   AND ts_hub >= datetime('now',?) AND {NOT_AUTO}"
         f" GROUP BY project HAVING n >= ? ORDER BY n DESC", (f"-{days} days", min_events))
-    out = []
-    for r in rows:
-        if r["project"] in CFG.report_exclude_projects:
-            continue
-        svc = _service(r["project"])
-        if svc not in out:
-            out.append(svc)
-    for name in CFG.report_known_services:          # 프로젝트가 없는 서비스도 항상 후보에
-        if name not in out:
-            out.append(name)
-    return out
+        if r["project"] not in CFG.report_exclude_projects]
 
 
 # ── 렌더링·압축 ───────────────────────────────────────
@@ -229,18 +262,23 @@ def _render_turn(t):
 
 
 def _render_session(s):
-    head = f"[세션 · {s['device']} · {s['start']}~{s['end']} · 턴 {len(s['turns'])}]"
+    head = f"[{s.get('key', 'S?')} · {s['device']} · {s['start']}~{s['end']} · 턴 {len(s['turns'])}]"
     if s.get("digest"):
         return head + " (압축 요약)\n" + s["digest"]
     return "\n".join([head] + [_render_turn(t) for t in s["turns"]])
 
 
-def _render_block(p, v):
-    head = f"=== 서비스: {_service(p)} | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ==="
+def _render_block(p, v, reg: Registry):
+    svc, strength = reg.service(p), reg.strength(p)
+    if strength == "weak":
+        head = (f"=== 서비스: {svc} (약한 기본값 — 이 디렉터리는 잡동사니라 내용이 다른 서비스면 그 서비스로 배치)"
+                f" | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ===")
+    elif strength == "none":
+        head = (f"=== 서비스: {svc} (매핑 없음 — 프로젝트명 그대로; 알려진 서비스에 해당하면 그 이름으로)"
+                f" | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ===")
+    else:
+        head = f"=== 서비스: {svc} | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ==="
     return "\n\n".join([head] + [_render_session(s) for s in v["sessions"]])
-
-
-BLOCK_BUDGET = 40_000   # 프로젝트 블록당 문자 예산 — 평소 하루는 여유 있게 들어가고, 넘치면 압축
 
 
 def digest_prompt(project, s):
@@ -254,13 +292,14 @@ def digest_prompt(project, s):
         + _render_session(s))
 
 
-def compress(work, llm, budget=BLOCK_BUDGET):
+def compress(work, llm, budget=BLOCK_BUDGET, reg: Registry | None = None):
     """블록이 예산을 넘는 프로젝트는 긴 세션부터 llm(prompt)→str 압축 요약(digest)으로 바꿔 예산 안에 넣는다.
     잘라내지 않는다 — 상한으로 뒷부분을 버리면 그날 오후 작업이 통째로 사라진다(2026-08-27 사고).
     llm이 빈 문자열을 돌려주면 그 세션은 원문을 유지하고 다음 세션으로 넘어간다."""
+    reg = reg or Registry.from_env()
     for p, v in work.items():
         for s in sorted(v["sessions"], key=lambda x: -len(_render_session(x))):
-            if len(_render_block(p, v)) <= budget:
+            if len(_render_block(p, v, reg)) <= budget:
                 break
             if s.get("digest") or len(s["turns"]) < 3:
                 continue
@@ -276,18 +315,11 @@ _AUDIENCE = (
     "개발 구현 디테일이 아니라 **제품에 무엇이 달라졌고 어디까지 왔는지**를 명확하고 간결하게 서술한다.\n\n"
 )
 
-_STRUCTURE_HEAD = (
-    "구조 — 헤더(#) 없이 전부 불릿, 3단계 중첩:\n"
-    "- **최상위 불릿(들여쓰기 0)** = 각 로그 블록 머리에 적힌 **서비스명 그대로**. 이름을 바꾸거나\n"
-    "  줄이거나 새로 짓지 않는다. **서비스명이 다른 블록은 절대 합치지 않는다** — 이름이 비슷해도\n"
-    "  (예: 서로 다른 서비스인데 접두어만 같은 경우) 각각 별도 최상위 불릿으로 둔다.\n"
-    "  같은 서비스명이 붙은 블록이 여러 개일 때만 하나로 합친다.\n"
-    "  서비스명은 이름만 짧게 — 괄호 부연·설명·볼드(**) 금지.\n"
-    "  단, 보고할 내용이 없는 블록(잡담·중단된 지시뿐)은 **최상위 불릿 자체를 만들지 않는다** —\n"
-    "  '기록 없음' 같은 빈 항목을 채워 넣지 말고 통째로 생략한다.\n"
-)
-
-_STRUCTURE_TAIL = (
+_STRUCTURE = (
+    "구조 — 헤더 없이 전부 불릿, 3단계 중첩:\n"
+    "- **최상위 불릿(들여쓰기 0)** = 서비스명. 아래 '서비스 목록'의 표기를 **그대로** 쓴다 — 바꾸거나 줄이거나\n"
+    "  괄호 부연·볼드를 붙이지 않는다. **서로 다른 서비스는 절대 합치지 않는다**(접두어가 같아도 별개).\n"
+    "  보고할 내용이 없는 서비스는 최상위 불릿 자체를 만들지 않는다.\n"
     "- **4칸 들여쓴 불릿** = 과제/기능/영역 (예: 결제, 모바일앱, 워커 배치).\n"
     "- **8칸 들여쓴 불릿** = 구체적으로 한 일. 더 세부는 12칸.\n\n"
 )
@@ -303,29 +335,87 @@ _STYLE = (
     "  '전량 분석', '오류 수정'처럼 **대상이 빠진 표기 금지**. 무슨 데이터·어느 화면·어느 기능인지를\n"
     "  항목이나 그 상위 불릿에 드러낸다.\n"
     "- 잡담·질문·메타 대화·시스템 알림·불완전 지시는 제외. 실제 수행·결정한 것만, 추측 금지.\n"
-    "- 상태 표현을 보존한다 — 검토·권장·예정·진행 중인 것을 결정·완료로 격상하지 않는다.\n"
-    "- 머리말·맺음말·총평·인사·안내문·사과·헤더(#) 없이 **불릿만** 출력한다. 첫 글자는 반드시 '- '.\n"
-    "  모든 블록을 빠짐없이 다룬다 — 일부 블록만 정리하고 나머지를 남기지 않는다.\n\n"
+    "- 상태 표현을 보존한다 — 검토·권장·예정·진행 중인 것을 결정·완료로 격상하지 않는다.\n\n"
 )
 
 
-def _services_note(services):
-    if not services:
-        return ""
+def _services_note(reg: Registry, allow_proposals=True):
     lines = []
-    for s in services:
-        hint = CFG.report_known_services.get(s, "")
-        lines.append(f"- {s}" + (f" — {hint}" if hint else ""))
-    return ("알려진 서비스 — 항목의 **작업 대상**이 이 중 하나면 로그 블록의 서비스명 대신 이 이름으로 최상위\n"
-            "불릿을 세운다(표기 그대로). 단서가 적힌 서비스는 그 단서로 식별하고, 같은 세션에서 앞 지시가 밝힌\n"
-            "대상·단서가 뒤 작업에도 이어지는지 흐름으로 판단한다:\n" + "\n".join(lines) + "\n\n")
+    for s in reg.services:
+        hint = " — ".join(x for x in (s.get("description") or "", "; ".join(s.get("cues") or [])) if x)
+        lines.append(f"- {s['name']}" + (f" — {hint}" if hint else ""))
+    for s in reg.proposed:
+        lines.append(f"- {s['name']} (제안 중, 미확정)" + (f" — {s.get('description')}" if s.get("description") else ""))
+    tail = ("목록에 없는 **새 서비스가 분명히 필요하면** proposals에 이름·설명·근거를 넣고 본문에서 그 이름을 최상위로 쓴다\n"
+            "(그 이름이 서비스 목록에 등록된다 — 이름은 노션 업무일지 표기처럼 짧고 안정적으로). 저장소·디렉터리 이름은\n"
+            "서비스가 아니다 — 제안하지 말고, 그 저장소의 작업은 내용에 맞는 기존 서비스 아래에 둔다.\n"
+            if allow_proposals else
+            "목록에 없는 이름은 최상위로 쓰지 않는다 — 업무일지에 이미 적힌 최상위 표기만 그대로 쓴다. 제안·부연·표기 설명을\n"
+            "본문에 넣지 않는다.\n")
+    return ("서비스 목록 — 최상위 불릿은 이 표기 중 하나여야 한다. 항목의 **작업 대상**이 로그 블록의 서비스와 다르면\n"
+            "(예: 어느 서비스 저장소를 열어둔 채 다른 서비스의 결함을 처리) 대상 서비스 아래에 둔다. 단서가 적힌 서비스는\n"
+            "그 단서로 식별하고, 같은 세션에서 앞 지시가 밝힌 대상이 뒤 작업에도 이어지는지 흐름으로 판단한다.\n"
+            + tail + "\n".join(lines) + "\n\n")
 
 
-def build_day_prompt(day, work, services=(), prev=None):
-    """하루치 원재료(gather → compress) → 업무일지 요청 (LLM 1회 호출).
-    prev=(날짜, 직전 업무일지 md): 주제 목록만 넣어 이어지는 작업의 이름·묶음을 잇게 한다."""
-    blocks = [_render_block(p, v)
-              for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0]))]
+# 일일 구조화 출력 — 본문(markdown) + 세션별 배치(assignments) + 새 서비스 제안(proposals)
+DOC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "assignments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string", "description": "로그의 세션 표기 (S1, S2 …)"},
+                    "service": {"type": "string", "description": "이 세션의 작업을 둔 최상위 서비스명"},
+                    "task": {"type": "string", "description": "4칸 과제명"},
+                    "evidence": {"type": "string", "description": "왜 그 서비스인지 한 줄 근거"},
+                },
+                "required": ["session", "service", "task", "evidence"],
+                "additionalProperties": False,
+            },
+        },
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["product", "tool", "ops"]},
+                    "description": {"type": "string"},
+                    "cues": {"type": "array", "items": {"type": "string"}},
+                    "evidence": {"type": "string", "description": "근거 세션과 인용"},
+                },
+                "required": ["name", "kind", "description", "cues", "evidence"],
+                "additionalProperties": False,
+            },
+        },
+        "markdown": {"type": "string", "description": "업무일지 마크다운 — 불릿만"},
+    },
+    "required": ["assignments", "proposals", "markdown"],
+    "additionalProperties": False,
+}
+
+
+def _corrections_note(corrections):
+    """사람의 교정 사례 — 모델의 자기 메모보다 우선하는 기억. 같은 프로젝트·비슷한 작업은 이 결정을 따른다."""
+    if not corrections:
+        return ""
+    lines = [f"- {c.get('day', '')} 프로젝트 '{c.get('project', '')}'의 세션을 '{c.get('before_service', '')}'에서"
+             f" '{c.get('after_service', '')}'(으)로 옮김" + (f" — {c['reason']}" if c.get("reason") else "")
+             for c in corrections[:20]]
+    return ("사람의 교정 기록 — 이전 리포트에서 사람이 배치를 바로잡은 사례다. **같은 프로젝트의 비슷한 작업은 이 결정을 따른다**\n"
+            "(서비스 목록의 단서보다 우선):\n" + "\n".join(lines) + "\n\n")
+
+
+def build_day_prompt(day, work, reg: Registry | None = None, prev=None, corrections=()):
+    """하루치 원재료(gather → compress) → 업무일지 요청 (LLM 1회 호출, DOC_SCHEMA 구조화 출력).
+    prev=(날짜, 직전 업무일지 md): 주제 목록만 넣어 이어지는 작업의 이름·묶음을 잇게 한다.
+    corrections: 사람의 재라벨 기록 — 같은 프로젝트의 배치 판단에 우선 적용."""
+    reg = reg or Registry.from_env()
+    blocks = [_render_block(p, v, reg)
+              for p, v in sorted(work.items(), key=lambda kv: (reg.service(kv[0]), kv[0]))]
     head = (
         f"아래는 하루({day}) 동안 AI 코딩 에이전트에게 준 지시와 그 응답을 프로젝트 → 세션 → 시간순으로\n"
         "모은 것이다. 이걸 **업무일지용 마크다운**으로 정리하라. " + _AUDIENCE
@@ -337,15 +427,6 @@ def build_day_prompt(day, work, services=(), prev=None):
             "오늘 항목이 이 주제의 연장이면 **같은 서비스·기능 이름을 이어 쓰고** 하나의 흐름으로 묶는다.\n"
             "이 목록의 일을 오늘 한 일로 다시 쓰지는 않는다 — 오늘 로그에 있는 것만 쓴다.\n\n"
         )
-    structure = (
-        _STRUCTURE_HEAD +
-        "- 어느 블록에 담을지는 **작업의 대상** 기준이다. 로그는 그때 열려 있던 저장소에 붙어 수집되므로,\n"
-        "  A 저장소에서 일하다 **다른 서비스 B의 결함·개선을 확인·처리**했다면 그 항목은 A가 아니라\n"
-        "  B 아래에 둔다 (예: 서비스 저장소에서 작업 중 발견한 협업 도구 자체의 알림 문제 → 그 도구).\n"
-        "  이때 B가 그 기간에 블록이 없어도 최상위 불릿을 새로 만들어도 된다. B의 이름은 아래\n"
-        "  '알려진 서비스' 표기를 그대로 쓰고, 목록에 없으면 옮기지 말고 원래 블록에 둔다.\n"
-        + _STRUCTURE_TAIL
-    )
     rules = (
         "일일 정리 규칙 (세션·턴의 나열이 아니라 과제 단위 정리):\n"
         "- 한 세션의 지시·응답은 **하나의 이어지는 작업 흐름**이다. 턴마다 항목을 만들지 말고, 그 흐름이\n"
@@ -364,16 +445,24 @@ def build_day_prompt(day, work, services=(), prev=None):
         "  알림은 응답의 **대상·맥락을 식별하는 데만** 쓰고, 지시·응답에 없는 일을 알림만 보고 항목으로\n"
         "  만들지 않는다.\n"
         "- '(압축 요약)' 세션은 긴 세션을 미리 불릿으로 줄인 것이다 — 원문 턴과 같은 무게로 다룬다.\n"
-        "- 항목이 길면 끝에 '…(이하 생략)'이 붙어 있다. 잘린 항목도 드러난 범위까지 반영하되,\n"
-        "  **잘림 자체는 언급하지 않는다**. 로그가 부족해 보여도 되묻지 말고 확인되는 것만 정리한다.\n\n"
+        "- 항목이 길면 '…(중략)…'·'…(이하 생략)'이 붙어 있다. 드러난 범위까지 반영하되 잘림 자체는 언급하지\n"
+        "  않고 되묻지 않는다.\n\n"
     )
-    return (head + context + structure + rules + _STYLE + log_notes + _services_note(services)
-            + "로그:\n" + "\n\n".join(blocks))
+    output = (
+        "출력(JSON):\n"
+        "- markdown: 업무일지 본문. 머리말·맺음말·헤더 없이 불릿만, 들여쓰기 0/4/8/12칸.\n"
+        "- assignments: 로그의 **모든 세션**(S1, S2 …)에 대해 어느 서비스·과제 아래 두었는지와 근거 한 줄.\n"
+        "  세션 하나가 두 서비스에 걸치면 주된 것 하나를 적는다.\n"
+        "- proposals: 목록에 없는 새 서비스가 필요할 때만. 없으면 빈 배열.\n\n"
+    )
+    return (head + context + _STRUCTURE + rules + _STYLE + log_notes + _services_note(reg)
+            + _corrections_note(corrections) + output + "로그:\n" + "\n\n".join(blocks))
 
 
-def build_period_prompt(range_, day, dailies, services=()):
-    """주간·월간: 일일 업무일지 모음 → 종합 보고 요청 (LLM 1회 호출).
+def build_period_prompt(range_, day, dailies, reg: Registry | None = None):
+    """주간·월간: 일일 업무일지 모음 → 종합 보고 요청 (LLM 1회 호출, 텍스트 출력).
     dailies = [(날짜, 업무일지 md)] 날짜순. 원본 로그가 아니라 일일 결과를 재료로 쓴다."""
+    reg = reg or Registry.from_env()
     label = {"week": "한 주(월~일)", "month": "한 달"}[range_]
     kind = {"week": "주간보고", "month": "월간보고"}[range_]
     head = (
@@ -381,11 +470,9 @@ def build_period_prompt(range_, day, dailies, services=()):
         "서비스 > 과제 > 세부의 3단계 불릿이다. 이걸 **" + kind + "용 마크다운**으로 종합하라. " + _AUDIENCE
     )
     structure = (
-        _STRUCTURE_HEAD.replace("각 로그 블록 머리에 적힌", "업무일지의 최상위 불릿에 적힌")
-        .replace("같은 서비스명이 붙은 블록이 여러 개일 때만 하나로 합친다.",
-                 "날짜가 달라도 같은 서비스명이면 하나로 합친다.")
-        .replace("보고할 내용이 없는 블록(잡담·중단된 지시뿐)", "보고할 내용이 없는 서비스")
-        + _STRUCTURE_TAIL
+        _STRUCTURE
+        + "- 최상위 서비스명은 업무일지의 최상위 불릿에 적힌 표기를 그대로 쓰고, 날짜가 달라도 같은 서비스명이면\n"
+          "  하나로 합친다.\n\n"
     )
     rules = {
         "week": (
@@ -405,15 +492,76 @@ def build_period_prompt(range_, day, dailies, services=()):
         ),
     }[range_]
     body = "\n\n".join(f"=== {d} ({_weekday(d)}) ===\n{md}" for d, md in dailies)
-    return (head + structure + rules + _STYLE + _services_note(services) + "업무일지:\n" + body)
+    return (head + structure + rules + _STYLE + _services_note(reg, allow_proposals=False)
+            + "출력: 머리말·맺음말·헤더 없이 불릿만, 들여쓰기 0/4/8/12칸.\n\n업무일지:\n" + body)
 
 
-def fallback_md(work):
+# ── 검증 ──────────────────────────────────────────────
+
+# 모델이 본문에 섞는 메타 문구 — 잘림·되묻기·안내. 프롬프트 금지문 대신 여기서 잡는다.
+_META_RE = re.compile(r"(로그가\s*(부족|없|잘려|잘림|중간)|기록이\s*(부족|없|잘려)|보내\s*주(세요|시면)|추가로 제공|확인 가능한 범위(까지|만)|…\(중략\)…|\(이하 생략\))")
+_HEADER_RE = re.compile(r"^\s*#{1,6}\s")
+
+
+def validate(md: str, allowed_names, block_services=()) -> list:
+    """업무일지 형식 검사 — 위반 목록(빈 리스트 = 통과). 결정적이라 프롬프트 문구보다 믿을 수 있다.
+    allowed_names: 최상위에 허용된 서비스명(확정 + 제안 중 + 이번 제안). block_services: 로그 블록의 서비스명."""
+    problems = []
+    allowed = set(allowed_names) | set(block_services)
+    lines = md.splitlines()
+    if not any(_BULLET.match(x) for x in lines):
+        return ["불릿이 없음"]
+    top_children = {}
+    current = None
+    for i, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        if _HEADER_RE.match(line):
+            problems.append(f"{i}행: 헤더(#) 사용")
+            continue
+        m = _INDENT.match(line)
+        if not m:
+            problems.append(f"{i}행: 불릿이 아닌 줄 — {line.strip()[:40]}")
+            continue
+        indent = len(m.group(1))
+        if indent % 4 or indent > 16:
+            problems.append(f"{i}행: 들여쓰기 {indent}칸 (0/4/8/12만 허용)")
+        text = line[m.end():].strip()
+        if indent == 0:
+            current = text
+            top_children.setdefault(text, 0)
+            if text not in allowed:
+                problems.append(f"{i}행: 서비스 목록에 없는 최상위 '{text}'")
+            if "**" in text or "(" in text:
+                problems.append(f"{i}행: 최상위 서비스명에 부연·볼드 — '{text[:40]}'")
+        elif current is not None:
+            top_children[current] += 1
+        if _META_RE.search(text):
+            problems.append(f"{i}행: 메타 문구(잘림·되묻기·안내) — {text[:40]}")
+        if mentions_excluded(text):
+            problems.append(f"{i}행: 제외 프로젝트 이름 언급")
+    for name, n in top_children.items():
+        if n == 0:
+            problems.append(f"빈 최상위 '{name}' (세부 없음)")
+    return problems
+
+
+def repair_prompt(md: str, problems: list) -> str:
+    return ("아래 업무일지 마크다운에 형식 위반이 있다. **내용은 바꾸지 말고** 위반만 고쳐 같은 형식으로 다시 출력하라.\n"
+            "위반 목록:\n" + "\n".join(f"- {p}" for p in problems) +
+            "\n\n규칙: 헤더 없이 불릿만, 들여쓰기 0/4/8/12칸, 최상위는 서비스 목록의 표기 그대로(부연·볼드 없이),\n"
+            "잘림·되묻기·안내 문구 없이, 세부 없는 최상위는 삭제.\n\n업무일지:\n" + md)
+
+
+# ── 폴백 ──────────────────────────────────────────────
+
+def fallback_md(work, reg: Registry | None = None):
     """일일 LLM 실패/미가용 시 — 원재료 기반 최소 마크다운(요약 없이 나열)."""
+    reg = reg or Registry.from_env()
     out, seen = [], None
-    for p, v in sorted(work.items(), key=lambda kv: (_service(kv[0]), kv[0])):
-        if _service(p) != seen:                       # 같은 서비스로 매핑된 프로젝트는 한 불릿 아래로
-            seen = _service(p)
+    for p, v in sorted(work.items(), key=lambda kv: (reg.service(kv[0]), kv[0])):
+        if reg.service(p) != seen:                     # 같은 서비스로 매핑된 프로젝트는 한 불릿 아래로
+            seen = reg.service(p)
             out.append(f"- {seen}")
         lines = [t["response"] or " / ".join(t["prompts"])
                  for s in v["sessions"] for t in s["turns"]]
@@ -439,15 +587,21 @@ NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id
 
 def last_event_at(c, day):
     """그날(로컬) 사람 세션의 마지막 지시·응답 시각(UTC ISO) — 저장된 일일 리포트가 그보다 오래됐으면 재생성 대상."""
+    return last_event_in(c, "day", day)
+
+
+def last_event_in(c, range_, day):
+    """기간 안 사람 세션의 마지막 지시·응답 시각(UTC ISO). 없으면 None."""
     return c.execute(
         f"SELECT MAX(ts_hub) m FROM events e WHERE event IN ('prompt','turn_done')"
-        f" AND date(ts_hub,'localtime') = date(?) AND {NOT_AUTO}", (day,)).fetchone()["m"]
+        f" AND {_pred(range_)} AND {NOT_AUTO}", _params(range_, day)).fetchone()["m"]
 
 
-def metrics(c, range_, day):
-    """활동 메트릭 — 윈도우 집계 + 프로젝트·기기/시간대 분포 + 잔디(최근 364일=52주, 윈도우 무관).
+def metrics(c, range_, day, reg: Registry | None = None):
+    """활동 메트릭 — 윈도우 집계 + 프로젝트·서비스·기기/시간대 분포 + 잔디(최근 364일=52주, 윈도우 무관).
     잔디 기간은 52주 고정 — EVENT_RETENTION_DAYS를 유한하게 두면 그보다 짧게 유지할 것.
     자동화 세션은 전 수치에서 제외."""
+    reg = reg or Registry.from_env()
     pred = _pred(range_)
     pr = _params(range_, day)
     turns = c.execute(
@@ -458,7 +612,7 @@ def metrics(c, range_, day):
         f" WHERE {pred} AND {NOT_AUTO})", pr).fetchone()["n"]
     projects = c.execute(
         f"SELECT COUNT(DISTINCT project) n FROM events e"
-        f" WHERE COALESCE(project,'') NOT IN ('','summarizer') AND {pred} AND {NOT_AUTO}",
+        f" WHERE COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO}",
         pr).fetchone()["n"]
     # 활동 시간 ≈ 이벤트가 있는 30분 슬롯 수 × 0.5h (연속 몰입시간 근사)
     slots = c.execute(
@@ -467,8 +621,11 @@ def metrics(c, range_, day):
         f" WHERE {pred} AND {NOT_AUTO})", pr).fetchone()["n"]
     per_project = [dict(r) for r in c.execute(
         f"SELECT project, COUNT(*) turns FROM events e WHERE event='turn_done'"
-        f" AND COALESCE(project,'') NOT IN ('','summarizer') AND {pred} AND {NOT_AUTO}"
+        f" AND COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO}"
         f" GROUP BY project ORDER BY turns DESC", pr)]
+    per_service: dict = {}
+    for r in per_project:
+        per_service[reg.service(r["project"])] = per_service.get(reg.service(r["project"]), 0) + r["turns"]
     per_device = [dict(r) for r in c.execute(
         f"SELECT d.name AS device, COUNT(*) turns FROM events e"
         f" JOIN devices d ON d.id=e.device_id"
@@ -486,6 +643,7 @@ def metrics(c, range_, day):
         "turns": turns, "sessions": sessions, "projects": projects,
         "active_hours": round(slots * 0.5, 1),
         "per_project": per_project,
+        "per_service": [{"service": k, "turns": v} for k, v in sorted(per_service.items(), key=lambda kv: -kv[1])],
         "per_device": per_device,
         "hourly": [{"hour": f"{i:02d}", "n": hourly.get(f"{i:02d}", 0)} for i in range(24)],
         "streak": streak,

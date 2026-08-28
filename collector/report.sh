@@ -212,13 +212,15 @@ elif [ "$AGENT" = "claude-code" ] && [ -z "$MODEL" ] && [ -n "$TP" ] && [ -f "$T
 fi
 
 # ── 프로젝트/브랜치 ────────────────────────────────────
-PROJECT=""; BRANCH=""; ORIGIN=""
+PROJECT=""; BRANCH=""; ORIGIN=""; SUBDIR=""
 if [ -n "$CWD" ] && [ -d "$CWD" ]; then
   TOPLEVEL=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)
   if [ -n "$TOPLEVEL" ]; then
     PROJECT=$(basename "$TOPLEVEL")
     BRANCH=$(git -C "$CWD" branch --show-current 2>/dev/null || true)
     ORIGIN=$(git -C "$CWD" remote get-url origin 2>/dev/null || true)
+    # 저장소 안 상대 경로(모노리포 하위 서비스 식별) — 경로 이름뿐, 내용은 싣지 않는다
+    SUBDIR=$(git -C "$CWD" rev-parse --show-prefix 2>/dev/null | sed 's#/$##' || true)
   else
     PROJECT=$(basename "$CWD")
   fi
@@ -254,7 +256,8 @@ case "$EV" in
     ;;
   turn_done)
     # 공식 필드 우선, transcript 꼬리 파싱은 폴백 (§4.2)
-    SUMMARY=$(printf '%s' "$IN" | jq -r '(.last_assistant_message // "") | .[0:200]' 2>/dev/null) || SUMMARY=""
+    # 응답 발췌 2,000자 (2026-08-28 결정) — 넘으면 머리 1,500 + 꼬리 500 (결론은 앞에, 남은 일은 끝에)
+    SUMMARY=$(printf '%s' "$IN" | jq -r '(.last_assistant_message // "") | if length > 2000 then .[0:1500] + " …(중략)… " + .[-500:] else . end' 2>/dev/null) || SUMMARY=""
     if [ "$AGENT" = "claude-code" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
       if [ -z "$MODEL" ]; then
         # Stop 발화 직후 전사본 flush 레이스 — 한 번만 짧게 재시도
@@ -266,13 +269,13 @@ case "$EV" in
       if [ -z "$SUMMARY" ]; then
         SUMMARY=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '
           [.[] | select(type=="object" and .type=="assistant")] | last |
-          (.message.content // []) | map(select(.type=="text") | .text) | join(" ") | .[0:200]
+          (.message.content // []) | map(select(.type=="text") | .text) | join(" ") | if length > 2000 then .[0:1500] + " …(중략)… " + .[-500:] else . end
         ' 2>/dev/null) || SUMMARY=""
       fi
     elif [ "$AGENT" = "codex-cli" ] && [ -z "$SUMMARY" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
       SUMMARY=$(tail -n 80 "$TP" 2>/dev/null | jq -rs '
         [.[] | select(.type=="response_item" and .payload.type=="message" and .payload.role=="assistant")] | last |
-        [.payload.content[]? | select(.type=="output_text") | .text] | join(" ") | .[0:200]
+        [.payload.content[]? | select(.type=="output_text") | .text] | join(" ") | if length > 2000 then .[0:1500] + " …(중략)… " + .[-500:] else . end
       ' 2>/dev/null) || SUMMARY=""
     fi
     DETAIL=$(jq -cn --arg s "${SUMMARY:-}" --arg m "$MODEL" --arg e "$EFFORT" --arg f "$FRONTEND" \
@@ -298,9 +301,10 @@ fi
 EVJSON=$(jq -cn \
   --arg agent "$AGENT" --arg sid "$SID" --arg ev "$EV" --arg ts "$TS" \
   --arg eid "$EID" \
-  --arg project "$PROJECT" --arg branch "$BRANCH" --argjson detail "$DETAIL" \
+  --arg project "$PROJECT" --arg branch "$BRANCH" --arg origin "$ORIGIN" --arg subdir "$SUBDIR" \
+  --argjson detail "$DETAIL" \
   '{agent:$agent, session_id:$sid, event:$ev, ts:$ts, event_id:$eid,
-    project:$project, branch:$branch, detail:$detail}' 2>/dev/null) || exit 0
+    project:$project, branch:$branch, origin:$origin, subdir:$subdir, detail:$detail}' 2>/dev/null) || exit 0
 
 # ── 전송 (순서 보존: 스풀이 있으면 뒤에 붙여 함께 플러시) ──
 if [ -s "$SPOOL" ]; then
