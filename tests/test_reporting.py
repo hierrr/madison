@@ -71,9 +71,9 @@ class StaleTests(unittest.TestCase):
     def tearDown(self):
         self.c.close()
 
-    def _put(self, range_, day, gen, pinned=0, failed=None):
-        self.c.execute("INSERT INTO reports (range, day, markdown, generated_at, pinned, failed_at)"
-                       " VALUES (?,?,?,?,?,?)", (range_, day, "- x", gen, pinned, failed))
+    def _put(self, range_, day, gen, failed=None):
+        self.c.execute("INSERT INTO reports (range, day, markdown, generated_at, failed_at)"
+                       " VALUES (?,?,?,?,?)", (range_, day, "- x", gen, failed))
 
     def test_no_report_is_stale(self):
         self.assertEqual(reporting.stale_reason(self.c, "day", "2026-08-27"), "no-report")
@@ -87,11 +87,6 @@ class StaleTests(unittest.TestCase):
         self._put("day", "2026-08-27", "2026-08-27T02:00:00Z")
         _ev(self.c, "2026-08-27T03:00:00Z", "turn_done", {"summary": "y"})
         self.assertEqual(reporting.stale_reason(self.c, "day", "2026-08-27"), "new-events")
-
-    def test_pinned_is_never_stale(self):
-        self._put("day", "2026-08-27", "2026-08-27T02:00:00Z", pinned=1)
-        _ev(self.c, "2026-08-27T03:00:00Z", "turn_done", {"summary": "y"})
-        self.assertIsNone(reporting.stale_reason(self.c, "day", "2026-08-27"))
 
     def test_failed_after_generation_retries(self):
         self._put("day", "2026-08-27", "2026-08-27T02:00:00Z", failed="2026-08-27T02:30:00Z")

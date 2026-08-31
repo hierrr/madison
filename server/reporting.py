@@ -9,7 +9,7 @@
   폴백(원재료 나열)은 저장본이 아예 없을 때만 보여 준다.
 - **새 이벤트가 없으면 다시 만들지 않는다** — 같은 사실이 매번 다른 문장으로 바뀌어 노션에 붙인 것과
   어긋나는 것을 막고, 재시작마다 opus 호출 10분이 드는 것을 없앤다.
-- 고정(pinned)된 리포트는 자동 재생성에서 제외한다(수동 갱신은 가능). 생성본은 report_versions에 남긴다.
+- 생성본은 report_versions에 남긴다 — 덮여도 되돌릴 수 있다.
 - 최상위 이름 공간은 registry(DB)가 정본 — 모델의 새 서비스 제안은 접수만 하고 사람이 확정한다.
 """
 import datetime
@@ -175,7 +175,7 @@ def relabel(range_: str, day: str, session_key: str, service: str, reason: str =
                   (day, session_key, a["device"], a["project"], a["service"], service, reason[:200], now))
         c.execute("UPDATE report_assignments SET service=?, evidence=? WHERE range=? AND day=? AND session_key=?",
                   (service, f"사람이 옮김: {reason}"[:300] if reason else "사람이 옮김", range_, day, session_key))
-        c.execute("UPDATE reports SET stale_at=?, pinned=0 WHERE range=? AND day=?", (now, range_, day))
+        c.execute("UPDATE reports SET stale_at=? WHERE range=? AND day=?", (now, range_, day))
     return {"day": day, "session_key": session_key, "service": service}
 
 
@@ -388,12 +388,11 @@ def _finish_day(day: str, started: str, md, res, fallback, extras) -> str | None
 def daily_for(day: str, today: str) -> str:
     """주간·월간 재료용 일일 업무일지. 없으면 생성하고, **어제** 것은 마지막 지시·응답보다 오래됐으면 재생성한다
     (일일 자동 갱신은 '오늘'만 돌아서, 마지막 시간별 갱신과 자정 사이의 작업이나 허브가 꺼져 있던 저녁의 작업은
-    빠진 채 굳는다). 오늘 것은 루프가 갱신하므로 저장본을 쓰고, 더 오래된 날도 저장본 그대로.
-    고정된 날은 건드리지 않는다."""
+    빠진 채 굳는다). 오늘 것은 루프가 갱신하므로 저장본을 쓰고, 더 오래된 날도 저장본 그대로."""
     with db.tx() as c:
         row = get_row(c, "day", day)
         stale = False
-        if row and row["markdown"] and not row["pinned"] and day == _yesterday(today):
+        if row and row["markdown"] and day == _yesterday(today):
             last = report.last_event_at(c, day)
             stale = bool(last and last > (row["generated_at"] or ""))
     if row and row["markdown"] and not stale:
@@ -464,12 +463,10 @@ def generate_inline(range_: str, day: str) -> dict:
 # ── 재생성 판단 ──────────────────────────────────────
 
 def stale_reason(c, range_: str, day: str) -> str | None:
-    """자동 재생성이 필요한 이유 — 없으면 None. 고정(pinned)은 항상 None."""
+    """자동 재생성이 필요한 이유 — 없으면 None."""
     row = get_row(c, range_, day)
     if row is None or not row["markdown"]:
         return "no-report"
-    if row["pinned"]:
-        return None
     gen = row["generated_at"] or ""
     if row["stale_at"] and row["stale_at"] > gen:
         return "relabeled"

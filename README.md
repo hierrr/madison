@@ -68,7 +68,7 @@ push a piece of work from one machine to another without walking over to it.
   repo was open lands under the hub, not that repo — and every report passes a
   deterministic validator before it is stored. Regenerated on a cron schedule
   only when something changed, in a separate worker process, or on demand; a
-  failed generation never overwrites a good report, and a report can be pinned.
+  failed generation never overwrites a good report.
   Plus usage metrics: turns, sessions, active hours, per-service, per-project and
   hourly distributions, and a 52-week streak grid with month labels (scrolls
   horizontally, lands on the most recent week).
@@ -232,8 +232,7 @@ settings UI for it:
 once. Adjust the registry through the admin API when needed (`/api/services`, `/api/project-map`,
 `/api/services/export` for a backup in `.env` format) — for example by asking an agent on the hub machine.
 The last 5 generated versions of each report are kept (`report_versions`, restorable with
-`POST /api/report/restore`); a restored or pinned report is excluded from automatic regeneration.
-Pinning is a button on the report tab.
+`POST /api/report/restore`).
 
 ## Security model
 

@@ -75,7 +75,6 @@ CREATE TABLE IF NOT EXISTS reports (
   day TEXT NOT NULL,            -- 기준 로컬 날짜 'YYYY-MM-DD' (week=월요일, month=1일)
   markdown TEXT,
   generated_at TEXT,
-  pinned INTEGER DEFAULT 0,     -- 1이면 자동 재생성 제외 (수동 갱신은 가능)
   model TEXT, effort TEXT,      -- 이 판을 만든 모델
   prompt_version TEXT,          -- 프롬프트 판 — "어느 판으로 만든 리포트인지"
   failed_at TEXT, fail_reason TEXT,   -- 마지막 생성 실패 (성공하면 NULL로)
@@ -135,7 +134,7 @@ CREATE TABLE IF NOT EXISTS llm_runs (
 CREATE INDEX IF NOT EXISTS idx_llm_runs_started ON llm_runs(started_at);
 """
 
-# 기존 DB에 열 추가 (있으면 무시)
+# 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)
 MIGRATIONS = (
     "ALTER TABLE sessions ADD COLUMN task_summary TEXT",
     "ALTER TABLE sessions ADD COLUMN model TEXT",
@@ -146,7 +145,6 @@ MIGRATIONS = (
     "ALTER TABLE sessions ADD COLUMN summary_tried_at TEXT",
     "ALTER TABLE handoffs ADD COLUMN doc TEXT",
     "ALTER TABLE handoffs ADD COLUMN patches TEXT",
-    "ALTER TABLE reports ADD COLUMN pinned INTEGER DEFAULT 0",
     "ALTER TABLE reports ADD COLUMN model TEXT",
     "ALTER TABLE reports ADD COLUMN effort TEXT",
     "ALTER TABLE reports ADD COLUMN prompt_version TEXT",
@@ -155,6 +153,7 @@ MIGRATIONS = (
     "ALTER TABLE reports ADD COLUMN stale_at TEXT",
     "ALTER TABLE events ADD COLUMN origin TEXT",
     "ALTER TABLE events ADD COLUMN subdir TEXT",
+    "ALTER TABLE reports DROP COLUMN pinned",   # 고정 기능 제거 (2026-08-31)
 )
 
 

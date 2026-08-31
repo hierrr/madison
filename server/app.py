@@ -478,12 +478,12 @@ async def get_report(request: Request, range: str = "day", date: str = ""):
         versions = c.execute("SELECT COUNT(*) n FROM report_versions WHERE range=? AND day=?",
                              (range_, day)).fetchone()["n"]
     out = {"range": range_, "day": day, "generating": reporting.is_generating((range_, day)),
-           "markdown": None, "generated_at": None, "pinned": False, "model": None,
+           "markdown": None, "generated_at": None, "model": None,
            "failed_at": None, "fail_reason": None, "assignments": assignments,
            "proposed": proposed, "versions": versions}
     if row:
         out.update({"markdown": row["markdown"], "generated_at": row["generated_at"],
-                    "pinned": bool(row["pinned"]), "model": row["model"],
+                    "model": row["model"],
                     "failed_at": row["failed_at"], "fail_reason": row["fail_reason"]})
     return out
 
@@ -501,7 +501,7 @@ async def report_versions(request: Request, range: str = "day", date: str = ""):
 
 @app.post("/api/report/restore")
 async def report_restore(request: Request):
-    """보관된 생성본으로 되돌린다(현재 본문도 보관에 남는다). 되돌린 리포트는 고정된다 — 자동 재생성이 덮지 않게."""
+    """보관된 생성본으로 되돌린다(현재 본문도 보관에 남는다). 이후 재료가 바뀌면 자동 재생성이 덮을 수 있다."""
     _require(request, ("admin",), state_change=True)
     body = await request.json()
     vid = int(body.get("id") or 0)
@@ -509,7 +509,7 @@ async def report_restore(request: Request):
         v = c.execute("SELECT * FROM report_versions WHERE id=?", (vid,)).fetchone()
         if not v:
             raise HTTPException(404, "생성본 없음")
-        c.execute("UPDATE reports SET markdown=?, model=?, prompt_version=?, pinned=1, failed_at=NULL, fail_reason=NULL"
+        c.execute("UPDATE reports SET markdown=?, model=?, prompt_version=?, failed_at=NULL, fail_reason=NULL"
                   " WHERE range=? AND day=?", (v["markdown"], v["model"], v["prompt_version"], v["range"], v["day"]))
     return {"ok": True, "range": v["range"], "day": v["day"]}
 
@@ -522,21 +522,6 @@ async def refresh_report(request: Request, range: str = "day", date: str = ""):
     if reporting.is_generating((range_, day)):
         return {"status": "generating"}
     return {"status": "started" if reporting.spawn(range_, day) else "busy"}
-
-
-@app.post("/api/report/pin")
-async def pin_report(request: Request):
-    """고정 토글 — 고정된 리포트는 자동 재생성에서 제외(수동 갱신은 가능)."""
-    _require(request, ("admin",), state_change=True)
-    body = await request.json()
-    range_ = reporting.norm_range(str(body.get("range") or "day"))
-    day = reporting.norm_day(range_, str(body.get("date") or reporting.today_local()))
-    pinned = 1 if body.get("pinned") else 0
-    with db.tx() as c:
-        cur = c.execute("UPDATE reports SET pinned=? WHERE range=? AND day=?", (pinned, range_, day))
-        if cur.rowcount != 1:
-            raise HTTPException(404, "리포트 없음")
-    return {"ok": True, "pinned": bool(pinned)}
 
 
 @app.post("/api/report/relabel")
