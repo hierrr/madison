@@ -20,7 +20,7 @@ from .registry import Registry
 EMPTY_MD = "이 기간에 기록된 작업이 없습니다."
 
 # 프롬프트 판 — 문구를 바꾸면 올린다. reports.prompt_version에 기록되어 "어느 판으로 만든 리포트인지" 남는다.
-PROMPT_VERSION = "2026-08-28.1"
+PROMPT_VERSION = "2026-09-01.1"
 
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
@@ -29,11 +29,16 @@ NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
 # (2026-08-27 일일: 45턴 중 13턴).
 _EMPTY_RESPONSES = ("no response requested",)
 
-# task-notification은 버리되 <summary>의 제목만 배경 맥락으로 살린다 — 그 시각 끝난 백그라운드 작업의
-# 제목이라, 이어지는 응답의 대상('무슨 데이터'·'어느 기능')이 그날의 지시·응답에서 빠져 있을 때
-# 이름을 되찾아 준다(2026-08-23 일일 리포트에 대상 없는 '데이터 재수집'만 남은 사례).
+# task-notification은 버리되 <summary>의 제목과 <event> 본문 발췌만 배경 맥락으로 살린다 —
+# 이어지는 응답의 대상('무슨 데이터'·'어느 기능')이 그날의 지시·응답에서 빠져 있을 때 이름을
+# 되찾아 준다(2026-08-23 일일 리포트에 대상 없는 '데이터 재수집'만 남은 사례). 제목이 내부
+# 라벨뿐인 알림은 본문의 원시 단서(스크립트·경로·인자)가 유일한 식별 재료다(2026-09-01:
+# 재료가 알림 1턴뿐인 날, 라벨이 그대로 과제명이 된 사례).
 _NOTE_SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.S)
+_NOTE_EVENT = re.compile(r"<event>(.*?)</event>", re.S)
 _NOTE_LABEL = re.compile(r'"([^"]{4,})"')
+NOTE_TITLE_CLIP = 120
+NOTE_DETAIL_CLIP = 200
 
 # 로그 한 줄 상한 — 지시는 훅이 600자로 보내고, 응답은 2,000자(2026-08-28 결정: 실측 p95 2,272자,
 # 200자 상한은 글자의 18.6%만 보존했다). 초과분은 머리·꼬리를 남긴다.
@@ -44,14 +49,15 @@ BLOCK_BUDGET = 120_000   # 프로젝트 블록당 문자 예산 — 응답 2,000
 
 
 def _note(text):
-    """알림 원문 → 배경 한 줄. 제목이 따옴표로 묶여 있으면 그 제목만 취해
-    같은 작업의 시작·종료 알림이 한 줄로 합쳐지게 한다."""
+    """알림 원문 → (제목, 본문 발췌). 제목이 따옴표로 묶여 있으면 그 제목만 취해
+    같은 작업의 시작·종료 알림이 제목 기준 한 줄로 합쳐지게 한다."""
     m = _NOTE_SUMMARY.search(text)
     if not m:
-        return ""
+        return "", ""
     s = " ".join(m.group(1).split())
     q = _NOTE_LABEL.search(s)
-    return (q.group(1) if q else s).strip()
+    e = _NOTE_EVENT.search(text)
+    return (q.group(1) if q else s).strip(), (" ".join(e.group(1).split()).strip() if e else "")
 
 
 def _real_response(text):
@@ -118,14 +124,28 @@ def strip_meta(md):
 _INDENT = re.compile(r"^( *)[-*+] ")
 
 
-def topics(md, max_indent=4):
+# 직전 일지에서 '아직 이어지는 세부'를 나타내는 표지 — 여러 날 도는 작업(러너·배치·이관)의
+# 대상 이름이 세부에만 있을 때, 이 줄들이 다음 날 리포트에 정체성을 이어 준다.
+_ONGOING = re.compile(r"(진행 중|예정|예상|대기(?!열)|보류|감시|미완|남음|재개)")
+
+
+def topics(md, max_indent=4, ongoing_cap=12):
     """업무일지에서 주제 수준(들여쓰기 ≤ max_indent) 불릿만 — 직전 일지를 맥락으로 넣을 때 쓴다.
-    세부(8칸 이상)는 넣지 않는다: 어제 한 일이 오늘 한 일로 되살아나는 것을 막는다."""
+    세부(8칸 이상)는 넣지 않는다: 어제 한 일이 오늘 한 일로 되살아나는 것을 막는다.
+    예외로 **계속 진행 중임을 나타내는 세부**(예정·대기·감시 등, _ONGOING)는 주제 바로 아래
+    한 줄씩 남긴다 — 오늘 로그가 내부 라벨뿐인 알림 턴만 있어도 그 작업의 제품 수준 이름을
+    이어받게 한다(2026-09-01: 라벨이 그대로 과제명이 된 사례)."""
     out = []
+    n = 0
     for line in md.splitlines():
         m = _INDENT.match(line)
-        if m and len(m.group(1)) <= max_indent:
+        if not m:
+            continue
+        if len(m.group(1)) <= max_indent:
             out.append(line.rstrip())
+        elif n < ongoing_cap and _ONGOING.search(line):
+            out.append(" " * (max_indent + 4) + "- " + clip(line[m.end():].strip(), 120))
+            n += 1
     return "\n".join(out)
 
 
@@ -207,9 +227,10 @@ def gather(c, range_, day):
                 cur = {"prompts": [], "notes": [], "response": None}
                 s["turns"].append(cur)
             if t.startswith("<task-notification"):
-                n = _note(t)
-                if n and n not in cur["notes"]:
-                    cur["notes"].append(clip(n, 120))
+                title, detail = _note(t)
+                head = clip(title, NOTE_TITLE_CLIP)
+                if head and not any(x.startswith(head) for x in cur["notes"]):
+                    cur["notes"].append(head + (" — " + clip(detail, NOTE_DETAIL_CLIP) if detail else ""))
             elif not t.startswith(NOISE):
                 cur["prompts"].append(clip(t, PROMPT_CLIP))
         else:
@@ -423,7 +444,8 @@ def build_day_prompt(day, work, reg: Registry | None = None, prev=None, correcti
     context = ""
     if prev:
         context = (
-            f"직전 업무일지({prev[0]})의 주제 목록 — 오늘 작업의 맥락이다:\n{topics(prev[1])}\n"
+            f"직전 업무일지({prev[0]})의 주제 목록 — 오늘 작업의 맥락이다. 8칸 들여쓴 줄은 어제 기준\n"
+            f"**진행 중이던 세부**로, 오늘 항목의 대상·이름을 식별하는 단서다:\n{topics(prev[1])}\n"
             "오늘 항목이 이 주제의 연장이면 **같은 서비스·기능 이름을 이어 쓰고** 하나의 흐름으로 묶는다.\n"
             "이 목록의 일을 오늘 한 일로 다시 쓰지는 않는다 — 오늘 로그에 있는 것만 쓴다.\n\n"
         )
@@ -441,9 +463,11 @@ def build_day_prompt(day, work, reg: Registry | None = None, prev=None, correcti
     log_notes = (
         "로그 읽는 법:\n"
         "- '지시:'는 사람이 준 지시, '응답:'은 그 턴의 에이전트 마지막 응답이다. 둘은 한 짝이다.\n"
-        "- '알림:'으로 시작하는 턴은 그 시각 끝난 백그라운드 작업의 제목이고 뒤의 응답이 그 결과 처리다.\n"
-        "  알림은 응답의 **대상·맥락을 식별하는 데만** 쓰고, 지시·응답에 없는 일을 알림만 보고 항목으로\n"
-        "  만들지 않는다.\n"
+        "- '알림:'으로 시작하는 턴은 백그라운드 작업이 보낸 알림('제목 — 본문 발췌')이고 뒤의 응답이\n"
+        "  그 결과 처리다. 알림은 응답의 **대상·맥락을 식별하는 데만** 쓰고, 지시·응답에 없는 일을\n"
+        "  알림만 보고 항목으로 만들지 않는다. 알림 제목은 자동화가 붙인 **내부 라벨**이다 — 과제·항목\n"
+        "  이름으로 그대로 쓰지 말고, 응답·본문 발췌·직전 주제에서 확인되는 제품 수준의 대상으로\n"
+        "  명명한다(내부 라벨은 필요하면 괄호 보조로만).\n"
         "- '(압축 요약)' 세션은 긴 세션을 미리 불릿으로 줄인 것이다 — 원문 턴과 같은 무게로 다룬다.\n"
         "- 항목이 길면 '…(중략)…'·'…(이하 생략)'이 붙어 있다. 드러난 범위까지 반영하되 잘림 자체는 언급하지\n"
         "  않고 되묻지 않는다.\n\n"

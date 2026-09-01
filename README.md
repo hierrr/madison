@@ -58,10 +58,12 @@ push a piece of work from one machine to another without walking over to it.
   a PM/owner-oriented report markdown (grouped by service, nested bullets) you
   can paste into Notion — the longer the period, the more it synthesizes
   instead of listing. The daily report reads the day as session flows
-  (instruction → response pairs, background-task titles for context) with the
-  previous day's topics as continuity, so a follow-up question lands under the
-  task it belongs to; nothing is truncated — an oversized session is condensed
-  first instead of cut. Weekly and monthly reports are synthesized from the
+  (instruction → response pairs; background-task notifications contribute their
+  title and a log excerpt as context) with the previous day's topics and its
+  still-in-progress details as continuity, so a follow-up question — or an
+  overnight batch's notification — lands under the task it belongs to instead
+  of surfacing under an internal automation label; nothing is truncated — an
+  oversized session is condensed first instead of cut. Weekly and monthly reports are synthesized from the
   stored daily reports, not from raw logs. Top-level grouping uses a service
   registry the writer maintains itself (seeded from `.env`, see below), an item
   is filed under the service it is *about* — a hub bug you hit while another

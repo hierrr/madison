@@ -70,6 +70,21 @@ class GatherTests(unittest.TestCase):
         self.assertIn("전량 분석", turns[0]["response"])
         self.assertEqual(w["proj"]["turns"], 2)               # 턴 수 자체는 그대로 센다
 
+    def test_notification_keeps_event_excerpt_for_identification(self):
+        start = ('<task-notification><summary>Monitor event: "야간 배치 수집 감시"</summary>'
+                 '<event>01:00:00 [RUNNER] stage-start collect: scripts/collect.py --source feeds --rate 8</event>'
+                 '</task-notification>')
+        stop = ('<task-notification><summary>Monitor event: "야간 배치 수집 감시"</summary>'
+                '<event>01:01:00 [RUNNER] stage-exit collect rc=75: QUOTA_EXHAUSTED</event>'
+                '</task-notification>')
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": start})
+        _ev(self.c, "2026-08-27T01:01:00Z", "prompt", {"prompt": stop})
+        _ev(self.c, "2026-08-27T01:02:00Z", "turn_done", {"summary": "러너가 한도 대기로 전환됐습니다"})
+        notes = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]["notes"]
+        self.assertEqual(len(notes), 1)                       # 같은 제목의 알림은 첫 건만
+        self.assertTrue(notes[0].startswith("야간 배치 수집 감시 — "))
+        self.assertIn("scripts/collect.py", notes[0])         # 본문 발췌 = 대상 식별 단서
+
     def test_queued_prompts_merge_into_one_turn(self):
         _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "첫 지시"})
         _ev(self.c, "2026-08-27T01:00:30Z", "prompt", {"prompt": "이어서 둘째 지시"})
@@ -132,6 +147,30 @@ class PromptTests(unittest.TestCase):
         self.assertIn("서비스 목록", p)
         self.assertIn("- Acme", p)
         self.assertIn("proposals", p)
+
+    def test_topics_carries_only_ongoing_details(self):
+        md = ("- Acme\n"
+              "    - 고객 데이터 확충\n"
+              "        - 세부 한 일 A를 마침\n"
+              "        - 수집 러너 재기동, 완료 예상 내일 밤\n"
+              "            - 후속 반영은 승인 대기\n"
+              "- MADISON\n"
+              "    - 리포트 품질\n")
+        t = report.topics(md)
+        self.assertNotIn("세부 한 일 A", t)                       # 끝난 세부는 여전히 제외
+        self.assertIn("        - 수집 러너 재기동, 완료 예상 내일 밤", t)
+        self.assertIn("        - 후속 반영은 승인 대기", t)        # 12칸도 8칸으로 정규화해 유지
+        self.assertNotIn("            ", t)
+        capped = report.topics(md, ongoing_cap=1)
+        self.assertIn("수집 러너 재기동", capped)
+        self.assertNotIn("승인 대기", capped)
+
+    def test_day_prompt_carries_ongoing_detail_and_label_rule(self):
+        prev_md = "- Acme\n    - 고객 데이터 확충\n        - 수집 러너 로그 감시 부착, 완료 예상 밤"
+        work = {"proj": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}
+        p = report.build_day_prompt("2026-08-27", work, _reg(["Acme"]), prev=("2026-08-26", prev_md))
+        self.assertIn("수집 러너 로그 감시 부착", p)               # 진행 중 세부가 이름 단서로 들어감
+        self.assertIn("내부 라벨", p)                             # 알림 제목을 과제명으로 쓰지 않는 규칙
 
     def test_block_header_shows_mapping_strength(self):
         work = {"scratch": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}
