@@ -112,6 +112,69 @@ def _session(n, device="workstation"):
                       for i in range(n)]}
 
 
+def _note_work(prompts, notes, response):
+    return {"proj": {"sessions": [{"device": "w", "start": "09:00", "end": "09:10",
+                                   "turns": [{"prompts": prompts, "notes": notes, "response": response}]}],
+                     "turns": 1, "n_sessions": 1}}
+
+
+class ArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.c = sqlite3.connect(":memory:")
+        self.c.row_factory = sqlite3.Row
+        self.c.executescript(db.SCHEMA)
+
+    def tearDown(self):
+        self.c.close()
+
+    def _daily(self, day, md):
+        self.c.execute("INSERT INTO reports (range, day, markdown) VALUES ('day', ?, ?)", (day, md))
+
+    def test_finds_label_bridge_in_past_dailies(self):
+        self._daily("2026-08-20", "- Acme\n    - 저자 논문 매칭\n        - 페이즈2 러너 재기동, 완료 예상 밤")
+        self._daily("2026-08-22", "- Acme\n    - 다른 주제\n        - 무관한 세부")
+        w = _note_work([], ["페이즈2 러너 로그: 중단·오류"], "한도 대기로 전환")
+        out = report.archive_snippets(self.c, w, "2026-08-27")
+        self.assertEqual(len(out), 1)                          # 무관한 일지는 안 걸림
+        self.assertIn("[2026-08-20] Acme > 저자 논문 매칭: 페이즈2 러너 재기동", out[0])
+
+    def test_skips_prev_day_dedupes_topic_and_caps(self):
+        for d in ("2026-08-24", "2026-08-25", "2026-08-26"):
+            self._daily(d, "- Acme\n    - 저자 논문 매칭\n        - 페이즈2 러너 진행\n        - 페이즈2 러너 검증\n"
+                           "    - 수집 개편\n        - 페이즈2 러너 이관 예정")
+        w = _note_work([], ["페이즈2 러너 로그"], "")
+        out = report.archive_snippets(self.c, w, "2026-08-27", skip_day="2026-08-26")
+        self.assertEqual(len(out), 2)                          # (서비스, 과제)당 한 줄 — 같은 과제 반복은 최신 것만
+        self.assertTrue(all(o.startswith("- [2026-08-25]") for o in out))   # 직전 일지(08-26)는 제외
+        self.assertEqual(len(report.archive_snippets(self.c, w, "2026-08-27", cap=1)), 1)
+
+    def test_no_notes_no_query(self):
+        self._daily("2026-08-25", "- Acme\n    - 저자 논문 매칭")
+        self.assertEqual(report.archive_snippets(self.c, _note_work(["지시"], [], "응답"), "2026-08-27"), [])
+
+
+class LabelGuardTests(unittest.TestCase):
+    def test_flags_task_named_only_from_label(self):
+        w = _note_work([], ["페이즈2 러너 로그: 중단"], "한도 소진으로 대기 모드 전환")
+        md = "- Acme\n    - 페이즈2 배치 러너 운영\n        - 한도 대기 전환"
+        p = report.label_only_topics(md, w)
+        self.assertEqual(len(p), 1)
+        self.assertIn("페이즈2", p[0])
+        self.assertIn("내부 라벨에서만 유래", p[0])
+
+    def test_paren_label_and_corpus_names_pass(self):
+        w = _note_work([], ["페이즈2 러너 로그: 중단"], "한도 소진으로 대기 모드 전환")
+        ok = "- Acme\n    - 저자 논문 매칭 러너(페이즈2)\n        - 한도 대기 전환"
+        self.assertEqual(report.label_only_topics(ok, w), [])   # 괄호 보조는 면제
+        bare = "- Acme\n    - 페이즈2 배치 러너 운영\n        - x"
+        self.assertEqual(report.label_only_topics(bare, w, corpus="어제 주제: 페이즈2 정리"), [])
+
+    def test_sessions_with_human_prompts_are_not_checked(self):
+        w = _note_work(["페이즈2 러너 상태 봐줘"], ["페이즈2 러너 로그: 중단"], "확인했습니다")
+        md = "- Acme\n    - 페이즈2 러너 점검\n        - x"
+        self.assertEqual(report.label_only_topics(md, w), [])
+
+
 class CompressTests(unittest.TestCase):
     def test_digests_largest_session_until_under_budget(self):
         work = {"proj": {"sessions": [_session(2), _session(30), _session(10)], "turns": 42, "n_sessions": 3}}
@@ -171,6 +234,15 @@ class PromptTests(unittest.TestCase):
         p = report.build_day_prompt("2026-08-27", work, _reg(["Acme"]), prev=("2026-08-26", prev_md))
         self.assertIn("수집 러너 로그 감시 부착", p)               # 진행 중 세부가 이름 단서로 들어감
         self.assertIn("내부 라벨", p)                             # 알림 제목을 과제명으로 쓰지 않는 규칙
+
+    def test_day_prompt_includes_archive_snippets(self):
+        work = {"proj": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}
+        p = report.build_day_prompt("2026-08-27", work, _reg(["Acme"]),
+                                    archive=["- [2026-08-20] Acme > 저자 논문 매칭: 페이즈2 러너 재기동"])
+        self.assertIn("과거 일지에서 찾은 관련 항목", p)
+        self.assertIn("저자 논문 매칭: 페이즈2 러너 재기동", p)
+        self.assertNotIn("과거 일지에서 찾은",
+                         report.build_day_prompt("2026-08-27", work, _reg(["Acme"])))
 
     def test_block_header_shows_mapping_strength(self):
         work = {"scratch": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}

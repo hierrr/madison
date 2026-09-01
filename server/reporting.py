@@ -305,16 +305,19 @@ def _prev_daily(c, day: str, back: int = 3):
     return None
 
 
-def _validated(md: str, allowed, block_services, ref: str):
-    """검증 → 위반이 있으면 같은 모델로 수정 호출 1회 → 남은 위반은 기록(needs_review)."""
-    problems = report.validate(md, allowed, block_services)
+def _validated(md: str, allowed, block_services, ref: str, extra_check=None):
+    """검증 → 위반이 있으면 같은 모델로 수정 호출 1회 → 남은 위반은 기록(needs_review).
+    extra_check(md)→list: 형식 밖 추가 검사(라벨 유래 과제명 등) — 수정본에도 다시 적용된다."""
+    def check(m):
+        return report.validate(m, allowed, block_services) + (extra_check(m) if extra_check else [])
+    problems = check(md)
     if not problems:
         return md, []
     log.info("report %s 검증 위반 %d건 — 수정 호출: %s", ref, len(problems), "; ".join(problems[:4]))
     fix = llm.run("report", report.repair_prompt(md, problems), ref=f"repair:{ref}")
     if fix.ok:
         fixed = report.strip_meta(llm.strip_fences(fix.text))
-        left = report.validate(fixed, allowed, block_services)
+        left = check(fixed)
         if len(left) < len(problems):
             return fixed, left
     return md, problems
@@ -328,12 +331,13 @@ def gen_day(day: str):
         work = report.gather(c, "day", day)
         prev = _prev_daily(c, day) if work else None
         corrections = recent_corrections(c, list(work)) if work else []
+        archive = report.archive_snippets(c, work, day, skip_day=prev[0] if prev else None) if work else []
     extras = {"assignments": [], "proposals": [], "problems": [], "reg": reg, "work": work}
     if not work:
         return report.EMPTY_MD, None, None, extras
     # 예산을 넘는 프로젝트는 긴 세션부터 미리 압축(세션당 LLM 1회) — 잘라내지 않는다
     report.compress(work, _digest(day), reg=reg)
-    res = llm.run("report", report.build_day_prompt(day, work, reg, prev, corrections),
+    res = llm.run("report", report.build_day_prompt(day, work, reg, prev, corrections, archive),
                   schema=report.DOC_SCHEMA, ref=f"day:{day}")
     fallback = report.fallback_md(work, reg)
     if not res.ok:
@@ -348,7 +352,12 @@ def gen_day(day: str):
     proposed_now = [str(p.get("name") or "").strip() for p in extras["proposals"] if p.get("name")]
     allowed = reg.names() + reg.proposed_names() + proposed_now
     block_services = [reg.service(p) for p in work]
-    md, problems = _validated(md, allowed, block_services, f"day:{day}")
+    # 라벨 유래 과제명 가드 — 이름의 출처로 인정할 코퍼스: 직전 주제 + 과거 발췌 + 서비스 목록(단서 포함)
+    corpus = "\n".join([report.topics(prev[1]) if prev else "", *archive,
+                        " ".join(f"{s['name']} {s.get('description') or ''} {' '.join(s.get('cues') or [])}"
+                                 for s in list(reg.services) + list(reg.proposed))])
+    md, problems = _validated(md, allowed, block_services, f"day:{day}",
+                              extra_check=lambda m: report.label_only_topics(m, work, corpus))
     extras["problems"] = problems
     return md, res, fallback, extras
 

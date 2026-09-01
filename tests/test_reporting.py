@@ -189,6 +189,27 @@ class ProposalFilterTests(unittest.TestCase):
         self.assertEqual(reg2.strength("tools"), "none")
 
 
+class ValidatedExtraCheckTests(unittest.TestCase):
+    def test_extra_check_triggers_repair_and_rechecks_fixed_md(self):
+        calls = []
+        fixed = "- Acme\n    - 저자 논문 매칭 러너(페이즈2)\n        - 세부"
+
+        def fake_run(site, prompt, **kw):
+            calls.append(prompt)
+            return llm.Result(ok=True, text=fixed, model="test")
+        orig, reporting.llm.run = reporting.llm.run, fake_run
+        try:
+            md = "- Acme\n    - 페이즈2 러너 운영\n        - 세부"
+            extra = lambda m: [] if "매칭" in m else ["과제명이 알림의 내부 라벨에서만 유래 — 테스트"]
+            out, problems = reporting._validated(md, ["Acme"], [], "day:test", extra_check=extra)
+        finally:
+            reporting.llm.run = orig
+        self.assertEqual(out, fixed)                          # 수정본 채택
+        self.assertEqual(problems, [])                        # 수정본에 extra_check 재적용해 통과
+        self.assertEqual(len(calls), 1)
+        self.assertIn("내부 라벨에서만 유래", calls[0])       # 수정 호출에 위반이 전달됨
+
+
 class WorkerPidTests(unittest.TestCase):
     def test_foreign_process_with_live_pid_is_not_a_worker(self):
         import os, subprocess

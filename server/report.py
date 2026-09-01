@@ -20,7 +20,7 @@ from .registry import Registry
 EMPTY_MD = "이 기간에 기록된 작업이 없습니다."
 
 # 프롬프트 판 — 문구를 바꾸면 올린다. reports.prompt_version에 기록되어 "어느 판으로 만든 리포트인지" 남는다.
-PROMPT_VERSION = "2026-09-01.1"
+PROMPT_VERSION = "2026-09-01.2"
 
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
@@ -147,6 +147,73 @@ def topics(md, max_indent=4, ongoing_cap=12):
             out.append(" " * (max_indent + 4) + "- " + clip(line[m.end():].strip(), 120))
             n += 1
     return "\n".join(out)
+
+
+# 알림 라벨 토큰 처리용 일반어 두 벌 — 검색 키에서는 순수 잡음만 거르고(라벨의 '러너'·'배치'도
+# 과거 일지를 찾는 데는 유효한 단서), 과제명 검사에서는 더 넓게 걸러 대상 없는 일반어 조합
+# ('배치 러너 운영')이 라벨 유래 판정을 피해가지 못하게 한다.
+_STOP_SEARCH = frozenset(
+    ("로그 감시 오류 알림 이벤트 단계 전환 중단 재개 대기 시작 종료 완료 실패 성공 상태 진행"
+     " monitor event error log alert").split())
+_STOP_NAME = _STOP_SEARCH | frozenset(
+    ("작업 배치 러너 운영 관리 점검 처리 대응 실행 자동 수집 정리"
+     " task job runner stage batch run daily").split())
+
+
+def _words(text):
+    return re.findall(r"[0-9A-Za-z가-힣]+", text.lower())
+
+
+def _label_keys(work):
+    """알림 제목(' — ' 앞)에서 과거 일지 검색 키 추출 — 잡음어를 뺀 토큰과 인접 2어절('페이즈 2')."""
+    keys = set()
+    for v in work.values():
+        for s in v["sessions"]:
+            for t in s["turns"]:
+                for n in t["notes"]:
+                    w = _words(n.split(" — ", 1)[0])
+                    keys.update(x for x in w if len(x) >= 2 and x not in _STOP_SEARCH)
+                    keys.update(f"{a} {b}" for a, b in zip(w, w[1:])
+                                if a not in _STOP_SEARCH and b not in _STOP_SEARCH)
+    return keys
+
+
+def archive_snippets(c, work, day, skip_day=None, days_back=90, cap=6):
+    """오늘 알림 라벨의 키로 **과거 일일 일지**를 검색해, 라벨과 제품 수준 과제명을 잇는 발췌를
+    돌려준다(최신순, (서비스, 과제)당 한 줄). 별도 기억 저장소를 두지 않는 이유(2026-09-01 결정):
+    명명 규칙(내부 라벨은 괄호 보조)으로 일지 자체가 자가 색인 용어집이 되고, 일지는 이미 검증·
+    보관·사람 확인을 거치는 정본이라 오염 관리가 따로 필요 없다. 새 테이블/컬럼은 결정적 코드가
+    읽어야 할 때만 만든다 — 모델이 해석할 지식은 저장하지 않고 산출물에서 파생시킨다."""
+    keys = _label_keys(work)
+    if not keys:
+        return []
+    out, seen = [], set()
+    for r in c.execute(
+            "SELECT day, markdown FROM reports WHERE range='day' AND day < ? AND day >= date(?, ?)"
+            " AND COALESCE(markdown,'') NOT IN ('', ?) ORDER BY day DESC",
+            (day, day, f"-{days_back} days", EMPTY_MD)):
+        if r["day"] == skip_day:                       # 직전 일지는 주제 목록으로 이미 들어간다
+            continue
+        top = topic = ""
+        for line in r["markdown"].splitlines():
+            m = _INDENT.match(line)
+            if not m:
+                continue
+            indent, text = len(m.group(1)), line[m.end():].strip()
+            if indent == 0:
+                top, topic = text, ""
+                continue
+            if indent == 4:
+                topic = text
+            low = line.lower()
+            if not any(k in low for k in keys) or (top, topic) in seen:
+                continue
+            seen.add((top, topic))
+            path = " > ".join(x for x in (top, topic) if x)
+            out.append(f"- [{r['day']}] {path}" + ("" if text == topic else ": " + clip(text, 160)))
+            if len(out) >= cap:
+                return out
+    return out
 
 
 def top_level_names(md) -> list:
@@ -430,10 +497,11 @@ def _corrections_note(corrections):
             "(서비스 목록의 단서보다 우선):\n" + "\n".join(lines) + "\n\n")
 
 
-def build_day_prompt(day, work, reg: Registry | None = None, prev=None, corrections=()):
+def build_day_prompt(day, work, reg: Registry | None = None, prev=None, corrections=(), archive=()):
     """하루치 원재료(gather → compress) → 업무일지 요청 (LLM 1회 호출, DOC_SCHEMA 구조화 출력).
     prev=(날짜, 직전 업무일지 md): 주제 목록만 넣어 이어지는 작업의 이름·묶음을 잇게 한다.
-    corrections: 사람의 재라벨 기록 — 같은 프로젝트의 배치 판단에 우선 적용."""
+    corrections: 사람의 재라벨 기록 — 같은 프로젝트의 배치 판단에 우선 적용.
+    archive: 과거 일지 발췌(archive_snippets) — 알림 라벨이 가리키는 과제의 이름 단서."""
     reg = reg or Registry.from_env()
     blocks = [_render_block(p, v, reg)
               for p, v in sorted(work.items(), key=lambda kv: (reg.service(kv[0]), kv[0]))]
@@ -448,6 +516,12 @@ def build_day_prompt(day, work, reg: Registry | None = None, prev=None, correcti
             f"**진행 중이던 세부**로, 오늘 항목의 대상·이름을 식별하는 단서다:\n{topics(prev[1])}\n"
             "오늘 항목이 이 주제의 연장이면 **같은 서비스·기능 이름을 이어 쓰고** 하나의 흐름으로 묶는다.\n"
             "이 목록의 일을 오늘 한 일로 다시 쓰지는 않는다 — 오늘 로그에 있는 것만 쓴다.\n\n"
+        )
+    if archive:
+        context += (
+            "과거 일지에서 찾은 관련 항목 — 오늘 알림·백그라운드 작업의 라벨이 가리키는 **실제 과제를\n"
+            "식별하는 단서**다. 여기 적힌 일을 오늘 한 일로 다시 쓰지는 않는다:\n"
+            + "\n".join(archive) + "\n\n"
         )
     rules = (
         "일일 정리 규칙 (세션·턴의 나열이 아니라 과제 단위 정리):\n"
@@ -570,11 +644,44 @@ def validate(md: str, allowed_names, block_services=()) -> list:
     return problems
 
 
+def label_only_topics(md, work, corpus="") -> list:
+    """4칸 과제명이 **사람 지시 없는 세션의 알림 제목**에서만 유래했는지 — validate()류의 위반 목록.
+    프롬프트의 명명 규칙('알림 제목은 내부 라벨, 과제명 금지')을 결정적으로 뒷받침한다.
+    오탐을 줄이는 두 장치: 검사 범위를 알림+응답뿐인 세션의 라벨 토큰으로 좁히고(지시가 있는
+    세션은 지시가 대상을 명명), 괄호 안은 면제한다(허용된 '괄호 보조' 표기가 합법적 탈출구).
+    corpus: 응답 외에 이름의 출처로 인정할 텍스트(직전 주제·과거 발췌·서비스 단서)."""
+    suspects, explained = set(), set(_words(corpus))
+    for v in work.values():
+        for s in v["sessions"]:
+            only_notes = all(not t["prompts"] for t in s["turns"])
+            for t in s["turns"]:
+                explained.update(_words(" ".join(t["prompts"]) + " " + (t["response"] or "")))
+                if only_notes:
+                    for n in t["notes"]:
+                        suspects.update(w for w in _words(n.split(" — ", 1)[0])
+                                        if len(w) >= 2 and w not in _STOP_NAME)
+    suspects -= explained
+    if not suspects:
+        return []
+    problems = []
+    for i, line in enumerate(md.splitlines(), 1):
+        m = _INDENT.match(line)
+        if not m or len(m.group(1)) != 4:
+            continue
+        bad = [w for w in _words(re.sub(r"\([^)]*\)", " ", line[m.end():])) if w in suspects]
+        if bad:
+            problems.append(f"{i}행: 과제명이 알림의 내부 라벨에서만 유래 — '{line[m.end():].strip()[:40]}'"
+                            f" (라벨 토큰: {', '.join(sorted(bad))})")
+    return problems
+
+
 def repair_prompt(md: str, problems: list) -> str:
     return ("아래 업무일지 마크다운에 형식 위반이 있다. **내용은 바꾸지 말고** 위반만 고쳐 같은 형식으로 다시 출력하라.\n"
             "위반 목록:\n" + "\n".join(f"- {p}" for p in problems) +
             "\n\n규칙: 헤더 없이 불릿만, 들여쓰기 0/4/8/12칸, 최상위는 서비스 목록의 표기 그대로(부연·볼드 없이),\n"
-            "잘림·되묻기·안내 문구 없이, 세부 없는 최상위는 삭제.\n\n업무일지:\n" + md)
+            "잘림·되묻기·안내 문구 없이, 세부 없는 최상위는 삭제. '내부 라벨에서만 유래' 위반은 세부 내용은 그대로\n"
+            "두고 **그 항목의 이름만** 응답·직전 주제·과거 발췌에서 확인되는 대상으로 바꾼다(라벨은 괄호 보조로 유지 가능).\n"
+            "\n업무일지:\n" + md)
 
 
 # ── 폴백 ──────────────────────────────────────────────
