@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   collection_mode TEXT,
   summary_source TEXT,    -- 'llm' | 'fallback' (실패해 원문 앞부분으로 채운 것 — 재시도 대상)
   summary_tried_at TEXT,  -- 마지막 요약 시도 시각 (재시도 간격용)
+  tokens_cum TEXT,        -- 마지막 누적 토큰 JSON {model: {in,out,cr,cw,th}} — 델타 기준점
   PRIMARY KEY (device_id, agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -141,6 +142,23 @@ CREATE TABLE IF NOT EXISTS usage_history (
   resets_at REAL                  -- epoch (없으면 NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_history ON usage_history(provider, win, ts);
+CREATE TABLE IF NOT EXISTS token_daily (
+  day TEXT NOT NULL,              -- ts_device 기준 로컬 날짜 'YYYY-MM-DD'
+  device_id INTEGER NOT NULL,
+  agent TEXT NOT NULL,            -- 'claude-code' | 'codex-cli'
+  project TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  frontend TEXT NOT NULL DEFAULT '',   -- ''|cli|app|ide|auto — 자동화도 집계하되 구분(쿼터는 소모)
+  source TEXT NOT NULL DEFAULT 'events',   -- 'events' | 'backfill'
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,       -- thinking 포함
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  thinking INTEGER NOT NULL DEFAULT 0,
+  turns INTEGER NOT NULL DEFAULT 0,        -- 기여한 turn_done 수
+  PRIMARY KEY (day, device_id, agent, project, model, frontend, source)
+);
+CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day);
 """
 
 # 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)
@@ -163,6 +181,7 @@ MIGRATIONS = (
     "ALTER TABLE events ADD COLUMN origin TEXT",
     "ALTER TABLE events ADD COLUMN subdir TEXT",
     "ALTER TABLE reports DROP COLUMN pinned",   # 고정 기능 제거 (2026-08-31)
+    "ALTER TABLE sessions ADD COLUMN tokens_cum TEXT",
 )
 
 

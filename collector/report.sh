@@ -226,6 +226,48 @@ if [ -n "$CWD" ] && [ -d "$CWD" ]; then
   fi
 fi
 
+# ── 토큰 누적 추출 (turn_done·session_end) ────────────
+# 세션 **누적** 토큰 맵 {model: {in,out,cr,cw,th}}을 stdout으로. 허브가 직전 값과의 델타만
+# 가산하므로 누락된 턴은 다음 이벤트가 따라잡는다. 실패/없음이면 빈 값 — 이벤트는 그대로 전송.
+# 전체 스캔이지만 jq 스트리밍이라 수십 MB 전사본도 0.1초대 (훅 예산 내).
+extract_tokens() {
+  [ -n "$TP" ] && [ -f "$TP" ] || return 0
+  if [ "$AGENT" = "claude-code" ]; then
+    # assistant 라인의 최상위 usage 필드만 모델별 합산 — iterations[]는 같은 값의 반복 기재라
+    # 더하면 이중 계상. 사이드체인(서브에이전트)도 실소비이므로 포함, <synthetic>은 제외.
+    # fromjson?로 라인 단위 파싱 — 마지막 라인이 쓰다 만 상태여도 나머지는 집계된다.
+    jq -Rcn '
+      reduce (inputs | fromjson? |
+        select(type=="object" and .type=="assistant"
+               and ((.message.model // "") != "<synthetic>")
+               and ((.message.usage | type) == "object")) |
+        {m: (.message.model // "unknown"), u: .message.usage}) as $x
+      ({}; .[$x.m] = {
+        "in": ((.[$x.m]["in"] // 0) + ($x.u.input_tokens // 0)),
+        "out": ((.[$x.m]["out"] // 0) + ($x.u.output_tokens // 0)),
+        "cr": ((.[$x.m]["cr"] // 0) + ($x.u.cache_read_input_tokens // 0)),
+        "cw": ((.[$x.m]["cw"] // 0) + ($x.u.cache_creation_input_tokens // 0)),
+        "th": ((.[$x.m]["th"] // 0) + ($x.u.output_tokens_details.thinking_tokens // 0))})
+      | if . == {} then empty else . end
+    ' "$TP" 2>/dev/null
+  else
+    # Codex: 마지막 token_count의 total_token_usage(세션 누적 카운터).
+    # cached_input_tokens는 input_tokens의 부분집합 → 분리해서 Claude와 의미를 맞춘다.
+    jq -Rcn --arg m "${MODEL:-unknown}" '
+      reduce (inputs | fromjson? | .payload? |
+        select(type=="object" and .type=="token_count") |
+        .info.total_token_usage | select(type=="object")) as $t (null; $t)
+      | if . == null then empty else
+          {($m): {"in": ((((.input_tokens // 0) - (.cached_input_tokens // 0))) | if . < 0 then 0 else . end),
+                  "out": (.output_tokens // 0),
+                  "cr": (.cached_input_tokens // 0),
+                  "cw": (.cache_write_input_tokens // 0),
+                  "th": (.reasoning_output_tokens // 0)}} end
+    ' "$TP" 2>/dev/null
+  fi
+  return 0
+}
+
 # ── 이벤트별 detail 추출 ──────────────────────────────
 DETAIL="{}"
 case "$EV" in
@@ -287,6 +329,17 @@ case "$EV" in
     ;;
 esac
 [ -z "$DETAIL" ] && DETAIL="{}"
+
+# 턴 경계 이벤트에는 세션 누적 토큰을 싣는다 (구형 허브는 미지 키를 무시하므로 호환)
+case "$EV" in
+  turn_done|session_end)
+    TOKCUM=$(extract_tokens) || TOKCUM=""
+    if [ -n "$TOKCUM" ]; then
+      MERGED=$(printf '%s' "$DETAIL" | jq -c --argjson t "$TOKCUM" \
+        '. + {tokens: {v: 1, cum: $t}}' 2>/dev/null) && [ -n "$MERGED" ] && DETAIL="$MERGED"
+    fi
+    ;;
+esac
 
 EID=""
 if [ "$AGENT" = "codex-cli" ] && [ -n "$TURN_ID" ]; then

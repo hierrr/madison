@@ -85,6 +85,89 @@ class CollectorTests(unittest.TestCase):
             )
             return json.loads(capture.read_text())
 
+    def run_report_with_transcript(self, agent: str, event: str, hook: dict, transcript_text: str):
+        """임의 전사본으로 report.sh 실행 → 전송 payload. 토큰 추출 검증용."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            capture = root / "capture.json"
+            transcript = root / "transcript.jsonl"
+            transcript.write_text(transcript_text)
+            hook["transcript_path"] = str(transcript)
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_CAPTURE": str(capture)})
+            subprocess.run(
+                ["bash", str(REPORT), event, agent],
+                input=json.dumps(hook), text=True, env=env, cwd=REPO, check=True,
+            )
+            return json.loads(capture.read_text())
+
+    @staticmethod
+    def assistant_line(model, usage):
+        return json.dumps({"type": "assistant", "message": {"model": model, "usage": usage}})
+
+    def test_claude_turn_done_carries_cumulative_tokens(self):
+        usage_a = {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 1000,
+                   "cache_creation_input_tokens": 200, "output_tokens_details": {"thinking_tokens": 30},
+                   # iterations는 같은 값의 반복 기재 — 합산하면 이중 계상이므로 무시돼야 한다
+                   "iterations": [{"input_tokens": 100, "output_tokens": 50}]}
+        transcript = "\n".join([
+            self.assistant_line("model-a", usage_a),
+            # 사이드체인(서브에이전트)도 실소비 — 포함
+            json.dumps({"type": "assistant", "isSidechain": True,
+                        "message": {"model": "model-b", "usage": {"input_tokens": 10, "output_tokens": 5}}}),
+            # 합성 메시지는 제외
+            self.assistant_line("<synthetic>", {"input_tokens": 999, "output_tokens": 999}),
+            self.assistant_line("model-a", {"input_tokens": 20, "output_tokens": 8}),
+            json.dumps({"type": "user"}),
+            "{broken json",   # 쓰다 만 마지막 라인 — 나머지 집계에 영향 없어야
+        ]) + "\n"
+        payload = self.run_report_with_transcript(
+            "claude-code", "turn_done",
+            {"session_id": "s1", "cwd": str(REPO), "last_assistant_message": "Done"},
+            transcript)
+        tok = payload["detail"]["tokens"]
+        self.assertEqual(tok["v"], 1)
+        self.assertEqual(tok["cum"]["model-a"], {"in": 120, "out": 58, "cr": 1000, "cw": 200, "th": 30})
+        self.assertEqual(tok["cum"]["model-b"], {"in": 10, "out": 5, "cr": 0, "cw": 0, "th": 0})
+        self.assertNotIn("<synthetic>", tok["cum"])
+
+    def test_codex_turn_done_uses_last_counter_and_splits_cached(self):
+        transcript = "\n".join([
+            json.dumps({"type": "session_meta", "payload": {"originator": "codex-tui", "source": "cli"}}),
+            json.dumps({"type": "turn_context", "payload": {"model": "gpt-rollout", "effort": "high"}}),
+            json.dumps({"payload": {"type": "token_count", "info": {"total_token_usage": {
+                "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10,
+                "reasoning_output_tokens": 4, "total_tokens": 110}}}}),
+            # 마지막 카운터가 이긴다
+            json.dumps({"payload": {"type": "token_count", "info": {"total_token_usage": {
+                "input_tokens": 300, "cached_input_tokens": 200, "output_tokens": 36,
+                "reasoning_output_tokens": 22, "total_tokens": 336}}}}),
+        ]) + "\n"
+        payload = self.run_report_with_transcript(
+            "codex-cli", "turn_done",
+            {"session_id": "s1", "turn_id": "t1", "cwd": str(REPO), "model": "gpt-hook",
+             "last_assistant_message": "Done"},
+            transcript)
+        self.assertEqual(payload["detail"]["tokens"]["cum"],
+                         {"gpt-hook": {"in": 100, "out": 36, "cr": 200, "cw": 0, "th": 22}})
+
+    def test_turn_done_without_token_data_omits_tokens_key(self):
+        payload = self.run_report_with_transcript(
+            "claude-code", "turn_done",
+            {"session_id": "s1", "cwd": str(REPO), "last_assistant_message": "Done"},
+            json.dumps({"type": "user"}) + "\n")
+        self.assertNotIn("tokens", payload["detail"])
+        self.assertEqual(payload["detail"]["summary"], "Done")
+
+    def test_session_end_also_carries_tokens(self):
+        payload = self.run_report_with_transcript(
+            "claude-code", "session_end",
+            {"session_id": "s1", "cwd": str(REPO), "reason": "exit"},
+            self.assistant_line("model-a", {"input_tokens": 7, "output_tokens": 3}) + "\n")
+        self.assertEqual(payload["detail"]["tokens"]["cum"]["model-a"]["in"], 7)
+
     def test_codex_cli_prompt_uses_hook_metadata(self):
         payload = self.run_report(
             "codex-tui",

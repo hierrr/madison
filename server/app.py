@@ -9,7 +9,7 @@ import threading
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, usage
+from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, tokens, usage
 from .config import CFG, REPO_ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -558,6 +558,15 @@ async def get_usage_history(request: Request, days: int = 30):
         h[p]["plan"] = (snap.get(p) or {}).get("plan") or ""
     return h
 
+
+@app.get("/api/usage/tokens")
+async def get_usage_tokens(request: Request, days: int = 30, agent: str = "", device: str = "",
+                           service: str = "", model: str = "", human: int = 0):
+    """토큰 사용량 집계 — 일별 시계열 + 기기/서비스/프로젝트/모델/세션별 내역."""
+    _require(request, ("admin",))
+    with db.tx() as c:
+        return tokens.summary(c, registry.snapshot(c), days=days, agent=agent, device=device,
+                              service=service, model=model, human=bool(human))
 
 
 # ── 서비스 레지스트리 (리포트 최상위 이름 공간) ─────────

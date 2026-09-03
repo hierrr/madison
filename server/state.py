@@ -1,9 +1,12 @@
 """이벤트 수신(폴드)과 현재 상태 조립 — IMPLEMENTATION.md §4·§5의 규칙 구현."""
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 
 from . import usage
 from .config import CFG
+
+log = logging.getLogger("madison.state")
 
 # 전이 완결 규칙 (§4.1): 모든 이벤트가 상태를 정의한다
 STATE_OF = {
@@ -133,6 +136,20 @@ def ingest(c, device_id: int, ev: dict) -> str:
         f"UPDATE sessions SET {', '.join(sets)} WHERE device_id=? AND agent=? AND session_id=?",
         args,
     )
+
+    # 토큰 폴드 — 수집기가 실은 세션 누적을 델타로 바꿔 일별 집계 (실패해도 ingest는 계속)
+    if event in ("turn_done", "session_end") and isinstance(payload.get("tokens"), dict):
+        try:
+            from . import tokens as toklib
+            toklib.fold(c, device_id, agent, session_id,
+                        project=str(project or row["project"] or ""),
+                        model=str(payload.get("model") or row["model"] or ""),
+                        frontend=str(payload.get("frontend") or row["frontend"] or ""),
+                        ts_device=ts_device, ts_hub=ts_hub,
+                        tokens=payload["tokens"], count_turn=(event == "turn_done"))
+        except Exception:
+            log.exception("token fold 실패 (device=%s session=%s)", device_id, session_id)
+
     c.execute("UPDATE devices SET last_seen_at=? WHERE id=?", (ts_hub, device_id))
     return "inserted"
 
