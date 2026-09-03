@@ -9,7 +9,7 @@ import threading
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, tokens, usage
+from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, tokens, tokscan, usage
 from .config import CFG, REPO_ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,6 +31,7 @@ async def _lifespan(_app):
         threading.Thread(target=reporting.loop, daemon=True).start()
     if CFG.usage_enabled:
         threading.Thread(target=usage.loop, daemon=True).start()
+    tokscan.start()   # 허브 워커(훅 억제) 전사본 스캔 — 기기 식별 실패 시 스스로 비활성
     yield
 
 
@@ -48,6 +49,7 @@ COLLECTOR_FILES = {
     "report.sh", "flush.sh", "install.sh", "install.ps1", "report.ps1",
     "hooks.template.json", "codex-hooks.template.json",
     "skills/handoff/SKILL.md", "skills/pickup/SKILL.md",
+    "collect_tokens_local.py",   # 토큰 백필 운반 — 허브 없는 기기에서 집계 JSON 생성
 }
 
 

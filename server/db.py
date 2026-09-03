@@ -159,6 +159,12 @@ CREATE TABLE IF NOT EXISTS token_daily (
   PRIMARY KEY (day, device_id, agent, project, model, frontend, source)
 );
 CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day);
+CREATE TABLE IF NOT EXISTS token_scan_state (
+  path TEXT PRIMARY KEY,          -- 전사본 파일 절대경로
+  cum TEXT,                       -- 마지막 누적 {model:{in,out,cr,cw,th}} JSON — 델타 기준점
+  size INTEGER, mtime REAL,       -- 변화 감지용 (동일하면 파싱 생략)
+  updated_at TEXT
+);
 """
 
 # 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)
