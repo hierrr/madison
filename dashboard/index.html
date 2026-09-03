@@ -187,26 +187,17 @@
   .tile .t-label { font-size: 12px; color: var(--ink-2); }
   .tile .t-value { font-size: 27px; font-weight: 650; letter-spacing: -0.01em; }
   .tile .t-value small { font-size: 16px; font-weight: 500; color: var(--ink-3); }
-  .tile.hero .t-value { font-size: 48px; line-height: 1.1; transition: color 0.3s ease; }
-  /* 히어로 타일: 주의 상태일 때만 은은한 틴트 + 좌측 얇은 색선 (평상시엔 중립) */
-  .tile.hero { position: relative; overflow: hidden; }
-  .tile.hero::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: transparent; transition: background 0.3s ease; }
+  /* 주의 필요 타일: 숫자·마커는 다른 타일과 동일, 주의 상태일 때만 은은한 그라데이션 틴트
+     (마커 색은 JS가 상황별로 — 승인 대기=crit, 입력 대기=warn, 없음=good) */
   .tile.hero[data-sev="crit"] { background: linear-gradient(180deg, var(--crit-bg), var(--surface) 60%); }
-  .tile.hero[data-sev="crit"]::before { background: var(--crit); }
   .tile.hero[data-sev="warn"] { background: linear-gradient(180deg, var(--warn-bg), var(--surface) 60%); }
-  .tile.hero[data-sev="warn"]::before { background: var(--warn); }
-  .tile.hero[data-sev="ok"]::before { background: var(--good); }
   .tile .t-sub { font-size: 12px; color: var(--ink-3); margin-top: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .t-sub .mini { display: inline-flex; align-items: center; gap: 5px; }
   .t-sub .mini i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-  .delta-up { color: var(--good-text); font-weight: 600; font-size: 12px; }
-  .delta-flat { color: var(--ink-3); font-weight: 600; font-size: 12px; }
-  .tile-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 
   .spark { display: flex; align-items: flex-end; gap: 2px; height: 30px; }
   .spark i { width: 7px; border-radius: 2px 2px 0 0; background: var(--spark-dim); height: calc(var(--v) * 100%); min-height: 2px; cursor: default; }
   .spark i.now { background: var(--accent); }
-  .spark.lg { height: 26px; }
 
   /* ── toolbar ── */
   .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -332,7 +323,7 @@
   .hfstate { margin-left: auto; font-family: var(--sans); font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; color: var(--ink-2); }
   .hfstate.ok { background: var(--good-bg); }
   .hfstate.ok::before { content: "✓ "; color: var(--good-text); }
-  .hfstate.pend { background: var(--warn-bg); }
+  .hfstate.pend { background: var(--warn); color: #0b0b0b; }  /* 진한 노랑 — 타일 sub의 대기 점과 동일 계열 */
   .hfstate.done { background: var(--stale-bg); }
   .hf.term { opacity: 0.55; }
   .hfacts { display: flex; gap: 6px; margin-top: 6px; }
@@ -412,6 +403,32 @@
   .hours i { flex: 1; background: var(--bar, var(--lg-blue)); opacity: .8; border-radius: 2px 2px 0 0; min-height: 2px; height: calc(var(--v) * 100%); }
   .hours-x { display: flex; justify-content: space-between; font-size: 9px; color: var(--ink-3); margin-top: 3px; font-family: var(--mono); }
 
+  /* ── 사용량 탭 ── */
+  .ucol { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .panel h2 img.picon { width: 16px; height: 16px; border-radius: 4px; flex: none; }
+  .panel h2.prov { text-transform: none; font-size: 12.5px; }
+  .uchart svg { display: block; width: 100%; height: auto; }
+  .uchart .grid { stroke: var(--line); stroke-width: 1; }
+  .uchart .gcrit { stroke: var(--crit); stroke-width: 1; opacity: .35; stroke-dasharray: 4 3; }
+  .uchart .axis { fill: var(--ink-3); font-size: 9px; font-family: var(--mono); }
+  .uchart path.w { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
+  .uchart circle.reset { fill: var(--crit); stroke: var(--surface); stroke-width: 1; }
+  .ulegend { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-2); margin-top: 8px; }
+  .ulegend .mono { font-family: var(--mono); color: var(--ink-3); }
+  .ulegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
+  .ulegend .reset-note { color: var(--crit); }
+  .uscroll { overflow-x: auto; padding-bottom: 2px; }
+  .tstack { display: flex; gap: 2px; align-items: flex-end; height: 110px; min-width: 100%; width: max-content; }
+  /* 컬럼은 전체 높이 히트 영역(호버 툴팁) — 세그먼트는 column-reverse로 바닥부터 쌓인다 */
+  .tstack .col { flex: 1 0 4px; height: 100%; display: flex; flex-direction: column-reverse; gap: 1px; min-width: 4px; max-width: 26px; }
+  .tstack .col:hover { background: var(--surface-2); }
+  .tstack .col i { display: block; border-radius: 1px; min-height: 0; flex: none; }
+  .tstack-x { display: flex; justify-content: space-between; font-size: 9px; color: var(--ink-3); margin-top: 3px; font-family: var(--mono); }
+  .mbar .val.tok { width: 60px; }
+  .tokmore.hidden { display: none; }
+  .tokmore-btn { margin-top: 6px; }
+  .unk { color: var(--ink-3); }   /* 미상(빈 값) 표시 — 실명 프로젝트와 색·괄호로 구분 */
+
   .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .feed li { display: flex; align-items: baseline; gap: 8px; padding: 5px 2px; border-bottom: 1px solid var(--line); font-size: 12px; }
   .feed li:last-child { border-bottom: none; }
@@ -440,7 +457,6 @@
   @media (max-width: 1020px) {
     .layout { grid-template-columns: 1fr; }
     .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .tile.hero .t-value { font-size: 40px; }
   }
   @media (max-width: 560px) {
     .wrap { padding: 16px 14px 40px; }
@@ -499,13 +515,14 @@
     <button class="tab" data-view="events" aria-selected="false">이벤트</button>
     <button class="tab" data-view="auto" aria-selected="false">자동화</button>
     <button class="tab" data-view="report" aria-selected="false">리포트</button>
+    <button class="tab" data-view="usage" aria-selected="false">사용량</button>
     <button class="tab" data-view="settings" aria-selected="false">설정</button>
   </nav>
 
   <div id="view-main" class="view">
   <section class="kpis" aria-label="요약 지표" id="kpis">
     <div class="tile hero" id="tileHero">
-      <span class="t-label">주의 필요</span>
+      <span class="t-label"><span class="hmk" id="kAttMark" style="background:var(--warn);height:11px"></span>주의 필요</span>
       <span class="t-value" id="kAtt">–</span>
       <span class="t-sub">
         <span class="mini"><i style="background:var(--crit)"></i>승인 대기 <span id="kApproval">0</span></span>
@@ -523,12 +540,12 @@
       <span class="t-sub" id="kDevNote"></span>
     </div>
     <div class="tile">
-      <span class="t-label"><span class="hmk" style="background:var(--lg-purple);height:11px"></span>오늘 완료한 턴</span>
-      <div class="tile-row">
-        <span class="t-value" id="kTurns">–</span>
-        <div class="spark lg" id="spark12" role="img" aria-label="최근 12시간 완료 턴 추이"></div>
-      </div>
-      <span class="t-sub"><span id="kDelta" class="delta-flat"></span></span>
+      <span class="t-label"><span class="hmk" style="background:var(--lg-teal);height:11px"></span>핸드오프 큐</span>
+      <span class="t-value" id="kHf">–</span>
+      <span class="t-sub">
+        <span class="mini"><i style="background:var(--warn)"></i>대기 <span id="kHfPend">0</span></span>
+        <span class="mini"><i style="background:var(--good)"></i>수신됨 <span id="kHfDeliv">0</span></span>
+      </span>
     </div>
     <div class="tile usage" id="tileClaude">
       <span class="t-label"><img class="t-icon" src="/assets/claude.webp" alt="">Claude <span id="uClaudePlan"></span></span>
@@ -593,6 +610,28 @@
   </div>
   <div id="view-events" class="view hidden"><div class="htwrap" id="eventsTable">불러오는 중…</div></div>
   <div id="view-auto" class="view hidden"><div class="htwrap" id="autoTable">불러오는 중…</div></div>
+  <div id="view-usage" class="view hidden">
+    <div class="rpt-controls">
+      <div class="seg" id="uRange">
+        <button data-d="30" class="on">30일</button>
+        <button data-d="90">90일</button>
+        <button data-d="365">1년</button>
+        <button data-d="0">전체</button>
+      </div>
+      <div class="seg" id="uAgent">
+        <button data-a="" class="on">전체</button>
+        <button data-a="claude-code">Claude</button>
+        <button data-a="codex-cli">Codex</button>
+      </div>
+      <select class="hsel" id="uDevice"><option value="">기기 전체</option></select>
+      <label class="dim" style="font-size:12.5px;display:inline-flex;align-items:center;gap:5px">
+        <input type="checkbox" id="uHuman"> 자동화 제외</label>
+    </div>
+    <div class="layout">
+      <main class="ucol" id="usageMain">불러오는 중…</main>
+      <aside class="rail" id="usageRail"></aside>
+    </div>
+  </div>
   <div id="view-report" class="view hidden">
     <div class="rpt-controls">
       <div class="seg" id="rptRange">
@@ -685,6 +724,10 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
     });
   }
+  // 프로젝트/서비스/모델 미상 표시 — 흐린 색 "(unknown)"으로, 실제 그 이름인 항목과 구분
+  function nameOr(v) {
+    return v ? esc(v) : '<span class="unk">(unknown)</span>';
+  }
   function age(min) {
     if (min == null) return '기록 없음';
     if (min < 1) return '방금 전';
@@ -751,7 +794,7 @@
       '<div class="stripe"></div><div class="cbody">' +
       '<div class="row1">' +
       '<span class="agent ' + agentCls + '">' + aLabel + '</span>' +
-      '<span class="proj">' + esc(s.project || 'unknown') + '</span>' +
+      '<span class="proj">' + nameOr(s.project) + '</span>' +
       (s.branch ? '<span class="branch">⎇ ' + esc(s.branch) + '</span>' : '') +
       '<span class="chip ' + chipCls + '"><i class="dot"></i>' + esc(chipLabel) + '</span>' +
       '</div>' +
@@ -826,10 +869,10 @@
     document.getElementById('kAtt').textContent = att.length;
     document.getElementById('kApproval').textContent = approvalN;
     document.getElementById('kAwait').textContent = att.length - approvalN;
-    // 주의 필요 숫자·히어로 타일을 긴급도 색으로 (승인 대기=빨강, 입력 대기=노랑, 없음=차분한 녹색)
+    // 주의 필요 마커·타일 틴트를 긴급도 색으로 (승인 대기=빨강, 입력 대기=노랑, 없음=녹색)
     var heroSev = approvalN > 0 ? 'crit' : att.length > 0 ? 'warn' : 'ok';
-    document.getElementById('kAtt').style.color =
-      heroSev === 'crit' ? 'var(--crit)' : heroSev === 'warn' ? 'var(--warn)' : 'var(--good-text)';
+    document.getElementById('kAttMark').style.background =
+      heroSev === 'crit' ? 'var(--crit)' : heroSev === 'warn' ? 'var(--warn)' : 'var(--good)';
     document.getElementById('tileHero').setAttribute('data-sev', heroSev);
     document.getElementById('kWork').textContent = workN;
     document.getElementById('kUnconf').textContent = unconfN;
@@ -837,19 +880,12 @@
     document.getElementById('kDevAll').textContent = st.kpi.devices_total;
     var offNames = st.devices.filter(function (d) { return !d.online; }).map(function (d) { return d.name; });
     document.getElementById('kDevNote').textContent = offNames.length ? offNames.join(' · ') + ' 무신호' : '전 기기 온라인';
-    document.getElementById('kTurns').textContent = st.kpi.today_turns;
-    var y = st.kpi.yesterday_turns_same_time;
-    var deltaEl = document.getElementById('kDelta');
-    if (y > 0) {
-      var pct = Math.round((st.kpi.today_turns - y) / y * 100);
-      deltaEl.textContent = (pct >= 0 ? '▲ ' + pct : '▼ ' + Math.abs(pct)) + '% vs 어제 같은 시각';
-      deltaEl.className = pct >= 0 ? 'delta-up' : 'delta-flat';
-    } else {
-      deltaEl.textContent = '어제 같은 시각 기록 없음';
-      deltaEl.className = 'delta-flat';
-    }
-    document.getElementById('spark12').innerHTML =
-      sparkHtml(st.kpi.spark12, 'n', function (it) { return it.hour + ' · ' + it.n + '턴'; });
+    // 핸드오프 큐 타일 — 활성(대기/수신) 건수, sub는 주의 필요와 같은 색점 형식
+    var hfActive = st.handoffs.filter(function (h) { return h.status === 'pending' || h.status === 'delivered'; });
+    var hfPend = hfActive.filter(function (h) { return h.status === 'pending'; }).length;
+    document.getElementById('kHf').textContent = hfActive.length;
+    document.getElementById('kHfPend').textContent = hfPend;
+    document.getElementById('kHfDeliv').textContent = hfActive.length - hfPend;
 
     renderUsage(st.kpi.usage);
     document.getElementById('statDevices').textContent = st.kpi.devices_total;
@@ -897,7 +933,7 @@
           return '<li><i class="dot ' + (s.state === 'needs_approval' ? 'crit' : 'warn') + '"></i>' +
             '<span class="where">' + esc(s.device) + '</span>' +
             '<span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(s) + '</span>' +
-            '<span class="what">' + esc(s.project || 'unknown') + ' · ' +
+            '<span class="what">' + nameOr(s.project) + ' · ' +
             esc(s.state === 'needs_approval' ? (s.approval_msg || '권한 승인') : '다음 지시 대기') + '</span>' +
             '<span class="age">' + esc(dur(s.state_min)) + '</span></li>';
         }).join('')
@@ -1034,10 +1070,12 @@
   });
 
   // 툴팁 — 위임 (스파크바·잔디·시간대 분포 등 data-d를 가진 요소 공통)
+  // closest 매칭: data-d 요소의 자식(스택 세그먼트 등) 위에 있어도 조상 툴팁이 보이게
   var tip = document.getElementById('tip');
   document.addEventListener('mouseover', function (e) {
-    if (e.target.matches && e.target.matches('[data-d]')) {
-      tip.textContent = e.target.dataset.d;
+    var el = e.target.closest && e.target.closest('[data-d]');
+    if (el) {
+      tip.textContent = el.dataset.d;
       tip.classList.add('show');
     }
   });
@@ -1048,7 +1086,8 @@
     tip.style.top = (e.clientY - tip.offsetHeight - 10) + 'px';
   });
   document.addEventListener('mouseout', function (e) {
-    if (e.target.matches && e.target.matches('[data-d]')) tip.classList.remove('show');
+    var el = e.target.closest && e.target.closest('[data-d]');
+    if (el) tip.classList.remove('show');
   });
 
   // ── 탭 라우터 + 이력 페이지 ──
@@ -1074,14 +1113,14 @@
     var devs = [], projs = [];
     rows.forEach(function (r) {
       if (devs.indexOf(r.device) < 0) devs.push(r.device);
-      var p = r.project || 'unknown';
+      var p = r.project || '(unknown)';
       if (projs.indexOf(p) < 0) projs.push(p);
     });
     devs.sort(); projs.sort();
     var cutoff = daysCut(EF.days);
     var shown = rows.filter(function (r) {
       if (EF.device && r.device !== EF.device) return false;
-      if (EF.project && (r.project || 'unknown') !== EF.project) return false;
+      if (EF.project && (r.project || '(unknown)') !== EF.project) return false;
       if (cutoff && tsMs(r.ts) < cutoff) return false;
       return true;
     });
@@ -1209,6 +1248,8 @@
         HIST.autoSessions = rows.filter(function (s) { return s.frontend === 'auto'; });
         renderAuto();
       }).catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
+    } else if (v === 'usage') {
+      loadUsage();
     } else if (v === 'report') {
       loadReport(); loadMetrics();
     } else if (v === 'settings') {
@@ -1396,7 +1437,7 @@
       if (devs.indexOf(s.device) < 0) devs.push(s.device);
       var al = agentLabel(s);
       if (agents.indexOf(al) < 0) agents.push(al);
-      var pj = s.project || 'unknown';
+      var pj = s.project || '(unknown)';
       if (projs.indexOf(pj) < 0) projs.push(pj);
     });
     devs.sort(); agents.sort(); projs.sort();
@@ -1404,7 +1445,7 @@
     var shown = rows.filter(function (s) {
       return (!AF.device || s.device === AF.device) &&
         (!AF.agent || agentLabel(s) === AF.agent) &&
-        (!AF.project || (s.project || 'unknown') === AF.project) &&
+        (!AF.project || (s.project || '(unknown)') === AF.project) &&
         (!cutoff || tsMs(s.last_seen_hub) >= cutoff);
     });
     var p = pageSlice(shown, 'auto');
@@ -1416,7 +1457,7 @@
         '<td class="mono dim">#' + (s.row_id != null ? s.row_id : '') + '</td>' +
         '<td class="mono">' + esc(s.device) + '</td>' +
         '<td><span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(s) + '</span></td>' +
-        '<td class="mono">' + esc(s.project || 'unknown') + '</td>' +
+        '<td class="mono">' + nameOr(s.project) + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
         '<td>' + sdot(SESSION_DOT[s.state] || 's-end') + esc(STATE_LABEL[s.state] || s.state) + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
@@ -1515,7 +1556,7 @@
       if (devs.indexOf(s.device) < 0) devs.push(s.device);
       var al = agentLabel(s);
       if (agents.indexOf(al) < 0) agents.push(al);
-      var p = s.project || 'unknown';
+      var p = s.project || '(unknown)';
       if (projs.indexOf(p) < 0) projs.push(p);
     });
     devs.sort(); agents.sort(); projs.sort();
@@ -1523,7 +1564,7 @@
     var shown = rows.filter(function (s) {
       return (!f.device || s.device === f.device) &&
         (!f.agent || agentLabel(s) === f.agent) &&
-        (!f.project || (s.project || 'unknown') === f.project) &&
+        (!f.project || (s.project || '(unknown)') === f.project) &&
         (!cutoff || tsMs(s.last_seen_hub) >= cutoff);
     });
     var p = pageSlice(shown, 'tasks');
@@ -1533,7 +1574,7 @@
         '<td class="mono">' + esc(s.device) + '</td>' +
         '<td><span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' +
         agentLabel(s) + '</span></td>' +
-        '<td class="mono">' + esc(s.project || 'unknown') + (s.branch ? ' <span class="dim">⎇ ' + esc(s.branch) + '</span>' : '') + '</td>' +
+        '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim">⎇ ' + esc(s.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
         '<td>' + sdot(SESSION_DOT[s.state] || 's-end') + esc(STATE_LABEL[s.state] || s.state) + (s.end_reason ? ' <span class="dim">(' + esc(s.end_reason) + ')</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
@@ -1773,6 +1814,238 @@
     getJSON('/api/metrics?range=' + RPT.range + '&date=' + RPT.date).then(renderMetrics)
       .catch(function () { document.getElementById('metricsBody').innerHTML = ''; });
   }
+
+  // ── 사용량 탭 — 한도 % 이력 + 토큰 집계 ──
+  var UF = { days: '30', agent: '', device: '', human: false };
+  var USAGE_TOP_N = 5;   // 서비스별·프로젝트별 기본 노출 개수 (나머지는 펼치기)
+  // 좌측 그래프 항목 색: 모든 그래프에서 등장 순서대로 gold → green → blue 통일 (테마 변수라 다크/라이트 자동)
+  var WINCOLORS = ['var(--lg-gold)', 'var(--lg-green)', 'var(--lg-blue)', 'var(--lg-violet)', 'var(--lg-purple)', 'var(--lg-coral)'];
+
+  function fmtTok(n) {
+    n = Number(n) || 0;
+    function s(v) { return v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(2); }
+    if (n >= 1e9) return s(n / 1e9) + 'B';
+    if (n >= 1e6) return s(n / 1e6) + 'M';
+    if (n >= 1e3) return s(n / 1e3) + 'k';
+    return String(n);
+  }
+  function fmtEpoch(t, short) {
+    var d = new Date(t * 1000);
+    return (d.getMonth() + 1) + '/' + d.getDate() +
+      (short ? '' : ' ' + ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2));
+  }
+  function stepAt(series, t) {   // 변화 시점만 저장된 시계열의 t 시점 값 (step-after)
+    var v = null;
+    for (var i = 0; i < series.length; i++) {
+      if (series[i][0] <= t) v = series[i][1]; else break;
+    }
+    return v;
+  }
+
+  // 한도 % 계단선 차트 — 라이브러리 없이 인라인 SVG (뷰박스 고정, 폭에 맞춰 비율 유지 스케일)
+  // resets: {win: [{ts, from, to, early}]} — 조기(프로바이더 발) 리셋만 마커로 표시
+  function svgSteps(windows, from, to, resets) {
+    var names = Object.keys(windows);
+    if (!names.length) return '<div class="none">아직 기록 없음 — 한도가 변할 때마다 쌓입니다</div>';
+    var W = 640, H = 150, L = 30, R = 6, T = 8, B = 16;
+    // 데이터가 범위 중간부터 시작하면(수집 개시 직후 등) 시작점으로 자동 줌 —
+    // 30일 축 끝의 점 하나로 그려져 "빈 차트"로 보이는 것 방지. carry-in이 있으면 정확히 from에 찍힌다.
+    var dataMin = Infinity;
+    names.forEach(function (w) { if (windows[w].length) dataMin = Math.min(dataMin, windows[w][0][0]); });
+    if (!isFinite(dataMin)) dataMin = to - 86400;
+    if (from == null || dataMin > from) from = dataMin;
+    if (to - from < 3600) from = to - 3600;
+    function x(t) { return (L + (t - from) / (to - from) * (W - L - R)).toFixed(1); }
+    function y(p) { return (T + (100 - p) / 100 * (H - T - B)).toFixed(1); }
+    var out = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img">';
+    [0, 25, 50, 75, 100].forEach(function (p) {
+      out += '<line class="grid" x1="' + L + '" y1="' + y(p) + '" x2="' + (W - R) + '" y2="' + y(p) + '"/>' +
+        '<text class="axis" x="' + (L - 4) + '" y="' + (Number(y(p)) + 3) + '" text-anchor="end">' + p + '</text>';
+    });
+    out += '<line class="gcrit" x1="' + L + '" y1="' + y(90) + '" x2="' + (W - R) + '" y2="' + y(90) + '"/>';
+    var mid = (from + to) / 2, short = (to - from) > 3 * 86400;
+    out += '<text class="axis" x="' + L + '" y="' + (H - 3) + '">' + fmtEpoch(from, short) + '</text>' +
+      '<text class="axis" x="' + ((L + W - R) / 2) + '" y="' + (H - 3) + '" text-anchor="middle">' + fmtEpoch(mid, short) + '</text>' +
+      '<text class="axis" x="' + (W - R) + '" y="' + (H - 3) + '" text-anchor="end">' + fmtEpoch(to, short) + '</text>';
+    names.forEach(function (w, i) {
+      var s = windows[w];
+      if (!s.length) return;
+      var d = 'M' + x(s[0][0]) + ' ' + y(s[0][1]);
+      for (var j = 1; j < s.length; j++) d += 'H' + x(s[j][0]) + 'V' + y(s[j][1]);   // step-after
+      d += 'H' + x(to);   // 마지막 값을 우측 끝까지 연장
+      out += '<path class="w" d="' + d + '" style="stroke:' + WINCOLORS[i % WINCOLORS.length] + '"/>';
+    });
+    // 호버 스트립 — 시간 버킷마다 각 창의 값 (공용 #tip 위임 핸들러가 data-d를 읽는다)
+    var NB = 48, bw = (W - L - R) / NB;
+    for (var b = 0; b < NB; b++) {
+      var t = from + (b + 0.5) / NB * (to - from);
+      var parts = names.map(function (w) {
+        var v = stepAt(windows[w], t);
+        return v == null ? null : w.replace(' all models', ' 전체') + ' ' + v + '%';
+      }).filter(Boolean);
+      if (!parts.length) continue;
+      out += '<rect x="' + (L + b * bw).toFixed(1) + '" y="0" width="' + bw.toFixed(1) + '" height="' + H +
+        '" fill="transparent" data-d="' + esc(fmtEpoch(t, short) + ' · ' + parts.join(' · ')) + '"/>';
+    }
+    // 조기 리셋 마커 — 예정 시각 전에 pct가 떨어진 지점 (호버 스트립 위에 그려 툴팁 우선)
+    var earlyN = 0;
+    names.forEach(function (w) {
+      ((resets || {})[w] || []).forEach(function (r) {
+        if (!r.early || r.ts == null || r.ts < from) return;
+        earlyN++;
+        out += '<circle class="reset" cx="' + x(r.ts) + '" cy="6" r="3.5" data-d="' +
+          esc(fmtEpoch(r.ts, short) + ' · ' + w.replace(' all models', ' 전체') + ' ' + r.from + '%→' + r.to +
+              '% · 조기 리셋 (프로바이더 발)') + '"/>';
+      });
+    });
+    out += '</svg><div class="ulegend">' + names.map(function (w, i) {
+      var s = windows[w], last = s.length ? s[s.length - 1][1] : null;
+      return '<span><i style="background:' + WINCOLORS[i % WINCOLORS.length] + '"></i>' +
+        esc(w.replace(' all models', ' 전체')) + (last == null ? '' : ' <span class="mono">' + last + '%</span>') + '</span>';
+    }).join('') + (earlyN ? '<span class="reset-note">● 조기 리셋 ' + earlyN + '회</span>' : '') + '</div>';
+    return out;
+  }
+
+  // 토큰 일별 스택 바 — segs: [{label, color, val(row)}]
+  function tokenStacks(dayRows, segs) {
+    var byDay = {};
+    dayRows.forEach(function (r) { byDay[r.day] = r; });
+    var today = new Date(); today.setHours(0, 0, 0, 0);
+    var start;
+    if (UF.days !== '0') { start = new Date(today); start.setDate(start.getDate() - (parseInt(UF.days, 10) - 1)); }
+    else if (dayRows.length) { start = new Date(dayRows[0].day + 'T00:00:00'); }
+    else return '<div class="none">기록 없음</div>';
+    var cols = '', labels = [], d = new Date(start), max = 1, list = [];
+    while (d <= today) {
+      var key = ymd(d), r = byDay[key] || {};
+      var vals = segs.map(function (sg) { return Math.max(0, sg.val(r) || 0); });
+      list.push({ key: key, r: r, vals: vals });
+      max = Math.max(max, vals.reduce(function (a, b) { return a + b; }, 0));
+      d.setDate(d.getDate() + 1);
+    }
+    list.forEach(function (it) {
+      var tipTxt = it.key.slice(5).replace('-', '/') + ' · ' + segs.map(function (sg, i) {
+        return sg.label + ' ' + fmtTok(it.vals[i]);
+      }).join(' · ') + (it.r.turns ? ' · ' + it.r.turns + '턴' : '');
+      var bars = segs.map(function (sg, i) {
+        var h = it.vals[i] / max * 108;
+        return h > 0 ? '<i style="height:' + h.toFixed(1) + 'px;background:' + sg.color + '"></i>' : '';
+      }).join('');
+      cols += '<div class="col" data-d="' + esc(tipTxt) + '">' + (bars || '<i style="height:1px;background:var(--surface-2)"></i>') + '</div>';
+    });
+    var legend = '<div class="ulegend">' + segs.map(function (sg) {
+      return '<span><i style="background:' + sg.color + '"></i>' + sg.label + '</span>';
+    }).join('') + '</div>';
+    return '<div class="uscroll"><div class="tstack">' + cols + '</div></div>' +
+      '<div class="tstack-x"><span>' + list[0].key.slice(5).replace('-', '/') + '</span><span>' +
+      list[list.length - 1].key.slice(5).replace('-', '/') + '</span></div>' + legend;
+  }
+
+  function tokBars(items, key, titleFn, topN) {   // mbars 변형 — 값은 input+output, 캐시는 툴팁에
+    if (!items.length) return '<div class="none">기록 없음</div>';
+    var max = 1;
+    items.forEach(function (it) { max = Math.max(max, (it.input || 0) + (it.output || 0)); });
+    function bar(it) {
+      var v = (it.input || 0) + (it.output || 0);
+      var label = titleFn ? titleFn(it) : it[key];
+      var tipTxt = 'input ' + fmtTok(it.input) + ' · output ' + fmtTok(it.output) +
+        ' · cache read ' + fmtTok(it.cache_read) + ' · cache write ' + fmtTok(it.cache_write);
+      return '<div class="mbar"><span class="lbl" title="' + esc(label || '(unknown)') + '">' + nameOr(label) + '</span>' +
+        '<span class="track" data-d="' + esc(tipTxt) + '"><span class="fill" style="width:' + (v / max * 100) + '%"></span></span>' +
+        '<span class="val tok" data-d="' + esc(tipTxt) + '">' + fmtTok(v) + '</span></div>';
+    }
+    if (!topN || items.length <= topN) return items.map(bar).join('');
+    return items.slice(0, topN).map(bar).join('') +
+      '<div class="tokmore hidden">' + items.slice(topN).map(bar).join('') + '</div>' +
+      '<button class="copy tokmore-btn" data-open-label="접기" data-closed-label="펼치기 (+' +
+      (items.length - topN) + ')">펼치기 (+' + (items.length - topN) + ')</button>';
+  }
+
+  function loadUsage() {
+    var qs = 'days=' + UF.days + '&agent=' + encodeURIComponent(UF.agent) +
+      '&device=' + encodeURIComponent(UF.device) + (UF.human ? '&human=1' : '');
+    Promise.all([getJSON('/api/usage/history?days=' + UF.days), getJSON('/api/usage/tokens?' + qs)])
+      .then(function (res) { renderUsageView(res[0], res[1]); })
+      .catch(function () {
+        document.getElementById('usageMain').innerHTML = '<div class="none">불러오기 실패</div>';
+        document.getElementById('usageRail').innerHTML = '';
+      });
+  }
+
+  function renderUsageView(hist, tok) {
+    function panel(title, color, body) {
+      return '<section class="panel" style="--bar:' + color + '">' +
+        '<h2><span class="hmk" style="background:' + color + '"></span>' + title + '</h2>' + body + '</section>';
+    }
+    // 한도 패널 제목은 현황 타일과 동일하게 — 로고 + 이름 · 플랜
+    function provPanel(p, d) {
+      var cap = p === 'claude' ? 'Claude' : 'Codex';
+      return '<section class="panel"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
+        cap + (d.plan ? ' · ' + esc(d.plan) : '') + '</h2>' +
+        '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}) + '</div></section>';
+    }
+    function stat(label, val) {
+      return '<div class="mstat"><div class="ml">' + label + '</div><div class="mv">' + val + '</div></div>';
+    }
+    var t = tok.total || {};
+    var outNoTh = function (r) { return (r.output || 0) - (r.thinking || 0); };
+    document.getElementById('usageMain').innerHTML =
+      provPanel('claude', hist.claude || {}) +
+      provPanel('codex', hist.codex || {}) +
+      panel('입출력 토큰 · 일별', 'var(--lg-teal)', tokenStacks(tok.days || [], [
+        { label: 'input', color: 'var(--lg-gold)', val: function (r) { return r.input; } },
+        { label: 'output', color: 'var(--lg-green)', val: outNoTh },
+        { label: 'thinking', color: 'var(--lg-blue)', val: function (r) { return r.thinking; } }
+      ])) +
+      // cache read는 입출력의 수백 배 규모 — 같은 축에 섞으면 입출력이 안 보여서 패널 분리
+      panel('캐시 토큰 · 일별', 'var(--lg-blue)', tokenStacks(tok.days || [], [
+        { label: 'cache read', color: 'var(--lg-gold)', val: function (r) { return r.cache_read; } },
+        { label: 'cache write', color: 'var(--lg-green)', val: function (r) { return r.cache_write; } }
+      ]));
+    document.getElementById('usageRail').innerHTML =
+      panel('합계', 'var(--lg-green)',
+        '<div class="mstat-grid">' + stat('input', fmtTok(t.input)) + stat('output', fmtTok(t.output)) +
+        stat('cache read', fmtTok(t.cache_read)) + stat('cache write', fmtTok(t.cache_write)) +
+        stat('thinking', fmtTok(t.thinking)) + stat('턴', t.turns || 0) + '</div>') +
+      panel('에이전트별', 'var(--lg-gold)', tokBars((tok.by_agent || []).map(function (r) {
+        return Object.assign({}, r, { agent: r.agent === 'claude-code' ? 'Claude' : r.agent === 'codex-cli' ? 'Codex' : r.agent });
+      }), 'agent')) +
+      panel('모델별', 'var(--lg-teal)', tokBars((tok.by_model || []).map(function (r) {
+        return Object.assign({}, r, { model: String(r.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '') });
+      }), 'model')) +
+      panel('서비스별', 'var(--lg-blue)', tokBars(tok.by_service || [], 'service', null, USAGE_TOP_N)) +
+      panel('프로젝트별', 'var(--lg-violet)', tokBars(tok.by_project || [], 'project', null, USAGE_TOP_N)) +
+      panel('기기별', 'var(--lg-purple)', tokBars(tok.by_device || [], 'device'));
+    // 스택은 최근(우측)이 보이게 스크롤
+    document.querySelectorAll('#usageMain .uscroll').forEach(function (el) { el.scrollLeft = el.scrollWidth; });
+    // 기기 셀렉트 채움 (선택 유지)
+    var sel = document.getElementById('uDevice');
+    var devs = (tok.by_device || []).map(function (r) { return r.device; });
+    if (UF.device && devs.indexOf(UF.device) < 0) devs.push(UF.device);
+    sel.innerHTML = optsFor(devs, UF.device, '기기 전체');
+  }
+
+  document.getElementById('uRange').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    UF.days = b.dataset.d;
+    Array.prototype.forEach.call(this.children, function (c) { c.classList.toggle('on', c.dataset.d === UF.days); });
+    loadUsage();
+  });
+  document.getElementById('uAgent').addEventListener('click', function (e) {
+    var b = e.target.closest('button'); if (!b) return;
+    UF.agent = b.dataset.a;
+    Array.prototype.forEach.call(this.children, function (c) { c.classList.toggle('on', c.dataset.a === UF.agent); });
+    loadUsage();
+  });
+  document.getElementById('uDevice').addEventListener('change', function () { UF.device = this.value; loadUsage(); });
+  document.getElementById('uHuman').addEventListener('change', function () { UF.human = this.checked; loadUsage(); });
+  // 상위 N 초과분 펼치기/접기 (위임 — 레일은 필터 변경마다 다시 그려진다)
+  document.getElementById('usageRail').addEventListener('click', function (e) {
+    var b = e.target.closest('.tokmore-btn');
+    if (!b) return;
+    var open = !b.previousElementSibling.classList.toggle('hidden');
+    b.textContent = open ? b.dataset.openLabel : b.dataset.closedLabel;
+  });
 
   function rptReload() { stopPoll(); loadReport(); loadMetrics(); }
   function renderRail(m) { return ''; }
