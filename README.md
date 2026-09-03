@@ -80,6 +80,15 @@ push a piece of work from one machine to another without walking over to it.
 - **Subscription usage** — the overview shows Claude Code and Codex rate-limit
   windows (5-hour, weekly, reset credits) with bars and warning colors; the hub
   reads them itself from the providers' own endpoints (see Security model).
+- **Usage tab — token accounting & limit history** — collectors attach cumulative
+  per-session token counts (input / output / cache read / cache write / thinking,
+  per model, parsed from the agents' local transcripts) to turn events; the hub
+  folds them into a per-day × device × project × model ledger kept forever, and
+  records every rate-limit percentage change. The tab charts limit windows over
+  time (step lines), daily token stacks (I/O and cache on separate scales), and
+  breakdowns by service / project / model / device / agent / session, filterable
+  by period, agent, device, and automation. A one-time script backfills history
+  from transcripts still on disk.
 - **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
   Codex), model, and reasoning effort separately for task summaries, session
   digests, and report generation, with model lists pulled live from the CLIs
