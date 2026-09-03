@@ -401,6 +401,98 @@ def load_persisted():
                     _snap[p] = data[p]
 
 
+def record_history(c, provider: str, windows: list, ts: str | None = None) -> int:
+    """창별 마지막 행과 pct가 다를 때만 usage_history에 append. 반환: 추가 행 수.
+    변화만 쌓아 폴링 주기와 무관하게 용량을 억제한다(같은 pct로 돌아오는 리셋은 안 보이지만
+    차트 해상도에선 무해). 조회는 계단선(step-after)으로 사이를 메운다."""
+    ts = ts or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    for w in windows:
+        last = c.execute(
+            "SELECT pct FROM usage_history WHERE provider=? AND win=? ORDER BY id DESC LIMIT 1",
+            (provider, w["title"])).fetchone()
+        if last is None or last["pct"] != w["pct"]:
+            c.execute("INSERT INTO usage_history (ts, provider, win, pct, resets_at) VALUES (?,?,?,?,?)",
+                      (ts, provider, w["title"], w["pct"], w.get("resets_at")))
+            n += 1
+    return n
+
+
+RESET_EARLY_SLACK = 600   # 초 — 예정 리셋 시각보다 이만큼 이르면 프로바이더 발 조기 리셋으로 본다
+
+
+def detect_resets(c, provider: str, win: str, frm: float | None) -> list:
+    """pct 하락 = 창 리셋. 직전 행의 resets_at보다 이르면 early(프로바이더가 임의 초기화한 경우).
+    반환: [{ts, from, to, early}] — 범위 안의 하락만 (직전 기준행은 범위 밖에서 이어받는다)."""
+    if frm is not None:
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(frm))
+        prev = c.execute("SELECT ts, pct, resets_at FROM usage_history WHERE provider=? AND win=?"
+                         " AND ts < ? ORDER BY id DESC LIMIT 1", (provider, win, cutoff)).fetchone()
+        rows = c.execute("SELECT ts, pct, resets_at FROM usage_history WHERE provider=? AND win=?"
+                         " AND ts >= ? ORDER BY id", (provider, win, cutoff))
+    else:
+        prev = None
+        rows = c.execute("SELECT ts, pct, resets_at FROM usage_history WHERE provider=? AND win=?"
+                         " ORDER BY id", (provider, win))
+    out = []
+    for r in rows:
+        if prev is not None and r["pct"] < prev["pct"]:
+            ts = to_epoch(r["ts"])
+            early = (isinstance(prev["resets_at"], (int, float)) and ts is not None
+                     and ts < prev["resets_at"] - RESET_EARLY_SLACK)
+            out.append({"ts": int(ts) if ts else None, "from": prev["pct"], "to": r["pct"],
+                        "early": bool(early)})
+        prev = r
+    return out
+
+
+def history(c, days: int = 30) -> dict:
+    """한도 % 시계열 — {provider: {windows: {win: [[epoch, pct], …]}, resets: {win: […]}}, from, to}.
+    변화 시점만 저장돼 있으므로 범위 직전 carry-in 1행을 붙여 계단선 시작 레벨을 준다.
+    다운샘플은 **실제 데이터 폭** 기준(≤14일 원본, ≤92일 시간별, 그 이상 일별) — 요청 범위가
+    길어도 이력이 짧으면 원본 그대로. 버킷은 마지막 행(MAX(id)의 bare column, SQLite 보장) —
+    MAX(ts)+MAX(pct)처럼 다른 행의 값이 짝지어지지 않게. 리셋 감지는 항상 원본 행 기준."""
+    now = time.time()
+    days = max(0, min(int(days or 0), 3660))
+    frm = now - days * 86_400 if days else None
+    first = to_epoch((c.execute("SELECT MIN(ts) t FROM usage_history").fetchone() or {"t": None})["t"])
+    span_start = max(first, frm) if (first is not None and frm is not None) else (first if first is not None else now)
+    span_days = max(1, int((now - span_start) // 86_400) + 1)
+    out = {p: {"windows": {}, "resets": {}} for p in PROVIDERS}
+    for provider in PROVIDERS:
+        for row in c.execute("SELECT DISTINCT win FROM usage_history WHERE provider=?", (provider,)):
+            win = row["win"]
+            series = []
+            if frm is not None:
+                cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(frm))
+                carry = c.execute(
+                    "SELECT ts, pct FROM usage_history WHERE provider=? AND win=? AND ts < ?"
+                    " ORDER BY id DESC LIMIT 1", (provider, win, cutoff)).fetchone()
+                if carry:
+                    series.append([int(frm), carry["pct"]])
+                pred, args = "AND ts >= ?", (provider, win, cutoff)
+            else:
+                pred, args = "", (provider, win)
+            if span_days <= 14:
+                q = f"SELECT ts, pct FROM usage_history WHERE provider=? AND win=? {pred} ORDER BY id"
+            elif span_days <= 92:
+                q = (f"SELECT MAX(id) _last, ts, pct FROM usage_history WHERE provider=? AND win=? {pred}"
+                     f" GROUP BY strftime('%Y-%m-%dT%H', ts) ORDER BY ts")
+            else:
+                q = (f"SELECT MAX(id) _last, ts, pct FROM usage_history WHERE provider=? AND win=? {pred}"
+                     f" GROUP BY date(ts) ORDER BY ts")
+            for r in c.execute(q, args):
+                epoch = to_epoch(r["ts"])
+                if epoch is not None:
+                    series.append([int(epoch), r["pct"]])
+            if series:
+                out[provider]["windows"][win] = series
+            resets = detect_resets(c, provider, win, frm)
+            if resets:
+                out[provider]["resets"][win] = resets
+    return {**out, "from": int(frm) if frm else None, "to": int(now)}
+
+
 def refresh() -> dict:
     """두 프로바이더를 한 번 수집. 실패한 쪽은 마지막 성공값을 유지하고 error만 붙인다."""
     changed = False
@@ -411,6 +503,11 @@ def refresh() -> dict:
             with _lock:
                 _snap[name] = data
             changed = True
+            try:
+                with db.tx() as c:
+                    record_history(c, name, data["windows"])
+            except Exception:
+                log.exception("usage 히스토리 append 실패")
         except UsageError as exc:
             log.info("usage %s 건너뜀: %s", name, exc)
             with _lock:

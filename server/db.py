@@ -132,6 +132,15 @@ CREATE TABLE IF NOT EXISTS llm_runs (
   started_at TEXT, error TEXT, ref TEXT, structured INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_llm_runs_started ON llm_runs(started_at);
+CREATE TABLE IF NOT EXISTS usage_history (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,               -- 허브 UTC ISO
+  provider TEXT NOT NULL,         -- 'claude' | 'codex'
+  win TEXT NOT NULL,              -- 창 제목 그대로: '5h', '7d all models', '7d <model>' …
+  pct INTEGER NOT NULL,
+  resets_at REAL                  -- epoch (없으면 NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_history ON usage_history(provider, win, ts);
 """
 
 # 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)

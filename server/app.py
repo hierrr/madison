@@ -547,6 +547,19 @@ async def get_metrics(request: Request, range: str = "day", date: str = ""):
         return report.metrics(c, r2, reporting.norm_day(r2, date or reporting.today_local()), registry.snapshot(c))
 
 
+@app.get("/api/usage/history")
+async def get_usage_history(request: Request, days: int = 30):
+    """구독 한도 % 변화 이력 — 변화 시점만 저장, 계단선으로 그린다. 조기 리셋도 표시."""
+    _require(request, ("admin",))
+    with db.tx() as c:
+        h = usage.history(c, days)
+    snap = usage.snapshot()   # 패널 제목용 플랜명 (현황 타일과 동일 표기)
+    for p in usage.PROVIDERS:
+        h[p]["plan"] = (snap.get(p) or {}).get("plan") or ""
+    return h
+
+
+
 # ── 서비스 레지스트리 (리포트 최상위 이름 공간) ─────────
 
 @app.get("/api/services")
