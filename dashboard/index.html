@@ -1376,8 +1376,20 @@
     }));
   }
 
+  // 로딩 동안 셀렉트 자체에 표시 — 상태 문구만으론 "기본이었다가 바뀌는" 것처럼 보인다
+  function setLoading(on) {
+    SET_SITES.forEach(function (site) {
+      ['provider', 'model', 'effort'].forEach(function (f) {
+        var el = setEl(site, f);
+        el.disabled = on;
+        if (on && f !== 'provider') el.innerHTML = '<option value="">불러오는 중…</option>';
+      });
+    });
+  }
+
   function loadSettings() {
     document.getElementById('setMsg').textContent = '모델 목록 불러오는 중…';
+    setLoading(true);
     Promise.all([getJSON('/api/settings'), loadModelLists(false)]).then(function (res) {
       var s = res[0];
       SET_DEFAULTS = s.defaults;
@@ -1391,8 +1403,13 @@
       document.getElementById('set-claude-bin').placeholder = s.effective.summary.claude_bin;
       document.getElementById('set-codex-bin').placeholder = s.effective.summary.codex_bin;
       document.getElementById('setMsg').textContent = '';
+      setLoading(false);
       SET_SITES.forEach(fillModelSel);
-    }).catch(function () { document.getElementById('setMsg').textContent = '설정 불러오기 실패'; });
+    }).catch(function () {
+      setLoading(false);
+      SET_SITES.forEach(fillModelSel);   // 빈 목록 기준으로라도 조작 가능하게
+      document.getElementById('setMsg').textContent = '설정 불러오기 실패';
+    });
   }
 
   document.addEventListener('change', function (e) {
