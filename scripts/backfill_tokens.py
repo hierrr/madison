@@ -85,12 +85,8 @@ def scan_claude(root: Path, until: str) -> dict:
                 continue
             project = proj_of(str(ev.get("cwd") or ""))
             acc = agg[(day, project, model[:60], str(ev.get("sessionId") or ""))]
-            acc["in"] += int(u.get("input_tokens") or 0)
-            acc["out"] += int(u.get("output_tokens") or 0)
-            acc["cr"] += int(u.get("cache_read_input_tokens") or 0)
-            acc["cw"] += int(u.get("cache_creation_input_tokens") or 0)
-            details = u.get("output_tokens_details")
-            acc["th"] += int(details.get("thinking_tokens") or 0) if isinstance(details, dict) else 0
+            for k, v in tokens.claude_counts(u).items():   # 분류 규칙의 정본은 tokens.py
+                acc[k] += v
     return agg
 
 
@@ -136,11 +132,7 @@ def scan_codex(root: Path, until: str) -> dict:
             total = info.get("total_token_usage") if isinstance(info, dict) else None
             if not isinstance(total, dict):
                 continue
-            raw_in = int(total.get("input_tokens") or 0)
-            cached = int(total.get("cached_input_tokens") or 0)
-            cur = {"in": max(0, raw_in - cached), "out": int(total.get("output_tokens") or 0),
-                   "cr": cached, "cw": int(total.get("cache_write_input_tokens") or 0),
-                   "th": int(total.get("reasoning_output_tokens") or 0)}
+            cur = tokens.codex_counts(total)   # 분류 규칙의 정본은 tokens.py
             delta = tokens._delta(prev, cur)
             prev = cur
             if not any(delta.values()):

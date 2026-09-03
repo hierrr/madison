@@ -9,7 +9,7 @@ import threading
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, tokens, tokscan, usage
+from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, tokens, usage
 from .config import CFG, REPO_ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,7 +31,6 @@ async def _lifespan(_app):
         threading.Thread(target=reporting.loop, daemon=True).start()
     if CFG.usage_enabled:
         threading.Thread(target=usage.loop, daemon=True).start()
-    tokscan.start()   # 허브 워커(훅 억제) 전사본 스캔 — 기기 식별 실패 시 스스로 비활성
     yield
 
 

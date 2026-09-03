@@ -9,8 +9,54 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 log = logging.getLogger("madison.tokens")
+
+DEVICE_ENV = Path.home() / ".claude" / "madison" / "env"
+_hub_dev = {"id": None, "at": 0.0}   # LLM 호출마다 env 파일·devices 조회를 반복하지 않게 캐시
+HUB_DEV_TTL = 300
+
+
+def hub_device_id(c) -> int | None:
+    """이 허브 기기의 devices.id — 수집기 env의 MADISON_DEVICE로 식별. 미등록이면 None."""
+    now = time.time()
+    if _hub_dev["id"] is not None and now - _hub_dev["at"] < HUB_DEV_TTL:
+        return _hub_dev["id"]
+    name = ""
+    try:
+        for line in DEVICE_ENV.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MADISON_DEVICE="):
+                name = line.split("=", 1)[1].strip()
+                break
+    except OSError:
+        pass
+    if not name:
+        return None
+    row = c.execute("SELECT id FROM devices WHERE name=? AND revoked=0", (name,)).fetchone()
+    if row:
+        _hub_dev.update(id=row["id"], at=now)
+    return row["id"] if row else None
+
+
+def claude_counts(u: dict) -> dict:
+    """Claude API/전사본/봉투의 snake_case usage → {in,out,cr,cw,th}.
+    분류 규칙의 정본 — llm.py(봉투)·backfill이 공유하고, collector/collect_tokens_local.py와
+    report.sh(jq)는 배포 형태상 사본을 가진다(수정 시 함께 맞출 것)."""
+    det = u.get("output_tokens_details")
+    return {"in": int(u.get("input_tokens") or 0), "out": int(u.get("output_tokens") or 0),
+            "cr": int(u.get("cache_read_input_tokens") or 0),
+            "cw": int(u.get("cache_creation_input_tokens") or 0),
+            "th": int(det.get("thinking_tokens") or 0) if isinstance(det, dict) else 0}
+
+
+def codex_counts(u: dict) -> dict:
+    """Codex usage → {in,out,cr,cw,th}. cached는 input의 부분집합 → 분리(Claude와 의미 통일)."""
+    raw_in = int(u.get("input_tokens") or 0)
+    cached = int(u.get("cached_input_tokens") or 0)
+    return {"in": max(0, raw_in - cached), "out": int(u.get("output_tokens") or 0),
+            "cr": cached, "cw": int(u.get("cache_write_input_tokens") or 0),
+            "th": int(u.get("reasoning_output_tokens") or 0)}
 
 KINDS = ("in", "out", "cr", "cw", "th")
 COLS = {"in": "input", "out": "output", "cr": "cache_read", "cw": "cache_write", "th": "thinking"}
@@ -106,7 +152,7 @@ def fold(c, device_id: int, agent: str, session_id: str, *, project: str, model:
 
 
 def add_daily(c, day, device_id, agent, project, model, frontend, source, counts: dict, turns=0):
-    """token_daily에 가산 UPSERT — fold(이벤트)와 tokscan(허브 워커 스캔)이 공유."""
+    """token_daily에 가산 UPSERT — fold(이벤트)·llm._account_tokens(허브 워커)·백필이 공유."""
     c.execute(
         "INSERT INTO token_daily (day, device_id, agent, project, model, frontend, source,"
         " input, output, cache_read, cache_write, thinking, turns)"
