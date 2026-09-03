@@ -409,7 +409,6 @@
   .panel h2.prov { text-transform: none; font-size: 12.5px; }
   .uchart svg { display: block; width: 100%; height: auto; }
   .uchart .grid { stroke: var(--line); stroke-width: 1; }
-  .uchart .gcrit { stroke: var(--crit); stroke-width: 1; opacity: .35; stroke-dasharray: 4 3; }
   .uchart .axis { fill: var(--ink-3); font-size: 9px; font-family: var(--mono); }
   .uchart path.w { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
   .uchart circle.reset { fill: var(--crit); stroke: var(--surface); stroke-width: 1; }
@@ -1862,7 +1861,6 @@
       out += '<line class="grid" x1="' + L + '" y1="' + y(p) + '" x2="' + (W - R) + '" y2="' + y(p) + '"/>' +
         '<text class="axis" x="' + (L - 4) + '" y="' + (Number(y(p)) + 3) + '" text-anchor="end">' + p + '</text>';
     });
-    out += '<line class="gcrit" x1="' + L + '" y1="' + y(90) + '" x2="' + (W - R) + '" y2="' + y(90) + '"/>';
     var mid = (from + to) / 2, short = (to - from) > 3 * 86400;
     out += '<text class="axis" x="' + L + '" y="' + (H - 3) + '">' + fmtEpoch(from, short) + '</text>' +
       '<text class="axis" x="' + ((L + W - R) / 2) + '" y="' + (H - 3) + '" text-anchor="middle">' + fmtEpoch(mid, short) + '</text>' +
