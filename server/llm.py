@@ -116,13 +116,14 @@ def _record(site, cf, prompt, res: Result, started_at, ref, schema: bool, usage_
         with db.tx() as c:
             cur = c.execute(
                 "INSERT INTO llm_runs (site, provider, model, effort, prompt_sha, prompt_chars, output_chars,"
-                " ok, returncode, duration_s, started_at, error, ref, structured)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " ok, returncode, duration_s, started_at, error, ref, structured, usage)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (site, cf["provider"], cf.get("model") or "", cf.get("effort") or "",
                  hashlib.sha256(prompt.encode()).hexdigest()[:16], len(prompt),
                  len(res.text) if res.text else (len(json.dumps(res.data)) if res.data else 0),
                  1 if res.ok else 0, res.returncode, round(res.duration, 1), started_at,
-                 (res.error or "")[:500], ref[:80], 1 if schema else 0))
+                 (res.error or "")[:500], ref[:80], 1 if schema else 0,
+                 json.dumps(usage_map, ensure_ascii=False) if usage_map else None))
             res.run_id = cur.lastrowid
             c.execute("DELETE FROM llm_runs WHERE started_at < datetime('now','-30 days')")
             # 워커 토큰 원장 기록 — llm_runs와 같은 트랜잭션 (호출당 커밋 1회)

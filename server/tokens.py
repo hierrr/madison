@@ -8,8 +8,10 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from .config import CFG
 
 log = logging.getLogger("madison.tokens")
 
@@ -192,9 +194,45 @@ def _service_projects(reg, service: str) -> list:
     return projs + [service]   # 미매핑 프로젝트는 자기 이름이 서비스
 
 
+def _project_service_rows(reg, raw_rows) -> tuple[list, list]:
+    """원 프로젝트명 집계 행({project, input, …, turns}) → (프로젝트별, 서비스별).
+    이름은 태스크·리포트와 같은 처리를 거친다 — 레지스트리 매핑 + 정리 버킷(_pretty)."""
+    per_project: dict = {}
+    per_service: dict = {}
+    for r in raw_rows:
+        pname = _pretty(r["project"])
+        svc = reg.service(r["project"]) if r["project"] else ""
+        if svc == (r["project"] or ""):
+            svc = pname   # 미매핑 프로젝트는 정리된 이름 그대로가 서비스
+        for bucket, key, name in ((per_project, "project", pname), (per_service, "service", svc)):
+            acc = bucket.setdefault(name, {key: name, **{COLS[k]: 0 for k in KINDS}, "turns": 0})
+            for k in KINDS:
+                acc[COLS[k]] += r[COLS[k]] or 0
+            acc["turns"] += r["turns"] or 0
+    return (sorted(per_project.values(), key=lambda r: -(r["input"] + r["output"])),
+            sorted(per_service.values(), key=lambda r: -(r["input"] + r["output"])))
+
+
 def summary(c, reg, *, days: int = 30, agent: str = "", device: str = "", service: str = "",
             model: str = "", human: bool = False) -> dict:
-    """token_daily 집계 — 일별 시계열 + 기기/프로젝트/서비스/모델/에이전트/세션별 내역."""
+    """토큰 사용량 집계 — 시계열 + 기기/프로젝트/서비스/모델/에이전트/세션별 내역.
+    짧은 범위(≤7일)는 일 원장(token_daily)을 달력 날짜로 자르면 '최근 24시간'이 사실상
+    '오늘'이 되므로, 시계열만이 아니라 내역·합계까지 window()의 롤링 창 재계산으로 준다 —
+    차트와 표가 항상 같은 창을 본다. 긴 범위만 일 원장을 쓴다."""
+    if 0 < days <= 7:
+        parts = window(c, reg, hours_back=24 * int(days), agent=agent, device=device,
+                       service=service, model=model, human=human)
+    else:
+        parts = _daily_summary(c, reg, days=days, agent=agent, device=device,
+                               service=service, model=model, human=human)
+    return {**parts,
+            "by_session": _by_session(c, reg, days=days, agent=agent, device=device,
+                                      service=service, human=human)}
+
+
+def _daily_summary(c, reg, *, days: int, agent: str, device: str, service: str,
+                   model: str, human: bool) -> dict:
+    """긴 범위 — token_daily(일 원장) 집계. 백필분도 여기에만 잡힌다."""
     where, args = ["1=1"], []
     if days and days > 0:
         where.append("t.day >= date('now','localtime', ?)")
@@ -202,7 +240,9 @@ def summary(c, reg, *, days: int = 30, agent: str = "", device: str = "", servic
     if agent:
         where.append("t.agent=?"); args.append(agent)
     if device:
-        where.append("t.device_id IN (SELECT id FROM devices WHERE name=?)"); args.append(device)
+        names = [d for d in device.split(",") if d]   # 쉼표 구분 다중선택
+        where.append(f"t.device_id IN (SELECT id FROM devices WHERE name IN ({','.join('?' * len(names))}))")
+        args.extend(names)
     if model:
         where.append("t.model=?"); args.append(model)
     if human:
@@ -220,20 +260,7 @@ def summary(c, reg, *, days: int = 30, agent: str = "", device: str = "", servic
 
     day_rows = [dict(r) for r in c.execute(
         f"SELECT t.day day, {_SUM} FROM token_daily t WHERE {pred} GROUP BY t.day ORDER BY t.day", args)]
-    # 프로젝트·서비스 이름은 태스크·리포트와 같은 처리를 거친다 — 레지스트리 매핑 + 정리 버킷
-    per_project: dict = {}
-    per_service: dict = {}
-    for r in rows("t.project", "project"):
-        pname = _pretty(r["project"])
-        svc = reg.service(r["project"]) if r["project"] else ""
-        if svc == (r["project"] or ""):
-            svc = pname   # 미매핑 프로젝트는 정리된 이름 그대로가 서비스
-        for bucket, key, name in ((per_project, "project", pname), (per_service, "service", svc)):
-            acc = bucket.setdefault(name, {key: name, **{COLS[k]: 0 for k in KINDS}, "turns": 0})
-            for k in KINDS:
-                acc[COLS[k]] += r[COLS[k]] or 0
-            acc["turns"] += r["turns"] or 0
-    per_project = sorted(per_project.values(), key=lambda r: -(r["input"] + r["output"]))
+    per_project, per_service = _project_service_rows(reg, rows("t.project", "project"))
     per_device = [dict(r) for r in c.execute(
         f"SELECT d.name device, {_SUM} FROM token_daily t JOIN devices d ON d.id=t.device_id"
         f" WHERE {pred} GROUP BY d.name ORDER BY SUM(input)+SUM(output) DESC", args)]
@@ -241,13 +268,147 @@ def summary(c, reg, *, days: int = 30, agent: str = "", device: str = "", servic
     total = {k: (total_row[k] or 0) for k in ("input", "output", "cache_read", "cache_write", "thinking", "turns")}
     return {
         "days": day_rows,
+        "hours": None,
         "by_device": per_device,
         "by_project": per_project,
-        "by_service": sorted(per_service.values(), key=lambda r: -(r["input"] + r["output"])),
+        "by_service": per_service,
         "by_model": rows("t.model", "model"),
         "by_agent": rows("t.agent", "agent"),
-        "by_session": _by_session(c, reg, days=days, agent=agent, device=device,
-                                  service=service, human=human),
+        "total": total,
+    }
+
+
+def _hub_device_name() -> str:
+    try:
+        for line in DEVICE_ENV.read_text(encoding="utf-8").splitlines():
+            if line.startswith("MADISON_DEVICE="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _local_hour(ts_utc: str) -> str | None:
+    try:
+        parsed = datetime.fromisoformat(str(ts_utc).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%dT%H")
+
+
+def window(c, reg, *, hours_back: int = 24, agent: str = "", device: str = "",
+           service: str = "", model: str = "", human: bool = False) -> dict:
+    """최근 N시간 롤링 창 — token_daily는 일 단위라 짧은 범위(24시간·7일)는 원본에서 재계산한다.
+    출처 둘: 세션 이벤트의 누적 델타(fold와 같은 규칙 — 창 밖 옛 이벤트로 기준점을 데운 뒤
+    창 안 델타만 채택), 워커 호출 기록(llm_runs.usage — 훅이 억제돼 이벤트가 없다, 항상 auto).
+    반환: summary와 같은 모양의 {days, hours, by_*, total} — hours는 시간 오름차순
+    [{ts:'YYYY-MM-DDTHH', input,…, turns}] 빈 시간대 0 채움, days는 그 버킷의 날짜별 합.
+    이벤트 없는 백필분은 일 원장 전용이라 여기엔 안 잡힌다."""
+    now = datetime.now().astimezone().replace(minute=0, second=0, microsecond=0)
+    order = [(now - timedelta(hours=h)).strftime("%Y-%m-%dT%H") for h in range(hours_back - 1, -1, -1)]
+    zero = {COLS[k]: 0 for k in KINDS}
+    buckets = {k: {"ts": k, **zero, "turns": 0} for k in order}
+    cutoff_utc = ((now - timedelta(hours=hours_back - 1)).astimezone(timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    dev_names = [d for d in device.split(",") if d] if device else []
+    projs = set(_service_projects(reg, service)) if service else None
+    groups: dict = {field: {} for field in ("device", "model", "agent")}
+    raw_proj: dict = {}
+    total = {**zero, "turns": 0}
+
+    def add(hour, dev, ag, proj, fe, m, d, turn):
+        """필터를 통과한 델타 한 건을 전 집계에 가산 — 창 밖 시간대(기준점 워밍업분)는 버린다.
+        턴은 fold와 같은 규칙: turn_done당 1회, 첫 모델 행에 귀속(모델 필터도 그 행 기준)."""
+        if hour not in buckets or (model and m != model):
+            return
+        if (human and fe == "auto") or (projs is not None and proj not in projs):
+            return
+        accs = [buckets[hour], total,
+                raw_proj.setdefault(proj, {"project": proj, **zero, "turns": 0})]
+        for field, name in (("device", dev), ("model", m), ("agent", ag)):
+            accs.append(groups[field].setdefault(name, {field: name, **zero, "turns": 0}))
+        for acc in accs:
+            for k in KINDS:
+                acc[COLS[k]] += d[k]
+            acc["turns"] += turn
+
+    # 1) 세션 — 창 안에 토큰 이벤트가 있는 세션의 전체 이력으로 델타 재계산 (기준점 보존)
+    devname = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM devices")}
+    cand = c.execute(
+        "SELECT DISTINCT device_id, agent, session_id FROM events"
+        " WHERE event IN ('turn_done','session_end') AND ts_device >= ?"
+        " AND payload LIKE '%\"tokens\"%'", (cutoff_utc,)).fetchall()
+    for s in cand:
+        if agent and s["agent"] != agent:
+            continue
+        if dev_names and devname.get(s["device_id"]) not in dev_names:
+            continue
+        dev = devname.get(s["device_id"]) or ""
+        old: dict = {}
+        for r in c.execute(
+                "SELECT event, ts_device, project, payload FROM events"
+                " WHERE device_id=? AND agent=? AND session_id=?"
+                " AND event IN ('turn_done','session_end') AND payload LIKE '%\"tokens\"%' ORDER BY id",
+                (s["device_id"], s["agent"], s["session_id"])):
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except ValueError:
+                continue
+            cum = _clean((payload.get("tokens") or {}).get("cum"))
+            if not cum:
+                continue
+            if s["agent"] == "codex-cli":
+                model_key, new_total = next(iter(cum.items()))
+                deltas = {str(payload.get("model") or model_key): _delta(old.get(_CODEX_KEY), new_total)}
+                old = {_CODEX_KEY: new_total}
+            else:
+                deltas = {m: _delta(old.get(m), v) for m, v in cum.items()}
+                old = cum
+            proj = r["project"] or ""
+            fe = auto_frontend(proj, str(payload.get("frontend") or ""))
+            hour = _local_hour(r["ts_device"])
+            count_turn = r["event"] == "turn_done"
+            for m, d in deltas.items():
+                if not any(d.values()) and not count_turn:
+                    continue
+                add(hour, dev, s["agent"], proj, fe, m, d, 1 if count_turn else 0)
+                count_turn = False   # 턴 수는 이벤트당 1회만 (모델 여러 개여도)
+
+    # 2) 허브 워커 — 이벤트가 없으므로(훅 억제) llm_runs.usage에서. 항상 auto·워커 cwd 프로젝트 취급
+    hub = _hub_device_name()
+    if not human and (not dev_names or hub in dev_names):
+        wproj = CFG.llm_cwd.name
+        for r in c.execute("SELECT provider, started_at, usage FROM llm_runs"
+                           " WHERE usage IS NOT NULL AND started_at >= ?", (cutoff_utc,)):
+            ag = "codex-cli" if r["provider"] == "codex" else "claude-code"
+            if agent and ag != agent:
+                continue
+            try:
+                um = _clean(json.loads(r["usage"]))
+            except ValueError:
+                continue
+            hour = _local_hour(r["started_at"])
+            for m, d in um.items():
+                if any(d.values()):
+                    add(hour, hub, ag, wproj, "auto", m, d, 0)
+
+    day_rows: dict = {}
+    for k in order:
+        acc = day_rows.setdefault(k[:10], {"day": k[:10], **zero, "turns": 0})
+        for col in (*zero, "turns"):
+            acc[col] += buckets[k][col]
+    per_project, per_service = _project_service_rows(reg, raw_proj.values())
+    key_io = lambda r: -(r["input"] + r["output"])
+    return {
+        "days": list(day_rows.values()),
+        "hours": [buckets[k] for k in order],
+        "by_device": sorted(groups["device"].values(), key=key_io),
+        "by_project": per_project,
+        "by_service": per_service,
+        "by_model": sorted(groups["model"].values(), key=key_io),
+        "by_agent": sorted(groups["agent"].values(), key=key_io),
         "total": total,
     }
 
@@ -262,7 +423,8 @@ def _by_session(c, reg, *, days: int, agent: str, device: str, service: str,
     if agent:
         where.append("s.agent=?"); args.append(agent)
     if device:
-        where.append("d.name=?"); args.append(device)
+        names = [d for d in device.split(",") if d]
+        where.append(f"d.name IN ({','.join('?' * len(names))})"); args.extend(names)
     if human:
         where.append("COALESCE(s.frontend,'') != 'auto'")
     if service:

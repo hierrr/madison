@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from server import db, registry, state, tokens
 
@@ -157,6 +157,7 @@ class SummaryTests(unittest.TestCase):
     def test_filters(self):
         self.assertEqual(tokens.summary(self.conn, self.reg, agent="codex-cli")["total"]["input"], 10)
         self.assertEqual(tokens.summary(self.conn, self.reg, device="acme-laptop")["total"]["input"], 40)
+        self.assertEqual(tokens.summary(self.conn, self.reg, device="acme-laptop,acme-mini")["total"]["input"], 150)
         self.assertEqual(tokens.summary(self.conn, self.reg, human=True)["total"]["input"], 140)
         self.assertEqual(tokens.summary(self.conn, self.reg, service="Acme")["total"]["input"], 150)
         self.assertEqual(tokens.summary(self.conn, self.reg, model="gpt-a")["total"]["input"], 10)
@@ -186,6 +187,105 @@ class SummaryTests(unittest.TestCase):
         top = s["by_session"][0]
         self.assertEqual((top["device"], top["service"], top["input"], top["output"]),
                          ("acme-mini", "Acme", 110, 55))
+
+
+class WindowTests(unittest.TestCase):
+    """짧은 범위 롤링 창 — 세션 이벤트 델타 + 워커(llm_runs.usage)의 재계산.
+    시간 버킷과 기기/프로젝트/모델/에이전트별 내역·합계가 같은 창에서 나와야 한다."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        self.conn.execute(
+            "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at)"
+            " VALUES (1,'acme-mini','x',datetime('now'),datetime('now'))")
+        self.reg = registry.Registry()
+        base = datetime.now().astimezone().replace(minute=30, second=0, microsecond=0)
+        self.h1 = base - timedelta(hours=2)
+        self.h2 = base - timedelta(hours=1)
+
+    def tearDown(self):
+        self.conn.close()
+
+    @staticmethod
+    def iso(dt):
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def ingest(self, eid, ts, cum_in, cum_out, frontend="cli"):
+        state.ingest(self.conn, 1, {
+            "agent": "claude-code", "session_id": "s1", "event_id": eid, "event": "turn_done",
+            "ts": self.iso(ts), "project": "acme-web", "branch": "main",
+            "detail": {"summary": "x", "frontend": frontend, "model": "model-a",
+                       "tokens": {"v": 1, "cum": {"model-a": cum(cum_in, cum_out)}}}})
+
+    def worker_run(self, ts):
+        self.conn.execute(
+            "INSERT INTO llm_runs (site, provider, model, started_at, usage)"
+            " VALUES ('summary','claude','haiku',?,?)",
+            (self.iso(ts), json.dumps({"haiku": cum(7, 3)})))
+
+    def test_hourly_buckets_sessions_and_workers(self):
+        self.ingest("e1", self.h1, 100, 50)
+        self.ingest("e2", self.h2, 250, 80)          # 델타 150/30 → h2 시간대
+        self.worker_run(self.h2)
+        rows = tokens.window(self.conn, self.reg, hours_back=24)["hours"]
+        self.assertEqual(len(rows), 24)
+        by = {r["ts"]: r for r in rows}
+        self.assertEqual(by[self.h1.strftime("%Y-%m-%dT%H")]["input"], 100)
+        self.assertEqual(by[self.h2.strftime("%Y-%m-%dT%H")]["input"], 157)   # 세션 150 + 워커 7
+        self.assertEqual(sum(r["output"] for r in rows), 83)
+
+    def test_hourly_human_filter_drops_workers(self):
+        self.ingest("e1", self.h2, 100, 50)
+        self.worker_run(self.h2)
+        rows = tokens.window(self.conn, self.reg, hours_back=24, human=True)["hours"]
+        self.assertEqual(sum(r["input"] for r in rows), 100)   # 워커 제외, 세션만
+
+    def test_window_breakdowns_share_the_rolling_window(self):
+        self.ingest("e1", self.h1, 100, 50)
+        self.ingest("e2", self.h2, 250, 80)
+        self.worker_run(self.h2)
+        w = tokens.window(self.conn, self.reg, hours_back=24)
+        self.assertEqual((w["total"]["input"], w["total"]["output"], w["total"]["turns"]),
+                         (257, 83, 2))
+        by_dev = {r["device"]: r for r in w["by_device"]}
+        self.assertEqual((by_dev["acme-mini"]["input"], by_dev["acme-mini"]["turns"]), (250, 2))
+        self.assertEqual(sum(r["input"] for n, r in by_dev.items() if n != "acme-mini"), 7)  # 워커→허브 기기
+        by_model = {r["model"]: r for r in w["by_model"]}
+        self.assertEqual((by_model["model-a"]["input"], by_model["haiku"]["input"]), (250, 7))
+        by_proj = {r["project"]: r for r in w["by_project"]}
+        self.assertEqual(by_proj["acme-web"]["input"], 250)
+        self.assertEqual(by_proj[tokens.CFG.llm_cwd.name]["input"], 7)
+        self.assertEqual(w["by_agent"], [{"agent": "claude-code", "input": 257, "output": 83,
+                                          "cache_read": 0, "cache_write": 0, "thinking": 0, "turns": 2}])
+
+    def test_window_counts_turn_even_when_delta_is_zero(self):
+        self.ingest("e1", self.h1, 100, 50)
+        self.ingest("e2", self.h2, 100, 50)          # 동일 누적 재전송 — 턴은 실제로 끝났다
+        w = tokens.window(self.conn, self.reg, hours_back=24)
+        self.assertEqual((w["total"]["input"], w["total"]["turns"]), (100, 2))
+
+    def test_summary_short_range_is_rolling_not_calendar(self):
+        """≤7일 필터의 내역·합계는 일 원장(달력 날짜)이 아니라 이벤트 롤링 창에서 나온다."""
+        self.conn.execute(
+            "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at)"
+            " VALUES (2,'acme-laptop','x',datetime('now'),datetime('now'))")
+        # 일 원장에만 있는 오늘 행(이벤트 없음 — 백필 등) — 짧은 범위 내역엔 안 나와야 한다
+        self.conn.execute(
+            "INSERT INTO token_daily (day, device_id, agent, project, model, frontend, source,"
+            " input, output, cache_read, cache_write, thinking, turns)"
+            " VALUES (date('now','localtime'),2,'claude-code','acme-api','model-a','cli',"
+            " 'backfill',9999,9999,0,0,0,9)")
+        self.ingest("e1", self.h1, 100, 50)
+        s = tokens.summary(self.conn, self.reg, days=1)
+        self.assertIsNotNone(s["hours"])
+        self.assertEqual([r["device"] for r in s["by_device"]], ["acme-mini"])
+        self.assertEqual(s["total"]["input"], 100)
+        # 긴 범위는 일 원장 그대로 — 원장 전용 행도 보인다
+        s30 = tokens.summary(self.conn, self.reg, days=30)
+        self.assertIsNone(s30["hours"])
+        self.assertIn("acme-laptop", [r["device"] for r in s30["by_device"]])
 
 
 if __name__ == "__main__":

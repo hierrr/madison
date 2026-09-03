@@ -130,7 +130,8 @@ CREATE TABLE IF NOT EXISTS llm_runs (
   site TEXT, provider TEXT, model TEXT, effort TEXT,
   prompt_sha TEXT, prompt_chars INTEGER, output_chars INTEGER,
   ok INTEGER, returncode INTEGER, duration_s REAL,
-  started_at TEXT, error TEXT, ref TEXT, structured INTEGER DEFAULT 0
+  started_at TEXT, error TEXT, ref TEXT, structured INTEGER DEFAULT 0,
+  usage TEXT                    -- 이 호출의 토큰 {model:{in,out,cr,cw,th}} — 시간대별 사용량 재계산용
 );
 CREATE INDEX IF NOT EXISTS idx_llm_runs_started ON llm_runs(started_at);
 CREATE TABLE IF NOT EXISTS usage_history (
@@ -186,6 +187,7 @@ MIGRATIONS = (
     # 스캔이 무의미했고, 토큰은 llm.py가 응답 봉투에서 직접 기록한다
     "DROP TABLE IF EXISTS token_scan_state",
     "DELETE FROM settings WHERE key='tokscan.baseline'",
+    "ALTER TABLE llm_runs ADD COLUMN usage TEXT",
 )
 
 
