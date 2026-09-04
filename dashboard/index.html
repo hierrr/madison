@@ -180,8 +180,8 @@
   .u-row.u-50 .val { color: #e6c229; }
   .u-row.u-70 .val { color: #f08a24; }
   .u-row.u-90 .val { color: var(--crit); }
-  .u-credits { display: inline-flex; gap: 3px; vertical-align: middle; margin-right: 6px; }
-  .u-credits i { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); display: inline-block; }
+  .u-credits { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; overflow: hidden; }
+  .u-credits i { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
   .u-row.text .val { color: var(--ink-2); }
   .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px 12px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 2px; min-height: 108px; }
   .tile .t-label { font-size: 12px; color: var(--ink-2); }
@@ -840,7 +840,8 @@
         if (x.title === 'Reset credits') {
           var n = Number(x.count || 0), sq = '';
           for (var i = 0; i < Math.min(n, 12); i++) sq += '<i></i>';
-          return '<div class="u-row text"><div class="head"><span class="lbl">초기화</span><span class="val">' + (n ? '<span class="u-credits">' + sq + '</span>' : '') + n + '</span></div></div>';
+          return '<div class="u-row text"><div class="head"><span class="lbl">초기화</span><span class="val">' + n + '</span></div>' +
+            (n ? '<span class="u-credits">' + sq + '</span>' : '') + '</div>';
         }
         return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
       }).join('');
