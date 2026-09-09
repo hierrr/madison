@@ -1915,16 +1915,25 @@
       out += '<rect x="' + (L + b * bw).toFixed(1) + '" y="0" width="' + bw.toFixed(1) + '" height="' + H +
         '" fill="transparent" data-d="' + esc(fmtEpoch(t, short) + ' · ' + parts.join(' · ')) + '"/>';
     }
-    // 조기 리셋 마커 — 예정 시각 전에 pct가 떨어진 지점 (호버 스트립 위에 그려 툴팁 우선)
-    var earlyN = 0;
+    // 조기 리셋 마커 — 예정 시각 전에 pct가 떨어진 지점 (호버 스트립 위에 그려 툴팁 우선).
+    // 여러 창이 같은 분에 리셋되면(프로바이더가 한 번에 내림) 점이 정확히 겹쳐 하나로 보이므로
+    // 한 점으로 묶어 창별 내역을 툴팁에 나열한다 — 레전드 횟수도 점 개수를 센다.
+    var earlyN = 0, byMin = {}, minOrder = [];
     names.forEach(function (w) {
       ((resets || {})[w] || []).forEach(function (r) {
         if (!r.early || r.ts == null || r.ts < from) return;
-        earlyN++;
-        out += '<circle class="reset" cx="' + x(r.ts) + '" cy="6" r="3.5" data-d="' +
-          esc(fmtEpoch(r.ts, short) + ' · ' + w.replace(' all models', ' 전체') + ' ' + r.from + '%→' + r.to +
-              '% · 조기 리셋 (프로바이더 발)') + '"/>';
+        var k = Math.round(r.ts / 60);
+        if (!byMin[k]) { byMin[k] = []; minOrder.push(k); }
+        byMin[k].push({ w: w, r: r });
       });
+    });
+    minOrder.forEach(function (k) {
+      var g = byMin[k], ts = g[0].r.ts;
+      earlyN++;
+      out += '<circle class="reset" cx="' + x(ts) + '" cy="6" r="3.5" data-d="' +
+        esc(fmtEpoch(ts, short) + ' · ' + g.map(function (e) {
+          return e.w.replace(' all models', ' 전체') + ' ' + e.r.from + '%→' + e.r.to + '%';
+        }).join(' · ') + ' · 조기 리셋 (프로바이더 발)') + '"/>';
     });
     out += '</svg><div class="ulegend">' + names.map(function (w, i) {
       var s = windows[w], last = s.length ? s[s.length - 1][1] : null;
@@ -1934,10 +1943,12 @@
     return out;
   }
 
-  // 토큰 스택 바 — 기간에 맞춰 단위 전환: 24시간이면 시간대별(tok.hours), 아니면 일별(tok.days)
+  // 토큰 스택 바 — 기간에 맞춰 단위 전환: 24시간이면 시간대별(tok.hours), 아니면 일별(tok.days).
+  // 반환: {html, unit}. 컬럼이 패널 폭을 넘으면 연속 버킷을 병합해 전 범위를 스크롤 없이 그린다 —
+  // 가로 스크롤이 생기면 스케일 기준인 최대 막대가 화면 밖으로 나가 보이는 구간 전체가 납작해 보인다.
   function tokenStacks(tok, segs) {
-    var list = [];
-    if (tok.hours) {
+    var list = [], hourly = !!tok.hours;
+    if (hourly) {
       // 서버가 24개 시간 버킷을 0 채움으로 준다 — ts: 'YYYY-MM-DDTHH'
       tok.hours.forEach(function (r) {
         var mdh = parseInt(r.ts.slice(5, 7), 10) + '/' + parseInt(r.ts.slice(8, 10), 10) +
@@ -1951,11 +1962,27 @@
       var start;
       if (UF.days !== '0') { start = new Date(today); start.setDate(start.getDate() - (parseInt(UF.days, 10) - 1)); }
       else if (tok.days && tok.days.length) { start = new Date(tok.days[0].day + 'T00:00:00'); }
-      else return '<div class="none">기록 없음</div>';
+      else return { html: '<div class="none">기록 없음</div>', unit: '일별' };
       for (var d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
         var key = ymd(d);
         list.push({ key: key.slice(5).replace('-', '/'), r: byDay[key] || {} });
       }
+    }
+    var fitW = document.getElementById('usageMain').clientWidth;
+    var fit = fitW > 120 ? Math.floor((fitW - 60) / 6) : 110;   // 컬럼 최소 4px + 간격 2px
+    var group = Math.max(1, Math.ceil(list.length / fit));
+    if (group > 1) {
+      var merged = [];
+      for (var gi = 0; gi < list.length; gi += group) {
+        var chunk = list.slice(gi, gi + group), acc = {};
+        chunk.forEach(function (cit) {
+          Object.keys(cit.r).forEach(function (k) {
+            if (typeof cit.r[k] === 'number') acc[k] = (acc[k] || 0) + cit.r[k];
+          });
+        });
+        merged.push({ key: chunk[0].key, key2: chunk.length > 1 ? chunk[chunk.length - 1].key : null, r: acc });
+      }
+      list = merged;
     }
     var max = 1;
     list.forEach(function (it) {
@@ -1963,7 +1990,7 @@
       max = Math.max(max, it.vals.reduce(function (a, b) { return a + b; }, 0));
     });
     var cols = list.map(function (it) {
-      var tipTxt = it.key + ' · ' + segs.map(function (sg, i) {
+      var tipTxt = it.key + (it.key2 ? '~' + it.key2 : '') + ' · ' + segs.map(function (sg, i) {
         return sg.label + ' ' + fmtTok(it.vals[i]);
       }).join(' · ') + (it.r.turns ? ' · ' + it.r.turns + '턴' : '');
       var bars = segs.map(function (sg, i) {
@@ -1975,9 +2002,13 @@
     var legend = '<div class="ulegend">' + segs.map(function (sg) {
       return '<span><i style="background:' + sg.color + '"></i>' + sg.label + '</span>';
     }).join('') + '</div>';
-    return '<div class="uscroll"><div class="tstack">' + cols + '</div></div>' +
-      '<div class="tstack-x"><span>' + list[0].key + '</span><span>' +
-      list[list.length - 1].key + '</span></div>' + legend;
+    var lastCol = list[list.length - 1];
+    return {
+      html: '<div class="uscroll"><div class="tstack">' + cols + '</div></div>' +
+        '<div class="tstack-x"><span>' + list[0].key + '</span><span>' +
+        (lastCol.key2 || lastCol.key) + '</span></div>' + legend,
+      unit: hourly ? (group > 1 ? group + '시간 단위' : '시간별') : (group > 1 ? group + '일 단위' : '일별')
+    };
   }
 
   function tokBars(items, key, titleFn, topN) {   // mbars 변형 — 값은 input+output, 캐시는 툴팁에
@@ -2030,19 +2061,21 @@
     }
     var t = tok.total || {};
     var outNoTh = function (r) { return (r.output || 0) - (r.thinking || 0); };
+    var io = tokenStacks(tok, [
+      { label: 'input', color: 'var(--lg-gold)', val: function (r) { return r.input; } },
+      { label: 'output', color: 'var(--lg-green)', val: outNoTh },
+      { label: 'thinking', color: 'var(--lg-blue)', val: function (r) { return r.thinking; } }
+    ]);
+    // cache read는 입출력의 수백 배 규모 — 같은 축에 섞으면 입출력이 안 보여서 패널 분리
+    var cache = tokenStacks(tok, [
+      { label: 'cache read', color: 'var(--lg-gold)', val: function (r) { return r.cache_read; } },
+      { label: 'cache write', color: 'var(--lg-green)', val: function (r) { return r.cache_write; } }
+    ]);
     document.getElementById('usageMain').innerHTML =
       provPanel('claude', hist.claude || {}) +
       provPanel('codex', hist.codex || {}) +
-      panel('입출력 토큰' + (tok.hours ? ' · 시간별' : ' · 일별'), 'var(--lg-teal)', tokenStacks(tok, [
-        { label: 'input', color: 'var(--lg-gold)', val: function (r) { return r.input; } },
-        { label: 'output', color: 'var(--lg-green)', val: outNoTh },
-        { label: 'thinking', color: 'var(--lg-blue)', val: function (r) { return r.thinking; } }
-      ])) +
-      // cache read는 입출력의 수백 배 규모 — 같은 축에 섞으면 입출력이 안 보여서 패널 분리
-      panel('캐시 토큰' + (tok.hours ? ' · 시간별' : ' · 일별'), 'var(--lg-blue)', tokenStacks(tok, [
-        { label: 'cache read', color: 'var(--lg-gold)', val: function (r) { return r.cache_read; } },
-        { label: 'cache write', color: 'var(--lg-green)', val: function (r) { return r.cache_write; } }
-      ]));
+      panel('입출력 토큰 · ' + io.unit, 'var(--lg-teal)', io.html) +
+      panel('캐시 토큰 · ' + cache.unit, 'var(--lg-blue)', cache.html);
     document.getElementById('usageRail').innerHTML =
       panel('합계', 'var(--lg-green)',
         '<div class="mstat-grid">' + stat('input', fmtTok(t.input)) + stat('output', fmtTok(t.output)) +
