@@ -130,6 +130,7 @@ flowchart LR
 |---|---|
 | Claude Code — 터미널 CLI, 데스크톱 앱, IDE | **완전** — 프런트엔드 무관하게 동일한 전역 훅이 발화 |
 | Codex — CLI/TUI, 데스크톱 | **완전** — 전역 lifecycle hooks로 세션·턴·도구·승인 이벤트 수집. 단, 호스팅 WebSearch처럼 로컬 훅 경로를 거치지 않는 일부 도구는 도구 단위 하트비트 제외 |
+| hermes — 텔레그램·디스코드 등 메신저, 로컬 CLI/TUI, cron | **완전** — hermes의 플러그인 버스에 리포터(`collector/hermes/`)를 얹어 모든 표면(게이트웨이·CLI 프로세스 공통)에서 세션·턴·승인·위임 이벤트를 수집. 프롬프트·응답·토큰은 hermes 자체 DB에서 보강 |
 | 클라우드 채팅·웹 태스크 (claude.ai, ChatGPT, Codex web) | 범위 밖 — 훅을 걸 로컬 발자국이 없음 |
 
 ## 빠른 시작
@@ -190,6 +191,23 @@ curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
 Codex에서는 설치 뒤 `/hooks`를 열어 새 command hooks를 검토·신뢰해야 합니다. 이미 열려 있던
 Claude Code/Codex 세션은 다시 시작해야 새 훅이 적용됩니다. 기기를 전부 등록하고 나면
 `ENROLL_SECRET`은 로테이트하세요.
+
+### hermes 수집기 (선택)
+
+hermes를 쓰는 기기라면 리포터 플러그인을 얹어 같은 대시보드에서 hermes 세션까지 추적할 수
+있습니다. hermes 소스는 수정하지 않는 순수 드롭인입니다.
+
+```bash
+cp -r collector/hermes ~/.hermes/plugins/madison
+cp collector/hermes/env.example ~/.hermes/plugins/madison/env
+# env에 허브 URL과 그 기기의 디바이스 토큰(~/.claude/madison/env와 동일 값) 기입
+```
+
+`~/.hermes/config.yaml`에 플러그인을 활성화하고(`plugins:` → `enabled: [madison]`) 게이트웨이를
+재시작하면 끝입니다. 이후 메신저(텔레그램·디스코드 등)·로컬 CLI·cron 세션이 기기의
+`agent: hermes` 세션으로 잡히고, 승인 버튼 대기는 빨간 승인 큐에, 위임은 서브에이전트
+카운터에 반영됩니다. hermes의 자동 세션 리셋은 훅 없이 일어나므로 리포터가 60초 주기
+스윕으로 종료를 감지하고, 유휴 24시간이 지난 세션은 합성 종료로 정리합니다.
 
 ### Windows (베타)
 

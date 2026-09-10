@@ -150,6 +150,7 @@ are never demoted by the timer — only genuinely silent *working* sessions are.
 |---|---|
 | Claude Code — terminal CLI, desktop app, IDE | **Full** — the same global hooks fire regardless of front-end |
 | Codex — CLI/TUI, desktop | **Full** — global lifecycle hooks collect session, turn, tool, and approval events. A few hosted tools such as WebSearch do not pass through local tool hooks and therefore do not emit per-tool heartbeats |
+| hermes — Telegram/Discord and other messengers, local CLI/TUI, cron | **Full** — a reporter plugin (`collector/hermes/`) rides hermes' plugin bus, which loads in every hermes process (gateway and CLI alike), collecting session, turn, approval, and delegation events. Prompts, responses, and tokens are enriched from hermes' own state DB |
 | Cloud chats / web tasks (claude.ai, ChatGPT, Codex web) | Out of scope — no local footprint to hook |
 
 ## Quick start
@@ -212,6 +213,24 @@ present, the installer restores the user's original `notify` and removes the old
 collector path. Open `/hooks` in Codex after installation to review and trust the
 new command hooks. Restart any already-open Claude Code and Codex sessions. Rotate
 `ENROLL_SECRET` once the whole fleet is enrolled.
+
+### hermes collector (optional)
+
+On a machine that runs hermes, drop in the reporter plugin to track hermes sessions on
+the same dashboard. It is a pure drop-in — no hermes source is modified.
+
+```bash
+cp -r collector/hermes ~/.hermes/plugins/madison
+cp collector/hermes/env.example ~/.hermes/plugins/madison/env
+# fill in the hub URL and this device's token (same values as ~/.claude/madison/env)
+```
+
+Enable the plugin in `~/.hermes/config.yaml` (`plugins:` → `enabled: [madison]`) and restart
+the gateway. Messenger (Telegram/Discord/…), local CLI, and cron sessions then appear as the
+device's `agent: hermes` sessions; pending approval buttons light up the red approval queue,
+and delegations feed the subagent counter. hermes' automatic session resets fire no hook, so
+the reporter detects endings with a 60-second sweep and synthesizes an end for sessions idle
+longer than 24 hours.
 
 ### Windows (beta)
 
