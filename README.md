@@ -80,6 +80,12 @@ push a piece of work from one machine to another without walking over to it.
 - **Subscription usage** — the overview shows Claude Code and Codex rate-limit
   windows (5-hour, weekly, reset credits) with bars and warning colors; the hub
   reads them itself from the providers' own endpoints (see Security model).
+  The gauges are **for the account signed in on the hub machine** — limits are
+  per-account, so consumption from every device on that account is already
+  included, while devices signed into a different account never appear in any
+  gauge (token accounting still captures every device regardless of account).
+  A provider with no account on the hub gets its gauge and limit chart hidden
+  rather than left empty.
 - **Usage tab — token accounting & limit history** — collectors attach cumulative
   per-session token counts (input / output / cache read / cache write / thinking,
   per model, parsed from the agents' local transcripts) to turn events; the hub
@@ -183,6 +189,11 @@ For a persistent service, register a LaunchAgent that runs `scripts/launchd/madi
 (which execs `scripts/_launchd_wrapper.sh` → the venv). The stub's filename becomes the
 login-item display name.
 
+For the subscription-limit gauges, the **hub machine must be signed into Claude Code**
+(on macOS the first read may pop a one-time Keychain access dialog — allow it from a GUI
+session). The Codex gauge appears when the codex CLI is signed in on the hub. Without
+either, everything else works normally and the gauges simply stay hidden.
+
 ### 2. Onboard a device
 
 Zero-touch: the hub serves its own installer. On each machine, run — or just ask
@@ -206,7 +217,8 @@ new command hooks. Restart any already-open Claude Code and Codex sessions. Rota
 
 Windows collectors ship as PowerShell scripts (`collector/install.ps1`,
 `report.ps1`) using the Task Scheduler instead of launchd — **unverified on real
-hardware and behind the macOS collector in feature coverage.** The intended flow is
+hardware and behind the macOS collector in feature coverage** (e.g. the background
+subagent/shell counters are not implemented). The intended flow is
 the same zero-touch onboarding: hand the machine's own agent the install command
 and let it wire up the hooks. If you run Claude Code inside **WSL**, use the regular
 Linux `install.sh` instead — that path is fully supported, not beta.

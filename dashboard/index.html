@@ -166,6 +166,9 @@
   .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
   .kpis.no-usage { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .kpis.no-usage .tile.usage { display: none; }
+  /* 허브 계정이 없는 프로바이더는 게이지를 비워 두지 않고 타일째 숨긴다 */
+  .kpis.one-usage { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .tile.usage.off { display: none; }
   .tile .t-label .t-icon { width: 16px; height: 16px; border-radius: 4px; vertical-align: -3px; margin-right: 6px; }
   .u-rows { display: flex; flex-direction: column; gap: 7px; margin-top: 6px; }
   .u-row { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
@@ -862,13 +865,20 @@
       '<span class="val">' + pct + '%' + (right ? ' · ' + esc(right) : '') + '</span></div>' +
       '<span class="track"><span class="fill" style="width:' + Math.max(0, Math.min(pct, 100)) + '%"></span></span></div>';
   }
+  var LAST_USAGE = null;  // 사용량 탭이 "이 프로바이더가 살아 있나"를 판단할 때 참조
   function renderUsage(u) {
-    document.getElementById('kpis').classList.toggle('no-usage', !u);   // USAGE=0 → 타일 숨김, 4열
+    LAST_USAGE = u;
+    // USAGE=0이거나 허브에 계정이 하나도 없으면 통째로 숨김(4열), 한쪽만 없으면 그 타일만 숨김(5열)
+    var nProv = u ? ['claude', 'codex'].filter(function (p) { return u[p]; }).length : 0;
+    var kpis = document.getElementById('kpis');
+    kpis.classList.toggle('no-usage', nProv === 0);
+    kpis.classList.toggle('one-usage', nProv === 1);
     if (!u) return;
     ['claude', 'codex'].forEach(function (p) {
       var cap = p === 'claude' ? 'Claude' : 'Codex';
       var d = u[p], plan = document.getElementById('u' + cap + 'Plan'), rows = document.getElementById('u' + cap + 'Rows');
-      if (!d) { plan.textContent = ''; rows.innerHTML = '<div class="none">데이터 없음</div>'; return; }
+      document.getElementById('tile' + cap).classList.toggle('off', !d);
+      if (!d) { plan.textContent = ''; rows.innerHTML = ''; return; }
       plan.textContent = d.plan ? '· ' + d.plan : '';
       var html = (d.windows || []).map(function (w) { return usageRow(w.title.replace(' all models', ' 전체'), w.pct, w.left); }).join('');
       html += (d.extras || []).map(function (x) {
@@ -2083,6 +2093,12 @@
       return '<section class="panel" style="--bar:' + color + '">' +
         '<h2><span class="hmk" style="background:' + color + '"></span>' + title + '</h2>' + body + '</section>';
     }
+    // 허브에 그 프로바이더 계정이 없으면(이력도 라이브 게이지도 없음) 빈 차트 대신 패널을 숨긴다
+    function provAlive(p, hist) {
+      var d = hist[p];
+      if (d && Object.keys(d.windows || {}).length) return true;
+      return !!(LAST_USAGE && LAST_USAGE[p]);
+    }
     // 한도 패널 제목은 현황 타일과 동일하게 — 로고 + 이름 · 플랜
     function provPanel(p, d) {
       var cap = p === 'claude' ? 'Claude' : 'Codex';
@@ -2106,8 +2122,8 @@
       { label: 'cache write', color: 'var(--lg-green)', val: function (r) { return r.cache_write; } }
     ]);
     document.getElementById('usageMain').innerHTML =
-      provPanel('claude', hist.claude || {}) +
-      provPanel('codex', hist.codex || {}) +
+      (provAlive('claude', hist) ? provPanel('claude', hist.claude || {}) : '') +
+      (provAlive('codex', hist) ? provPanel('codex', hist.codex || {}) : '') +
       panel('입출력 토큰 · ' + io.unit, 'var(--lg-teal)', io.html) +
       panel('캐시 토큰 · ' + cache.unit, 'var(--lg-blue)', cache.html);
     document.getElementById('usageRail').innerHTML =
