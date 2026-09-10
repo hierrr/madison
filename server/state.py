@@ -58,7 +58,40 @@ def ingest(c, device_id: int, ev: dict) -> str:
     if cur.rowcount == 0:
         return "duplicate"  # event_id UNIQUE — 재전송 중복 흡수 (§5)
 
+    def _nn_int(v):
+        return v if isinstance(v, int) and v >= 0 else None
+
+    bg = payload.get("bg") if isinstance(payload, dict) else None
+    bg_kind = str(payload.get("bg_kind") or "") if isinstance(payload, dict) else ""
+    bg_set = _nn_int(payload.get("bg_set")) if isinstance(payload, dict) else None
+    bg_agents = _nn_int(payload.get("bg_agents")) if isinstance(payload, dict) else None
+    bg_shells = _nn_int(payload.get("bg_shells")) if isinstance(payload, dict) else None
+
+    def _bg_sql():
+        """bg 갱신용 (sets, args) 조각. bg_set류 절대값(스냅샷) 우선, 없으면 종류별 가감."""
+        if bg_set is not None:
+            s = ["bg_count=?", "bg_agents=?", "bg_shells=?", "bg_ts=?"]
+            return s, [bg_set, bg_agents if bg_agents is not None else 0,
+                       bg_shells if bg_shells is not None else 0, ts_hub]
+        d = 1 if bg == "start" else -1
+        s = [f"bg_count=MAX(0, COALESCE(bg_count,0) + {d})", "bg_ts=?"]
+        if bg_kind == "agent":
+            s.insert(1, f"bg_agents=MAX(0, COALESCE(bg_agents,0) + {d})")
+        elif bg_kind == "shell":
+            s.insert(1, f"bg_shells=MAX(0, COALESCE(bg_shells,0) + {d})")
+        return s, [ts_hub]
+
     if event not in KNOWN_EVENTS:
+        # subagent_stop 등 상태 전이 없는 부가 이벤트 — bg 카운터만 반영 (§4.1)
+        if bg_set is not None or bg in ("start", "stop"):
+            bsets, bargs = _bg_sql()
+            c.execute(
+                f"UPDATE sessions SET {', '.join(bsets)}, last_seen_hub=?"
+                " WHERE device_id=? AND agent=? AND session_id=?",
+                bargs + [ts_hub, device_id, agent, session_id],
+            )
+            c.execute("UPDATE devices SET last_seen_at=? WHERE id=?", (ts_hub, device_id))
+            return "inserted"
         return "ignored"
 
     row = c.execute(
@@ -128,8 +161,14 @@ def ingest(c, device_id: int, ev: dict) -> str:
         # 부활 규칙 (§4.1): ended 필드 클리어
         sets += ["ended_at=NULL", "end_reason=NULL"]
     elif event == "session_end" and fresh:
-        sets += ["ended_at=?", "end_reason=?"]
+        sets += ["ended_at=?", "end_reason=?", "bg_count=0", "bg_agents=0", "bg_shells=0"]
         args += [ts_hub, str(payload.get("reason", ""))[:60]]
+
+    # 백그라운드 카운터 (서브에이전트·bg 셸) — 상태 전이와 독립.
+    # 단 session_end는 무조건 0 리셋이 우선 (종료 시점 스냅샷은 곧 죽을 작업 목록).
+    if event != "session_end" and (bg_set is not None or bg in ("start", "stop")):
+        bsets, bargs = _bg_sql()
+        sets += bsets; args += bargs
 
     args += [device_id, agent, session_id]
     c.execute(
@@ -213,6 +252,14 @@ def assemble(c) -> dict:
             unconfirmed = True
         elif s["state"] in ("awaiting_input", "needs_approval") and not dev["online"]:
             unconfirmed = True
+        # bg 표시 감쇠: 종료 훅 유실로 카운터가 남아도 2시간 지나면 배지를 내린다
+        bg_n = s["bg_count"] or 0
+        bg_ag = s["bg_agents"] or 0
+        bg_sh = s["bg_shells"] or 0
+        if bg_n > 0 or bg_ag > 0 or bg_sh > 0:
+            bg_age = _age_min(now, s["bg_ts"])
+            if bg_age is None or bg_age > 120:
+                bg_n = bg_ag = bg_sh = 0
         sessions.append({
             "id": s["row_id"],
             "device": dev["name"], "agent": s["agent"], "session_id": s["session_id"],
@@ -226,6 +273,7 @@ def assemble(c) -> dict:
             "collection_mode": s["collection_mode"],
             "approval_msg": s["approval_msg"], "current_tool": s["current_tool"],
             "turns": s["turns"], "end_reason": s["end_reason"],
+            "bg_count": bg_n, "bg_agents": bg_ag, "bg_shells": bg_sh,
             "partial": s["agent"] != "claude-code" and s["collection_mode"] != "hooks",
         })
 

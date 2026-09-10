@@ -123,9 +123,21 @@ fi
 
 SID=$(printf '%s' "$IN" | jq -r '.session_id // "unknown"' 2>/dev/null) || SID="unknown"
 
+# ── 백그라운드 작업 감지: Task/Agent(서브에이전트)·run_in_background Bash 시작 ──
+# 서버가 세션별 종류별 카운터를 유지해 "입력 대기 · 서브에이전트 N개 · 백그라운드 N개"를 표시 (§4.1)
+BG=""; BG_KIND=""
+if [ "$EV" = "tool_start" ]; then
+  BG_KIND=$(printf '%s' "$IN" | jq -r '
+    if ((.tool_name // "") | IN("Task", "Agent")) then "agent"
+    elif ((.tool_name // "") == "Bash" and ((.tool_input.run_in_background // false) == true)) then "shell"
+    else "" end' 2>/dev/null) || BG_KIND=""
+  [ -n "$BG_KIND" ] && BG="start"
+fi
+
 # ── 스로틀: heartbeat/tool_start는 세션당 60초 1회 ─────
 # Codex 훅은 동기 실행(async 미지원)이라, 걸러질 이벤트는 아래 파싱 비용 전에 최대한 빨리 나간다.
-if [ "$EV" = "heartbeat" ] || [ "$EV" = "tool_start" ]; then
+# 단 bg 시작은 카운터 정확성을 위해 스로틀을 우회한다.
+if { [ "$EV" = "heartbeat" ] || [ "$EV" = "tool_start" ]; } && [ -z "$BG" ]; then
   STAMP="$THROTTLE_DIR/$SID"
   NOW_EPOCH=$(date +%s)
   if [ -f "$STAMP" ]; then
@@ -281,12 +293,19 @@ case "$EV" in
     ;;
   heartbeat|tool_start)
     if [ "$EV" = "tool_start" ]; then
-      DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
-        '{tool: (.tool_name // .tool // ""), frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}' 2>/dev/null) || DETAIL="{}"
+      DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" --arg bg "$BG" --arg bk "$BG_KIND" \
+        '{tool: (.tool_name // .tool // ""), frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}
+         + (if $bg != "" then {bg: $bg, bg_kind: $bk} else {} end)' 2>/dev/null) || DETAIL="{}"
     else
       DETAIL=$(jq -cn --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
         '{frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}')
     fi
+    ;;
+  subagent_stop)
+    # SubagentStop — 상태 전이 없음. 페이로드의 background_tasks 스냅샷으로 bg를 절대값
+    # 동기화한다 (이 훅은 에이전트당 1회가 아니라 반복 발화할 수 있어 가감산은 어긋남, 실측).
+    DETAIL=$(jq -cn --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" \
+      '{frontend: $f, model: $m, effort: $e, collection_mode: "hooks"}')
     ;;
   permission_request|idle)
     DETAIL=$(printf '%s' "$IN" | jq -c --arg f "$FRONTEND" --arg m "$MODEL" --arg e "$EFFORT" '
@@ -329,6 +348,22 @@ case "$EV" in
     ;;
 esac
 [ -z "$DETAIL" ] && DETAIL="{}"
+
+# background_tasks 스냅샷이 실린 훅(SubagentStop·Stop 등)이면 실행 중 개수를 종류별 절대값으로
+# 싣는다 — 서버가 bg_set류를 우선 반영하므로 가감산 드리프트가 자가 교정된다
+BGSET=$(printf '%s' "$IN" | jq -c '
+  if (.background_tasks | type) == "array" then
+    # SubagentStop 페이로드에는 멈추는 에이전트 자신이 아직 running으로 남아 있어 제외 (실측)
+    ((.agent_id // "__none__")) as $self |
+    ([.background_tasks[] | select(.status == "running" and .id != $self)]) as $r |
+    {bg_set: ($r | length),
+     bg_agents: ([$r[] | select(.type == "subagent")] | length),
+     bg_shells: ([$r[] | select(.type != "subagent")] | length)}
+  else empty end' 2>/dev/null) || BGSET=""
+if [ -n "$BGSET" ]; then
+  MERGED=$(printf '%s' "$DETAIL" | jq -c --argjson s "$BGSET" '. + $s' 2>/dev/null) \
+    && [ -n "$MERGED" ] && DETAIL="$MERGED"
+fi
 
 # 턴 경계 이벤트에는 세션 누적 토큰을 싣는다 (구형 허브는 미지 키를 무시하므로 호환)
 case "$EV" in

@@ -242,13 +242,18 @@
   /* ── session card ── */
   .card { position: relative; display: grid; grid-template-columns: 4px minmax(0, 1fr); background: var(--ground); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; transition: box-shadow 0.15s ease; }
   .card:hover { box-shadow: var(--shadow-up); }
-  .card .stripe { background: var(--line-2); }
-  .card[data-state="working"] .stripe { background: var(--accent); }
-  .card[data-state="awaiting_input"] .stripe { background: var(--warn); }
-  .card[data-state="needs_approval"] .stripe { background: var(--crit); }
+  /* 좌측 보더 수직 3등분: 위=메인 상태, 중간=서브에이전트, 아래=백그라운드 셸 —
+     세 층의 상태를 색·위치로 병렬 표시하고 판단은 사용자에게 맡긴다 (2026-09-10) */
+  .card .stripe { background: var(--line-2); display: flex; flex-direction: column; }
+  .card .stripe .seg { flex: 1; }
+  .card[data-state="working"] .stripe .seg.main { background: var(--accent); }
+  .card[data-state="awaiting_input"] .stripe .seg.main { background: var(--warn); }
+  .card[data-state="needs_approval"] .stripe .seg.main { background: var(--crit); }
+  .card .stripe .seg.sub.on { background: var(--accent); }
+  .card .stripe .seg.bgt.on { background: var(--good); }
   .card[data-state="needs_approval"] { border-color: var(--crit); background: var(--crit-bg); }
   .card.unconf { border-style: dashed; }
-  .card.unconf .stripe { background: var(--stale); }
+  .card.unconf .stripe .seg { background: var(--stale); }
   .card .cbody { padding: 10px 12px 9px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .row1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .agent { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--ink-2); flex: none; }
@@ -266,8 +271,16 @@
   .chip.needs_approval .dot { background: var(--crit); }
   .chip.ended, .chip.unconf { background: var(--stale-bg); }
   .chip.ended .dot, .chip.unconf .dot { background: var(--stale); }
+  /* 서브에이전트·백그라운드 분리 칩 — 메인 상태 칩 오른쪽에 병렬 표시 */
+  .chip.subs, .chip.bgs { margin-left: 6px; }
+  .chip.subs { background: var(--accent-bg); }
+  .chip.subs .dot { background: var(--accent); }
+  .chip.bgs { background: var(--good-bg); }
+  .chip.bgs .dot { background: var(--good); }
   @media (prefers-reduced-motion: no-preference) {
-    .chip.working .dot, .card[data-state="working"]:not(.unconf) .stripe { animation: pulse 2.2s ease-in-out infinite; }
+    .chip.working .dot, .chip.subs .dot, .chip.bgs .dot,
+    .card[data-state="working"]:not(.unconf) .stripe .seg.main,
+    .card:not(.unconf) .stripe .seg.on { animation: pulse 2.2s ease-in-out infinite; }
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
   }
   .task { margin: 0; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
@@ -313,6 +326,8 @@
   .att .dot.crit { background: var(--crit); }
   .att .dot.warn { background: var(--warn); }
   .att .where { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); flex: none; }
+  /* 에이전트 아이콘 — 라벨 대신. 각 아이콘이 자체 배경을 가짐 */
+  .att .aicon { width: 18px; height: 18px; flex: none; border-radius: 4px; object-fit: contain; }
   .att .what { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .att .age { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: none; }
 
@@ -760,6 +775,11 @@
     }).join('');
   }
 
+  // 주의필요 행은 라벨이 길어 내용을 가리므로 아이콘으로 대체 (2026-09-10)
+  function agentIconFile(a) {
+    return a === 'claude-code' ? 'claude.webp' : 'codex.webp';
+  }
+
   // CLI/앱/자동 실행 라벨 — 모르는 구형 수집값을 임의로 CLI로 단정하지 않는다.
   function agentLabel(s) {
     var provider = s.agent === 'claude-code' ? 'CLAUDE' : 'CODEX';
@@ -774,6 +794,14 @@
     var meta = STATE_META[s.state] || { label: s.state, cls: 'ended' };
     var chipCls = s.unconfirmed ? 'unconf' : meta.cls;
     var chipLabel = s.unconfirmed ? meta.label + ' · 신호 없음' : meta.label;
+    // 서브에이전트·백그라운드는 별도 칩·보더 구간으로 분리 표시 (라벨 합산 안 함)
+    var subN = 0, bgN = 0;
+    if (!s.unconfirmed && s.state !== 'ended') {
+      subN = s.bg_agents || 0;
+      bgN = s.bg_shells || 0;
+      // 종류 정보 없이 총수만 오는 구형 수집기 폴백
+      if (!subN && !bgN && s.bg_count > 0) bgN = s.bg_count;
+    }
     var agentCls = s.agent === 'claude-code' ? 'cc' : 'cx';
     var aLabel = agentLabel(s);
     var task = '';
@@ -795,12 +823,18 @@
     return '<article class="card' + (s.unconfirmed ? ' unconf' : '') + '" data-state="' + esc(s.state) + '"' +
       ' data-att="' + ((s.state === 'needs_approval' || s.state === 'awaiting_input') && !s.unconfirmed ? 1 : 0) + '"' +
       ' data-unconf="' + (s.unconfirmed ? 1 : 0) + '">' +
-      '<div class="stripe"></div><div class="cbody">' +
+      '<div class="stripe">' +
+        '<span class="seg main" title="메인: ' + esc(chipLabel) + '"></span>' +
+        (subN > 0 ? '<span class="seg sub on" title="서브에이전트 ' + subN + '개"></span>' : '') +
+        (bgN > 0 ? '<span class="seg bgt on" title="백그라운드 ' + bgN + '개"></span>' : '') +
+      '</div><div class="cbody">' +
       '<div class="row1">' +
       '<span class="agent ' + agentCls + '">' + aLabel + '</span>' +
       '<span class="proj">' + nameOr(s.project) + '</span>' +
       (s.branch ? '<span class="branch">⎇ ' + esc(s.branch) + '</span>' : '') +
       '<span class="chip ' + chipCls + '"><i class="dot"></i>' + esc(chipLabel) + '</span>' +
+      (subN > 0 ? '<span class="chip subs"><i class="dot"></i>서브에이전트 ' + subN + '</span>' : '') +
+      (bgN > 0 ? '<span class="chip bgs"><i class="dot"></i>백그라운드 ' + bgN + '</span>' : '') +
       '</div>' +
       '<p class="task"' + taskTitle + '><span class="tid">#' + s.id + '</span>' + task + '</p>' +
       '<div class="meta">' +
@@ -938,7 +972,7 @@
       ? att.map(function (s) {
           return '<li><i class="dot ' + (s.state === 'needs_approval' ? 'crit' : 'warn') + '"></i>' +
             '<span class="where">' + esc(s.device) + '</span>' +
-            '<span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(s) + '</span>' +
+            '<img class="aicon" src="/assets/' + agentIconFile(s.agent) + '" alt="" title="' + esc(agentLabel(s)) + '">' +
             '<span class="what">' + nameOr(s.project) + ' · ' +
             esc(s.state === 'needs_approval' ? (s.approval_msg || '권한 승인') : '다음 지시 대기') + '</span>' +
             '<span class="age">' + esc(dur(s.state_min)) + '</span></li>';

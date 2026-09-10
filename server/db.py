@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   summary_source TEXT,    -- 'llm' | 'fallback' (실패해 원문 앞부분으로 채운 것 — 재시도 대상)
   summary_tried_at TEXT,  -- 마지막 요약 시도 시각 (재시도 간격용)
   tokens_cum TEXT,        -- 마지막 누적 토큰 JSON {model: {in,out,cr,cw,th}} — 델타 기준점
+  bg_count INTEGER DEFAULT 0,  -- 진행 중 백그라운드 작업 총수(서브에이전트+bg 셸)
+  bg_agents INTEGER DEFAULT 0, -- 그중 서브에이전트 수
+  bg_shells INTEGER DEFAULT 0, -- 그중 백그라운드 셸 수
+  bg_ts TEXT,             -- 마지막 bg 이벤트 허브 시각 (표시 감쇠용)
   PRIMARY KEY (device_id, agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -188,6 +192,10 @@ MIGRATIONS = (
     "DROP TABLE IF EXISTS token_scan_state",
     "DELETE FROM settings WHERE key='tokscan.baseline'",
     "ALTER TABLE llm_runs ADD COLUMN usage TEXT",
+    "ALTER TABLE sessions ADD COLUMN bg_count INTEGER DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN bg_ts TEXT",
+    "ALTER TABLE sessions ADD COLUMN bg_agents INTEGER DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN bg_shells INTEGER DEFAULT 0",
 )
 
 
