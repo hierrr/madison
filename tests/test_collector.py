@@ -323,6 +323,41 @@ class CollectorTests(unittest.TestCase):
             self.assertIn("madison.test", log_text)
             self.assertNotIn("example.com", log_text)
 
+    def test_installer_requires_hub_on_first_install(self):
+        # 첫 설치(env 없음)에서 --hub 미지정이면 터널 기본값으로 가지 않고 안내와 함께 거절한다
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            (mad / "env").unlink()
+            bindir = self.fake_path(root)
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
+            proc = subprocess.run(
+                ["bash", str(INSTALL), "--name", "test-device", "--secret", "s3"],
+                env=env, cwd=REPO, capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("--hub", proc.stderr)
+            self.assertIn("내부망", proc.stderr)
+
+    def test_installer_switches_hub_url_without_reenroll(self):
+        # 등록된 기기에서 --hub를 명시해 재실행하면 재등록 없이 MADISON_URL만 바뀐다 (토큰 유지)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            log = root / "curl.log"
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_LOG": str(log)})
+            subprocess.run(
+                ["bash", str(INSTALL), "--hub", "http://lan.test:8787"],
+                env=env, cwd=REPO, check=True, capture_output=True, text=True,
+            )
+            env_text = (mad / "env").read_text()
+            self.assertIn("MADISON_URL=http://lan.test:8787\n", env_text)
+            self.assertIn("MADISON_TOKEN=test-token\n", env_text)
+            self.assertNotIn("/api/enroll", log.read_text())
+
     def test_installer_repairs_notify_rechained_by_computer_use(self):
         # Computer Use가 MADISON 래퍼 위에 재체이닝하며 경로를 JSON 이스케이프(\/)로 품은 실측 케이스:
         # 래퍼 참조가 남은 notify를 제거하고 보존해둔 원본 notify를 복원해야 한다.

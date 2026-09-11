@@ -114,7 +114,7 @@ flowchart LR
         rep["report.sh<br/>fire-and-forget · 2s timeout · spooled"]
         hooks --> rep
     end
-    rep -->|"HTTPS · tunnel or direct"| api
+    rep -->|"HTTP(S) · LAN-direct or tunnel"| api
     subgraph hub["hub — one always-on machine"]
         api["FastAPI + SQLite (one file)<br/>enroll · events · state (fold + TTL)<br/>handoffs · reports"]
         dash["dashboard — GET /"]
@@ -168,13 +168,11 @@ cp .env.example .env      # then edit: set ENROLL_SECRET, and hostnames if expos
 ```
 
 The hub listens on `127.0.0.1:8787`. On the same machine, open
-<http://127.0.0.1:8787>. To reach it from other machines there are two setups:
+<http://127.0.0.1:8787>. To reach it from other machines there are two setups.
+**LAN is the default** — add a tunnel only if some device must reach the hub
+from outside your network:
 
-- **Tunnel** (internet access): put the hub behind a tunnel — e.g. Cloudflare
-  Tunnel, which is what the `.env` hostnames and `CF_ACCESS_*` keys are for —
-  with a human dashboard host protected by SSO and a machine API host
-  authenticated by per-device tokens. See `.env.example`.
-- **LAN only** (no tunnel): set `HOST=0.0.0.0` and leave the tunnel keys empty.
+- **LAN** (default — no tunnel): set `HOST=0.0.0.0` and leave the tunnel keys empty.
   Collectors report straight to `http://<hub-ip>:8787` with their device tokens;
   onboard with `--hub http://<hub-ip>:8787`. The dashboard stays closed to plain
   LAN requests (a 401 is expected) — open it on the hub machine itself, or from
@@ -182,6 +180,12 @@ The hub listens on `127.0.0.1:8787`. On the same machine, open
   then <http://127.0.0.1:8787>), which the hub sees as loopback and therefore
   admin. Traffic is plain HTTP, so use this only on a network you trust;
   `IP_ALLOWLIST` can additionally pin each device token to an IP.
+- **Tunnel** (optional — internet access): put the hub behind a tunnel — e.g.
+  Cloudflare Tunnel, which is what the `.env` hostnames and `CF_ACCESS_*` keys
+  are for — with a human dashboard host protected by SSO and a machine API host
+  authenticated by per-device tokens. See `.env.example`. A tunnel does not
+  replace the LAN path: devices on the same network as the hub should keep
+  reporting to the LAN address; the tunnel host is for the ones outside.
 
 Either way it is the same single process and port — roles are told apart by the
 credentials on each request (device token vs admin), not by the route.
@@ -201,10 +205,23 @@ Zero-touch: the hub serves its own installer. On each machine, run — or just a
 that machine's agent to run it for you:
 
 ```bash
-curl -fsSL https://madison-api.example.com/install.sh | bash -s -- \
-  --name studio --secret <ENROLL_SECRET> --hub https://madison-api.example.com
+curl -fsSL http://<hub-ip>:8787/install.sh | bash -s -- \
+  --name studio --secret <ENROLL_SECRET> --hub http://<hub-ip>:8787
 # Claude Code + Codex collection are both on by default; pass --no-codex to skip Codex
 ```
+
+`--hub` is the address this device will report to from then on, and the
+installer **requires it on a first install** — it never falls back to a tunnel
+host on its own. Prefer the LAN address; pass the tunnel host
+(`--hub https://madison-api.example.com`) only for a device that reports from
+outside your network — a laptop that leaves the building, say. When you hand
+the install command to the machine's agent, spell out the `--hub` value; even
+if you don't, the installer's error text and post-install summary steer the
+agent to prefer the LAN address and to ask you when it is unclear whether the
+device stays on the hub's network. After installing, the summary states which
+path the device reports over (LAN-direct or tunnel) and how to switch:
+re-running with a different `--hub` swaps the address and keeps the device
+token.
 
 This registers the device (a long-lived token, hashed on the server), merges global
 hooks for both Claude Code and Codex with any hooks already present, and schedules
