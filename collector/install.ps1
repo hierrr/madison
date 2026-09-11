@@ -1,12 +1,14 @@
 # MADISON collector 설치 — Windows 베타 (IMPLEMENTATION.md §8.5) ※ 실기기 미검증
 # 사용: powershell에서
-#   irm https://madison-api.example.com/install.ps1 -OutFile install.ps1
-#   .\install.ps1 -Name office-pc -Secret <등록암호>
+#   irm http://<허브IP>:8787/install.ps1 -OutFile install.ps1
+#   .\install.ps1 -Name office-pc -Secret <등록암호> -Hub http://<허브IP>:8787
+# -Hub는 첫 설치에 필수 — 기본은 내부망 직결, 터널 호스트(https://…)는 허브와 다른 망에서
+# 보고하는 기기에만. 에이전트가 설치 중이고 어느 쪽인지 애매하면 사용자에게 확인할 것.
 # WSL에서 Claude Code를 쓰는 경우 이 스크립트 대신 리눅스용 install.sh를 사용(정식 경로).
 param(
     [string]$Name = "",
     [string]$Secret = $env:MADISON_ENROLL_SECRET,
-    [string]$Hub = "https://madison-api.example.com",
+    [string]$Hub = "",
     [switch]$NoCodex
 )
 $ErrorActionPreference = "Stop"
@@ -14,11 +16,17 @@ $MadDir = Join-Path $env:USERPROFILE ".claude\madison"
 $EnvFile = Join-Path $MadDir "env"
 $Settings = Join-Path $env:USERPROFILE ".claude\settings.json"
 
-# 재설치/갱신: -Hub 미지정이면 이미 등록된 env의 MADISON_URL을 기본값으로 쓴다
-if ($Hub -eq "https://madison-api.example.com" -and (Test-Path $EnvFile)) {
+# 재설치/갱신: -Hub 미지정이면 이미 등록된 env의 MADISON_URL을 그대로 쓴다
+$hubExplicit = [bool]$Hub
+if (-not $Hub -and (Test-Path $EnvFile)) {
     $savedUrl = Get-Content $EnvFile | Where-Object { $_ -match '^MADISON_URL=(.+)$' } |
         ForEach-Object { $Matches[1].Trim('"') } | Select-Object -First 1
     if ($savedUrl) { $Hub = $savedUrl }
+}
+# 기본값으로 터널을 조용히 잡지 않는다 — 첫 설치는 -Hub 명시가 필수
+if (-not $Hub) {
+    throw ("-Hub <허브 주소>가 필요합니다 — 기본은 내부망 직결(-Hub http://<허브IP>:8787), " +
+        "터널 호스트(https://…)는 망 밖에서 보고할 기기에만. 애매하면 사용자에게 확인하세요.")
 }
 
 New-Item -ItemType Directory -Force -Path $MadDir, (Join-Path $MadDir "throttle") | Out-Null
@@ -41,6 +49,15 @@ if (-not $enrolled) {
     ) | Set-Content $EnvFile
     Write-Host "[MADISON] 기기 '$Name' 등록 완료"
 } else {
+    # -Hub를 명시하고 재실행하면 재등록 없이 보고 주소만 전환한다 (내부망↔터널)
+    $savedUrl = Get-Content $EnvFile | Where-Object { $_ -match '^MADISON_URL=(.+)$' } |
+        ForEach-Object { $Matches[1].Trim('"') } | Select-Object -First 1
+    if ($hubExplicit -and $savedUrl -and $savedUrl -ne $Hub) {
+        (Get-Content $EnvFile) | ForEach-Object {
+            if ($_ -match '^MADISON_URL=') { "MADISON_URL=$Hub" } else { $_ }
+        } | Set-Content $EnvFile
+        Write-Host "[MADISON] 보고 주소 변경: $savedUrl → $Hub (토큰 유지)"
+    }
     Write-Host "[MADISON] 이미 등록된 기기 — enroll 생략"
 }
 
@@ -121,4 +138,10 @@ Write-Host "[MADISON] 스풀 플러셔 등록 (Task Scheduler, 5분 주기)"
 
 Write-Host "[MADISON] 설치 완료 — 열려 있는 Claude Code/Codex 세션은 재시작해야 훅이 적용됩니다"
 if (-not $NoCodex) { Write-Host "[MADISON] Codex에서 /hooks를 열어 MADISON 훅을 검토·신뢰하세요" }
-Write-Host "[MADISON] 대시보드: https://madison.example.com"
+if ($Hub -like "https://*") {
+    Write-Host "[MADISON] 보고 경로: 터널 경유 ($Hub) — 허브와 같은 내부망 상주 기기라면 -Hub http://<허브IP>:8787 로 재실행해 내부망 직결 권장 (재등록 없음)"
+    Write-Host "[MADISON] 대시보드: 허브의 대시보드 호스트 (Access/SSO 로그인)"
+} else {
+    Write-Host "[MADISON] 보고 경로: 내부망 직결 ($Hub) — 망 밖에서도 쓰는 기기라면 터널 구성 후 -Hub https://<터널 API 호스트> 로 재실행 (재등록 없음)"
+    Write-Host "[MADISON] 대시보드: 허브 기기에서 http://127.0.0.1:8787"
+}

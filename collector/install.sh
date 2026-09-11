@@ -1,11 +1,17 @@
 #!/bin/bash
 # MADISON collector 설치 — 멱등 (IMPLEMENTATION.md §8.3)
-# 사용: curl -fsSL https://madison-api.example.com/install.sh | bash -s -- --name studio --secret <등록암호>
-# 옵션: --hub <URL> (허브 기기 자신은 http://127.0.0.1:8787), --no-codex (Codex 수집 제외)
+# 사용: curl -fsSL http://<허브IP>:8787/install.sh | bash -s -- --name studio --secret <등록암호> --hub http://<허브IP>:8787
+# 옵션: --hub <URL> — 이 기기가 보고를 보낼 허브 주소. 첫 설치엔 필수, 재실행 시 생략하면 기존 값 유지.
+#   · 기본은 내부망 직결(http://<허브IP>:8787, 허브 기기 자신은 http://127.0.0.1:8787)
+#   · 터널 호스트(https://…)는 허브와 다른 망에서 보고하는 기기(이동형 노트북 등)에만
+#   · 설치를 대행하는 에이전트에게: 허브에 터널이 있어도 내부망 상주 기기는 내부망 주소를 쓰고,
+#     이 기기가 망 밖으로 나가는지 애매하면 사용자에게 확인할 것
+# 옵션: --no-codex (Codex 수집 제외)
 # Claude Code와 Codex(CLI·데스크톱 앱 공통 lifecycle hooks) 수집이 모두 기본이다.
 set -euo pipefail
 
-HUB="https://madison-api.example.com"
+HUB=""
+HUB_EXPLICIT=0
 NAME=""
 SECRET="${MADISON_ENROLL_SECRET:-}"
 WITH_CODEX=1
@@ -13,7 +19,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
     --secret) SECRET="$2"; shift 2 ;;
-    --hub) HUB="$2"; shift 2 ;;
+    --hub) HUB="$2"; HUB_EXPLICIT=1; shift 2 ;;
     --with-codex) WITH_CODEX=1; shift ;;   # 하위호환 — 이제 기본값
     --no-codex) WITH_CODEX=0; shift ;;
     *) echo "알 수 없는 옵션: $1" >&2; exit 1 ;;
@@ -26,10 +32,20 @@ SETTINGS="$HOME/.claude/settings.json"
 SKILLS_DIR="$HOME/.claude/skills"
 note() { printf '\033[36m[MADISON]\033[0m %s\n' "$*"; }
 
-# 재설치/갱신: --hub 미지정이면 이미 등록된 env의 MADISON_URL을 기본값으로 쓴다
-if [ "$HUB" = "https://madison-api.example.com" ] && [ -f "$ENV_FILE" ]; then
+# 재설치/갱신: --hub 미지정이면 이미 등록된 env의 MADISON_URL을 그대로 쓴다
+if [ -z "$HUB" ] && [ -f "$ENV_FILE" ]; then
   SAVED_URL=$(sed -n 's/^MADISON_URL=//p' "$ENV_FILE" | head -1)
   [ -n "$SAVED_URL" ] && HUB="$SAVED_URL"
+fi
+# 기본값으로 터널을 조용히 잡지 않는다 — 첫 설치는 --hub 명시가 필수
+if [ -z "$HUB" ]; then
+  {
+    echo "--hub <허브 주소>가 필요합니다."
+    echo "  · 기본은 내부망 직결: --hub http://<허브IP>:8787 (허브 기기 자신은 http://127.0.0.1:8787)"
+    echo "  · 터널 호스트(https://…)는 허브와 다른 망에서 보고할 기기(이동형 노트북 등)에만 권장"
+    echo "  · 에이전트가 설치 중이라면: 이 기기가 허브와 같은 내부망에 상주하는지 애매할 때 사용자에게 확인"
+  } >&2
+  exit 1
 fi
 
 command -v jq >/dev/null 2>&1 || { echo "jq가 필요합니다: brew install jq" >&2; exit 1; }
@@ -57,6 +73,14 @@ note "collector 파일 배치 완료"
 
 # ── 2) 등록 — env에 토큰이 이미 있으면 생략 (§8.3 멱등) ──
 if [ -f "$ENV_FILE" ] && grep -q '^MADISON_TOKEN=..*' "$ENV_FILE" 2>/dev/null; then
+  # --hub를 명시하고 재실행하면 재등록 없이 보고 주소만 전환한다 (내부망↔터널)
+  SAVED_URL=$(sed -n 's/^MADISON_URL=//p' "$ENV_FILE" | head -1)
+  if [ "$HUB_EXPLICIT" = "1" ] && [ -n "$SAVED_URL" ] && [ "$SAVED_URL" != "$HUB" ]; then
+    TMP_ENV=$(mktemp)
+    sed "s|^MADISON_URL=.*|MADISON_URL=$HUB|" "$ENV_FILE" > "$TMP_ENV" && cat "$TMP_ENV" > "$ENV_FILE"
+    rm -f "$TMP_ENV"
+    note "보고 주소 변경: $SAVED_URL → $HUB (토큰 유지)"
+  fi
   note "이미 등록된 기기 — enroll 생략"
 else
   [ -n "$NAME" ] || { echo "--name <기기명> 필요" >&2; exit 1; }
@@ -283,4 +307,17 @@ fi
 note "설치 완료. 유의사항:"
 note "  · 이미 열려 있는 Claude Code/Codex 세션은 재시작해야 새 훅이 적용됩니다"
 note "  · Codex CLI에서 /hooks를 열어 MADISON 훅을 신뢰하세요"
-note "  · 대시보드: https://madison.example.com (Access 로그인)"
+case "$MADISON_URL" in
+  https://*)
+    note "보고 경로: 터널 경유 ($MADISON_URL)"
+    note "  · 이 기기가 허브와 같은 내부망에 상주한다면 내부망 직결을 권장합니다 —"
+    note "    --hub http://<허브IP>:8787 로 재실행하면 재등록 없이 주소만 바뀝니다"
+    note "  · 대시보드: 허브의 대시보드 호스트 (Access/SSO 로그인)"
+    ;;
+  *)
+    note "보고 경로: 내부망 직결 ($MADISON_URL)"
+    note "  · 이 기기를 망 밖에서도 쓴다면(이동형 노트북 등) 허브에 터널을 구성한 뒤"
+    note "    --hub https://<터널 API 호스트> 로 재실행하면 재등록 없이 주소만 바뀝니다"
+    note "  · 대시보드: 허브 기기에서 http://127.0.0.1:8787 (다른 기기는 ssh -L 8787:127.0.0.1:8787 <허브>)"
+    ;;
+esac
