@@ -146,7 +146,7 @@
   /* 상태 색점 — 이력 표에서 상태가 색으로 분류되게 (라벨은 텍스트 토큰 유지) */
   .sdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; flex: none; }
   .s-work { background: var(--accent); } .s-await { background: var(--warn); }
-  .s-appr { background: var(--crit); } .s-end { background: var(--line-2); }
+  .s-appr { background: var(--crit); } .s-end { background: var(--line-2); } .s-stale { background: var(--stale); }
   .s-ok { background: var(--good); } .s-fail { background: var(--crit); }
   .s-run { background: var(--accent); } .s-queue { background: var(--ink-3); }
   .s-on { background: var(--good); } .s-off { background: var(--ink-3); } .s-revoked { background: var(--crit); }
@@ -250,9 +250,9 @@
      세 층의 상태를 색·위치로 병렬 표시하고 판단은 사용자에게 맡긴다 (2026-09-10) */
   .card .stripe { background: var(--line-2); display: flex; flex-direction: column; }
   .card .stripe .seg { flex: 1; }
-  .card[data-state="working"] .stripe .seg.main { background: var(--accent); }
-  .card[data-state="awaiting_input"] .stripe .seg.main { background: var(--warn); }
-  .card[data-state="needs_approval"] .stripe .seg.main { background: var(--crit); }
+  .card[data-state="working"]:not(.unconf) .stripe .seg.main { background: var(--accent); }
+  .card[data-state="awaiting_input"]:not(.unconf) .stripe .seg.main { background: var(--warn); }
+  .card[data-state="needs_approval"]:not(.unconf) .stripe .seg.main { background: var(--crit); }
   .card .stripe .seg.sub.on { background: var(--accent); }
   .card .stripe .seg.bgt.on { background: var(--good); }
   .card[data-state="needs_approval"] { border-color: var(--crit); background: var(--crit-bg); }
@@ -1033,7 +1033,7 @@
       ? autos.slice(0, 10).map(function (s) {
           var work = s.task_summary || s.last_prompt || '';
           return '<li><time title="마지막 신호">' + age(s.seen_min) + '</time>' +
-            '<span class="etxt">' + sdot(SESSION_DOT[s.state] || 's-end') +
+            '<span class="etxt">' + sessDot(s) +
             esc(s.device) + ' · ' + esc(s.project || s.agent) +
             (work ? ' — ' + esc(String(work).slice(0, 72)) : '') + '</span></li>';
         }).join('')
@@ -1160,6 +1160,8 @@
   var STATE_LABEL = { working: '작업 중', awaiting_input: '입력 대기', needs_approval: '승인 필요', ended: '종료' };
   function sdot(cls) { return '<span class="sdot ' + cls + '"></span>'; }
   var SESSION_DOT = { working: 's-work', awaiting_input: 's-await', needs_approval: 's-appr', ended: 's-end' };
+  // 세션 상태점 — 끊김 의심(unconfirmed)이면 상태색 대신 stale 회색 (현황 카드 칩과 같은 기준)
+  function sessDot(s) { return sdot(s.unconfirmed ? 's-stale' : SESSION_DOT[s.state] || 's-end'); }
   var HANDOFF_DOT = { pending: 's-await', delivered: 's-ok', done: 's-end', cancelled: 's-end' };
   // 이벤트 유형 색: 생명주기=파랑, 완료/유휴=노랑, 승인요청=빨강 (현황 피드와 동일 체계)
   var EVENT_CLS = { session_start: 'life', prompt: 'life', tool_start: '', heartbeat: '',
@@ -1534,7 +1536,7 @@
         '<td><span class="agent ' + provCls(s.agent) + '">' + agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
-        '<td>' + sdot(SESSION_DOT[s.state] || 's-end') + esc(STATE_LABEL[s.state] || s.state) + '</td>' +
+        '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
         '<td class="mono dim">' + fmtTs(s.started_at) + ' → ' + fmtTs(s.last_seen_hub) + '</td></tr>' +
         '<tr class="subrow hidden" id="' + rid + '"><td colspan="8"><div class="subev">이벤트 불러오는 중…</div></td></tr>';
@@ -1651,7 +1653,7 @@
         agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim">⎇ ' + esc(s.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
-        '<td>' + sdot(SESSION_DOT[s.state] || 's-end') + esc(STATE_LABEL[s.state] || s.state) + (s.end_reason ? ' <span class="dim">(' + esc(s.end_reason) + ')</span>' : '') + '</td>' +
+        '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + (s.end_reason ? ' <span class="dim">(' + esc(s.end_reason) + ')</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
         '<td class="mono dim">' + esc(String(s.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '')) +
         (s.effort ? '/' + esc(s.effort) : '') + '</td>' +

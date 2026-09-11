@@ -197,7 +197,7 @@ async def history_events(request: Request, device: str = "", agent: str = "",
 async def history_sessions(request: Request, limit: int = 2000, days: int = 0):
     """종료 포함 전체 세션 이력 — 태스크 탭용. days=0이면 전체 기간. 관리자 전용(기기 쪽 소비자 없음)."""
     _require(request, ("admin",))
-    q = ("SELECT s.rowid AS row_id, s.*, d.name AS device"
+    q = ("SELECT s.rowid AS row_id, s.*, d.name AS device, d.last_seen_at AS device_seen_at"
          " FROM sessions s JOIN devices d ON d.id=s.device_id")
     args: list = []
     if days > 0:
@@ -206,7 +206,18 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0):
     q += " ORDER BY s.last_seen_hub DESC LIMIT ?"
     args.append(limit if limit > 0 else -1)  # 0 = 무제한
     with db.tx() as c:
-        return [dict(r) for r in c.execute(q, args).fetchall()]
+        rows = [dict(r) for r in c.execute(q, args).fetchall()]
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for r in rows:
+        # unconfirmed 오버레이 — /api/state(state.assemble §4.1)와 같은 판정
+        seen = state._age_min(now, r["last_seen_hub"]) or 0
+        dev_age = state._age_min(now, r.pop("device_seen_at", None))
+        dev_online = dev_age is not None and dev_age <= CFG.device_online_min
+        r["unconfirmed"] = (
+            (r["state"] == "working" and seen > CFG.ttl_stale_min)
+            or (r["state"] in ("awaiting_input", "needs_approval") and not dev_online)
+        )
+    return rows
 
 
 @app.post("/api/sessions/end")
