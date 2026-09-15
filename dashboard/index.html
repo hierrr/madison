@@ -1155,7 +1155,8 @@
   var SESSION_DOT = { working: 's-work', awaiting_input: 's-await', needs_approval: 's-appr', ended: 's-end' };
   // 세션 상태점 — 끊김 의심(unconfirmed)이면 상태색 대신 stale 회색 (현황 카드 칩과 같은 기준)
   function sessDot(s) { return sdot(s.unconfirmed ? 's-stale' : SESSION_DOT[s.state] || 's-end'); }
-  var HANDOFF_DOT = { pending: 's-await', delivered: 's-ok', done: 's-end', cancelled: 's-end' };
+  // 완료(done)=회색 s-end, 취소(cancelled)=자동화 '신호 없음'과 같은 s-stale 로 분리
+  var HANDOFF_DOT = { pending: 's-await', delivered: 's-ok', done: 's-end', cancelled: 's-stale' };
   // 이벤트 유형 색: 생명주기=파랑, 완료/유휴=노랑, 승인요청=빨강 (현황 피드와 동일 체계)
   var EVENT_CLS = { session_start: 'life', prompt: 'life', tool_start: '', heartbeat: '',
     turn_done: 'stop', idle: 'stop', permission_request: 'noti', session_end: '' };
