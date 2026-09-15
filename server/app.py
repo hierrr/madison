@@ -222,10 +222,21 @@ _SESSION_PAGE_COLS = (
 )
 
 
+# 실질 세션 = 프롬프트를 한 번이라도 받았거나(=last_prompt 있음) 턴을 돈 것.
+# 프롬프트·턴 없이 뜬 세션(모델 목록 프로브 등 헤드리스 호출, 입력 없이 닫은 창)은
+# 보여줄 작업 내용이 없으므로 태스크·자동화 탭에서 감춘다 — 실행 방식과 무관한 판정이라
+# 프로젝트가 늘어도 그대로 적용된다. 원장(이벤트 히스토리)에는 그대로 남는다.
+_SUBSTANTIVE_SQL = "(s.turns > 0 OR COALESCE(s.last_prompt, '') != '')"
+
+
 def _session_conds(device: str = "", agent: str = "", fe: str = "",
-                   project: str = "", days: int = 0, auto: int = -1) -> tuple[list[str], list]:
-    """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭."""
+                   project: str = "", days: int = 0, auto: int = -1,
+                   substantive: bool = True) -> tuple[list[str], list]:
+    """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭.
+    substantive=True면 프롬프트·턴 없는 no-op 세션을 제외한다."""
     conds, args = [], []
+    if substantive:
+        conds.append(_SUBSTANTIVE_SQL)
     if auto == 1:
         conds.append("s.frontend = 'auto'")
     elif auto == 0:
@@ -278,9 +289,14 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
             "SELECT " + _SESSION_PAGE_COLS + base_from + where +
             " ORDER BY s.last_seen_hub DESC LIMIT ? OFFSET ?",
             cargs + [per, (page - 1) * per]).fetchall()]
-        # facets(드롭다운 옵션)는 탭 범위(auto 여부)만 반영 — 선택 필터·기간과 무관
+        # 같은 필터에서 감춘 no-op 세션 수 — 조용히 버리지 않고 탭에 "N건 제외"로 알린다
+        nconds, nargs = _session_conds(device, agent, fe, project, days, auto, substantive=False)
+        nconds.append("NOT " + _SUBSTANTIVE_SQL)
+        hidden = c.execute("SELECT COUNT(*)" + base_from +
+                           " WHERE " + " AND ".join(nconds), nargs).fetchone()[0]
+        # facets(드롭다운 옵션)는 탭 범위(auto 여부)만 반영 — 선택 필터·기간과 무관, no-op 제외
         fconds, fargs = _session_conds(auto=auto)
-        fwhere = (" WHERE " + " AND ".join(fconds)) if fconds else ""
+        fwhere = " WHERE " + " AND ".join(fconds)
         devices = [r[0] for r in c.execute(
             "SELECT DISTINCT d.name" + base_from + fwhere + " ORDER BY d.name", fargs)]
         agents = [{"agent": r[0], "frontend": r[1]} for r in c.execute(
@@ -288,7 +304,8 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
             " ORDER BY 1, 2", fargs)]
         projects = sorted({r[0] or "(unknown)" for r in c.execute(
             "SELECT DISTINCT COALESCE(s.project,'')" + base_from + fwhere, fargs)})
-    return {"rows": _overlay_unconfirmed(rows), "total": total, "page": page, "pages": pages,
+    return {"rows": _overlay_unconfirmed(rows), "total": total, "hidden": hidden,
+            "page": page, "pages": pages,
             "facets": {"devices": devices, "agents": agents, "projects": projects}}
 
 

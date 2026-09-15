@@ -153,6 +153,7 @@
   .htbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 10px 4px 8px; }
   /* 필터바 결과 개수 — 패널 카운트 배지와 동일한 pill(바깥 테두리·크기·폰트), accent 색 */
   .hcount { font-family: var(--mono); font-size: 11px; font-weight: 700; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 999px; padding: 1px 8px; margin-left: 2px; font-variant-numeric: tabular-nums; }
+  .hnote { font-size: 11px; color: var(--ink-3); margin-left: 6px; cursor: help; }
   tr.expandable { cursor: pointer; }
   tr.expandable:hover td { background: var(--surface-2); }
   .subrow td { background: var(--surface-2); white-space: normal; }
@@ -1178,7 +1179,7 @@
       '<select class="hsel" data-ef="device">' + optsFor(fc.devices || [], EF.device, '기기 전체') + '</select>' +
       '<select class="hsel" data-ef="project">' + optsFor(fc.projects || [], EF.project, '프로젝트 전체') + '</select>' +
       daysSel('data-ef', EF.days) +
-      '<span class="hcount">' + res.total + '</span>' +
+      hcountHtml(res) +
       '</div>' +
       table(['ID', '시각', '기기', '에이전트', '이벤트', '프로젝트', '태스크', '내용'], html) +
       pgbar('events', res);
@@ -1245,6 +1246,11 @@
   function setAgentPair(f, v) {
     var p = (v || '').split('|');
     f.agent = p[0] || ''; f.fe = p[1] || '';
+  }
+  function hcountHtml(res) {
+    // 결과 총계 + (태스크·자동화 탭) 프롬프트·턴 없이 뜬 빈 세션을 몇 건 감췄는지 안내
+    return '<span class="hcount">' + (res.total || 0) + '</span>' +
+      (res.hidden ? '<span class="hnote" title="프롬프트·턴 없이 뜬 세션(모델 프로브·빈 창)은 이벤트 원장에만 남기고 목록에서 감춤">빈 세션 ' + res.hidden + '건 제외</span>' : '');
   }
   function daysSel(attr, cur) {
     return '<select class="hsel" ' + attr + '="days">' +
@@ -1343,7 +1349,7 @@
         return '<option value="' + v + '"' + (QF.status === v ? ' selected' : '') + '>' + lab + '</option>';
       }).join('') + '</select>' +
       daysSel('data-qf', QF.days) +
-      '<span class="hcount">' + res.total + '</span>' +
+      hcountHtml(res) +
       '</div>' +
       table(['ID', '경로', '프로젝트', '태스크', '상태', '생성 → 수신'], html) +
       pgbar('queue', res);
@@ -1523,7 +1529,7 @@
       '<select class="hsel" data-af="agent">' + agentOptsFor(fc.agents, agentPairVal(AF)) + '</select>' +
       '<select class="hsel" data-af="project">' + optsFor(fc.projects || [], AF.project, '프로젝트 전체') + '</select>' +
       daysSel('data-af', AF.days) +
-      '<span class="hcount">' + res.total + '</span>' +
+      hcountHtml(res) +
       '</div>' +
       table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '기간'], html) +
       pgbar('auto', res);
@@ -1621,7 +1627,7 @@
       '<select class="hsel" data-taskf="agent">' + agentOptsFor(fc.agents, agentPairVal(f)) + '</select>' +
       '<select class="hsel" data-taskf="project">' + optsFor(fc.projects || [], f.project, '프로젝트 전체') + '</select>' +
       daysSel('data-taskf', f.days) +
-      '<span class="hcount">' + res.total + '</span>' +
+      hcountHtml(res) +
       '</div>' +
       table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '모델', '기간', ''], html) +
       pgbar('tasks', res);

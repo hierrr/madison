@@ -714,6 +714,12 @@ def fallback_period_md(dailies):
 # — 반복 자동화는 업무일지에 쓸 내용이 아님).
 NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id"
             " AND s.agent=e.agent AND s.session_id=e.session_id AND s.frontend='auto')")
+# 실질 세션 = 프롬프트를 받았거나 턴을 돈 세션. 프롬프트·턴 없이 뜬 no-op 세션(모델 프로브 등)은
+# turn_done이 없어 턴 수엔 애초에 안 잡히지만, 세션 수·활동시간·프로젝트 수는 아무 이벤트나
+# 세므로 여기서 제외해야 부풀지 않는다.
+SUBSTANTIVE = (" EXISTS (SELECT 1 FROM sessions s2 WHERE s2.device_id=e.device_id"
+               " AND s2.agent=e.agent AND s2.session_id=e.session_id"
+               " AND (s2.turns>0 OR COALESCE(s2.last_prompt,'')!=''))")
 
 
 def last_event_at(c, day):
@@ -740,16 +746,16 @@ def metrics(c, range_, day, reg: Registry | None = None):
         pr).fetchone()["n"]
     sessions = c.execute(
         f"SELECT COUNT(*) n FROM (SELECT DISTINCT device_id, session_id FROM events e"
-        f" WHERE {pred} AND {NOT_AUTO})", pr).fetchone()["n"]
+        f" WHERE {pred} AND {NOT_AUTO} AND {SUBSTANTIVE})", pr).fetchone()["n"]
     projects = c.execute(
         f"SELECT COUNT(DISTINCT project) n FROM events e"
-        f" WHERE COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO}",
+        f" WHERE COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO} AND {SUBSTANTIVE}",
         pr).fetchone()["n"]
     # 활동 시간 ≈ 이벤트가 있는 30분 슬롯 수 × 0.5h (연속 몰입시간 근사)
     slots = c.execute(
         f"SELECT COUNT(*) n FROM (SELECT DISTINCT strftime('%Y%m%d%H',ts_hub,'localtime'),"
         f" CAST(strftime('%M',ts_hub,'localtime') AS INTEGER)/30 FROM events e"
-        f" WHERE {pred} AND {NOT_AUTO})", pr).fetchone()["n"]
+        f" WHERE {pred} AND {NOT_AUTO} AND {SUBSTANTIVE})", pr).fetchone()["n"]
     per_project = [dict(r) for r in c.execute(
         f"SELECT project, COUNT(*) turns FROM events e WHERE event='turn_done'"
         f" AND COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO}"
