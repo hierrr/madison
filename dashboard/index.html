@@ -1161,23 +1161,9 @@
 
   var EF = { device: '', project: '', days: '0' };   // 이벤트 탭 필터
   function renderEvents() {
-    var rows = HIST.feed || [];
-    var devs = [], projs = [];
-    rows.forEach(function (r) {
-      if (devs.indexOf(r.device) < 0) devs.push(r.device);
-      var p = r.project || '(unknown)';
-      if (projs.indexOf(p) < 0) projs.push(p);
-    });
-    devs.sort(); projs.sort();
-    var cutoff = daysCut(EF.days);
-    var shown = rows.filter(function (r) {
-      if (EF.device && r.device !== EF.device) return false;
-      if (EF.project && (r.project || '(unknown)') !== EF.project) return false;
-      if (cutoff && tsMs(r.ts) < cutoff) return false;
-      return true;
-    });
-    var p = pageSlice(shown, 'events');
-    var html = p.rows.map(function (e2) {
+    var res = HIST.events || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
+    var fc = res.facets || {};
+    var html = res.rows.map(function (e2) {
       return '<tr><td class="mono dim">#' + e2.id + '</td>' +
         '<td class="mono dim">' + fmtTs(e2.ts) + '</td>' +
         '<td class="mono">' + esc(e2.device) + '</td>' +
@@ -1189,18 +1175,13 @@
     });
     document.getElementById('eventsTable').innerHTML =
       '<div class="htbar">' +
-      '<select class="hsel" data-ef="device">' + optsFor(devs, EF.device, '기기 전체') + '</select>' +
-      '<select class="hsel" data-ef="project">' + optsFor(projs, EF.project, '프로젝트 전체') + '</select>' +
-      '<select class="hsel" data-ef="days">' +
-      '<option value="0"' + (EF.days === '0' ? ' selected' : '') + '>전체 기간</option>' +
-      '<option value="1"' + (EF.days === '1' ? ' selected' : '') + '>최근 24시간</option>' +
-      '<option value="7"' + (EF.days === '7' ? ' selected' : '') + '>최근 7일</option>' +
-      '<option value="30"' + (EF.days === '30' ? ' selected' : '') + '>최근 30일</option>' +
-      '</select>' +
-      '<span class="hcount">' + shown.length + '</span>' +
+      '<select class="hsel" data-ef="device">' + optsFor(fc.devices || [], EF.device, '기기 전체') + '</select>' +
+      '<select class="hsel" data-ef="project">' + optsFor(fc.projects || [], EF.project, '프로젝트 전체') + '</select>' +
+      daysSel('data-ef', EF.days) +
+      '<span class="hcount">' + res.total + '</span>' +
       '</div>' +
       table(['ID', '시각', '기기', '에이전트', '이벤트', '프로젝트', '태스크', '내용'], html) +
-      pgbar('events', p);
+      pgbar('events', res);
   }
 
   function setView(v) {
@@ -1237,20 +1218,67 @@
   }
 
   var HIST = {
-    devices: null, state: null, sessions: null, feed: null,
+    devices: null, state: null,
+    tasks: null, queue: null, events: null, auto: null,   // 탭별 서버 페이지 응답 {rows,total,page,pages,facets}
     devF: { online: true, quiet: true, revoked: false },
     devSort: { key: 'seen', dir: 'asc' },
-    taskF: { device: '', agent: '', project: '', days: '0' }
+    taskF: { device: '', agent: '', fe: '', project: '', days: '0' }
   };
 
-  // ── 공용 페이지네이션 (페이지당 20개) ──
+  // ── 공용 페이지네이션 (페이지당 20개, 서버 페이징) ──
   var PG = { tasks: 1, queue: 1, events: 1, auto: 1 };
-  var PG_RENDER = {};   // key → 렌더 함수 (정의 후 채움)
-  function pageSlice(rows, key) {
-    var per = 20, pages = Math.max(1, Math.ceil(rows.length / per));
-    if (PG[key] > pages) PG[key] = pages;
-    if (PG[key] < 1) PG[key] = 1;
-    return { rows: rows.slice((PG[key] - 1) * per, PG[key] * per), page: PG[key], pages: pages };
+  var PG_RENDER = {};   // key → 로더 함수 (정의 후 채움) — 페이지 이동 = 해당 페이지 재요청
+  function qsBuild(params) {
+    return Object.keys(params).filter(function (k) {
+      return params[k] !== '' && params[k] != null;
+    }).map(function (k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
+  }
+  // 서버 facet의 (agent, frontend) 쌍 옵션 — 값은 'agent|frontend' ('-'는 프런트엔드 미기록)
+  function agentOptsFor(pairs, cur) {
+    return '<option value="">에이전트 전체</option>' + (pairs || []).map(function (p) {
+      var v = p.agent + '|' + (p.frontend || '-');
+      return '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' +
+        esc(agentLabel({ agent: p.agent, frontend: p.frontend })) + '</option>';
+    }).join('');
+  }
+  function agentPairVal(f) { return f.agent ? f.agent + '|' + (f.fe || '-') : ''; }
+  function setAgentPair(f, v) {
+    var p = (v || '').split('|');
+    f.agent = p[0] || ''; f.fe = p[1] || '';
+  }
+  function daysSel(attr, cur) {
+    return '<select class="hsel" ' + attr + '="days">' +
+      [['0', '전체 기간'], ['1', '최근 24시간'], ['7', '최근 7일'], ['30', '최근 30일']].map(function (o) {
+        return '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select>';
+  }
+  function loadTasks() {
+    var f = HIST.taskF;
+    getJSON('/api/history/sessions?' + qsBuild({ page: PG.tasks, limit: 20, auto: 0,
+      device: f.device, agent: f.agent, fe: f.fe, project: f.project,
+      days: f.days === '0' ? '' : f.days }))
+      .then(function (res) { HIST.tasks = res; PG.tasks = res.page; renderTasks(); })
+      .catch(function () { document.getElementById('tasksTable').textContent = '불러오기 실패'; });
+  }
+  function loadAuto() {
+    getJSON('/api/history/sessions?' + qsBuild({ page: PG.auto, limit: 20, auto: 1,
+      device: AF.device, agent: AF.agent, fe: AF.fe, project: AF.project,
+      days: AF.days === '0' ? '' : AF.days }))
+      .then(function (res) { HIST.auto = res; PG.auto = res.page; renderAuto(); })
+      .catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
+  }
+  function loadEvents() {
+    getJSON('/api/feed?' + qsBuild({ page: PG.events, limit: 20, noauto: 1,
+      device: EF.device, project: EF.project, days: EF.days === '0' ? '' : EF.days }))
+      .then(function (res) { HIST.events = res; PG.events = res.page; renderEvents(); })
+      .catch(function () { document.getElementById('eventsTable').textContent = '불러오기 실패'; });
+  }
+  function loadQueue() {
+    getJSON('/api/handoffs?' + qsBuild({ page: PG.queue, limit: 20,
+      src: QF.from, dst: QF.to, repo: QF.project, status: QF.status,
+      days: QF.days === '0' ? '' : QF.days }))
+      .then(function (res) { HIST.queue = res; PG.queue = res.page; renderQueue(); })
+      .catch(function () { document.getElementById('queueTable').textContent = '불러오기 실패'; });
   }
   function pgbar(key, p) {
     if (p.pages <= 1) return '';
@@ -1265,14 +1293,6 @@
     PG[b.dataset.pg] += parseInt(b.dataset.dir, 10);
     if (PG_RENDER[b.dataset.pg]) PG_RENDER[b.dataset.pg]();
   });
-  function daysCut(daysStr) {
-    return daysStr === '0' ? null : Date.now() - parseInt(daysStr, 10) * 86400000;
-  }
-  function tsMs(iso) {
-    var d = new Date((iso || '').indexOf('Z') > -1 ? iso : (iso || '') + 'Z');
-    return isNaN(d) ? 0 : d.getTime();
-  }
-
   function loadHistory(v) {
     if (v === 'devices') {
       Promise.all([getJSON('/api/devices'), getJSON('/api/state')]).then(function (res) {
@@ -1281,25 +1301,13 @@
         renderDevices();
       }).catch(function () { document.getElementById('devicesTable').textContent = '불러오기 실패'; });
     } else if (v === 'tasks') {
-      getJSON('/api/history/sessions?limit=0&days=0').then(function (rows) {
-        HIST.sessions = rows;
-        renderTasks();
-      }).catch(function () { document.getElementById('tasksTable').textContent = '불러오기 실패'; });
+      loadTasks();
     } else if (v === 'handoff') {
-      getJSON('/api/handoffs?limit=0').then(function (rows) {
-        HIST.handoffs = rows;
-        renderQueue();
-      }).catch(function () { document.getElementById('queueTable').textContent = '불러오기 실패'; });
+      loadQueue();
     } else if (v === 'events') {
-      getJSON('/api/feed?limit=0').then(function (rows) {
-        HIST.feed = rows.filter(function (r) { return r.frontend !== 'auto'; });
-        renderEvents();
-      }).catch(function () { document.getElementById('eventsTable').textContent = '불러오기 실패'; });
+      loadEvents();
     } else if (v === 'auto') {
-      getJSON('/api/history/sessions?limit=0&days=0').then(function (rows) {
-        HIST.autoSessions = rows.filter(function (s) { return s.frontend === 'auto'; });
-        renderAuto();
-      }).catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
+      loadAuto();
     } else if (v === 'usage') {
       loadUsage();
     } else if (v === 'report') {
@@ -1311,60 +1319,52 @@
 
   var QF = { from: '', to: '', project: '', status: '', days: '0' };
   function renderQueue() {
-    var rows = HIST.handoffs || [];
-    var froms = [], tos = [], projs = [];
-    rows.forEach(function (h) {
-      var f2 = h.from_name || '?', t2 = h.to_name || '?';
-      if (froms.indexOf(f2) < 0) froms.push(f2);
-      if (tos.indexOf(t2) < 0) tos.push(t2);
-      if (projs.indexOf(h.repo) < 0) projs.push(h.repo);
-    });
-    froms.sort(); tos.sort(); projs.sort();
-    var cutoff = QF.days === '0' ? null : Date.now() - parseInt(QF.days, 10) * 86400000;
-    var shown = rows.filter(function (h) {
-      if (QF.from && (h.from_name || '?') !== QF.from) return false;
-      if (QF.to && (h.to_name || '?') !== QF.to) return false;
-      if (QF.project && h.repo !== QF.project) return false;
-      if (QF.status && h.status !== QF.status) return false;
-      if (cutoff) {
-        var d = new Date((h.created_at || '').indexOf('Z') > -1 ? h.created_at : h.created_at + 'Z');
-        if (!isNaN(d) && d.getTime() < cutoff) return false;
-      }
-      return true;
-    });
-    var pq = pageSlice(shown, 'queue');
-    var html = pq.rows.map(function (h) {
+    var res = HIST.queue || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
+    var fc = res.facets || {};
+    var html = res.rows.map(function (h) {
       var label = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[h.status] || h.status;
       return '<tr><td class="mono dim">#' + h.id + '</td>' +
         '<td class="mono">' + esc(h.from_name || '?') + ' → ' + esc(h.to_name || '?') + '</td>' +
         '<td class="mono">' + esc(h.repo) + (h.branch ? ' <span class="dim">⎇ ' + esc(h.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(h.summary || '') +
-          (h.doc ? '<details class="hfdoc"><summary>문서 보기</summary><pre>' + esc(h.doc) + '</pre></details>' : '') + '</td>' +
+          (h.has_doc ? '<details class="hfdoc" data-hfdoc="' + h.id + '"><summary>문서 보기</summary><pre class="dim">불러오는 중…</pre></details>' : '') + '</td>' +
         '<td>' + sdot(HANDOFF_DOT[h.status] || 's-end') + esc(label) + '</td>' +
         '<td class="mono dim">' + fmtTs(h.created_at) + (h.delivered_at ? ' → ' + fmtTs(h.delivered_at) : '') + '</td></tr>';
     });
     document.getElementById('queueTable').innerHTML =
       '<div class="htbar">' +
-      '<select class="hsel" data-qf="from">' + optsFor(froms, QF.from, '보낸 기기 전체') + '</select>' +
-      '<select class="hsel" data-qf="to">' + optsFor(tos, QF.to, '받는 기기 전체') + '</select>' +
-      '<select class="hsel" data-qf="project">' + optsFor(projs, QF.project, '프로젝트 전체') + '</select>' +
+      '<select class="hsel" data-qf="from">' + optsFor(fc.froms || [], QF.from, '보낸 기기 전체') + '</select>' +
+      '<select class="hsel" data-qf="to">' + optsFor(fc.tos || [], QF.to, '받는 기기 전체') + '</select>' +
+      '<select class="hsel" data-qf="project">' + optsFor(fc.projects || [], QF.project, '프로젝트 전체') + '</select>' +
       '<select class="hsel" data-qf="status">' +
       '<option value="">상태 전체</option>' +
       ['pending', 'delivered', 'done', 'cancelled'].map(function (v) {
         var lab = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[v];
         return '<option value="' + v + '"' + (QF.status === v ? ' selected' : '') + '>' + lab + '</option>';
       }).join('') + '</select>' +
-      '<select class="hsel" data-qf="days">' +
-      '<option value="0"' + (QF.days === '0' ? ' selected' : '') + '>전체 기간</option>' +
-      '<option value="1"' + (QF.days === '1' ? ' selected' : '') + '>최근 24시간</option>' +
-      '<option value="7"' + (QF.days === '7' ? ' selected' : '') + '>최근 7일</option>' +
-      '<option value="30"' + (QF.days === '30' ? ' selected' : '') + '>최근 30일</option>' +
-      '</select>' +
-      '<span class="hcount">' + shown.length + '</span>' +
+      daysSel('data-qf', QF.days) +
+      '<span class="hcount">' + res.total + '</span>' +
       '</div>' +
       table(['ID', '경로', '프로젝트', '태스크', '상태', '생성 → 수신'], html) +
-      pgbar('queue', pq);
+      pgbar('queue', res);
   }
+
+  // 핸드오프 '문서 보기' 펼침 — 목록에는 doc이 실리지 않으므로 첫 펼침에 단건 조회
+  document.addEventListener('click', function (e) {
+    var s = e.target.closest('details[data-hfdoc] > summary');
+    if (!s) return;
+    var det = s.parentElement;
+    if (det.dataset.loaded) return;
+    det.dataset.loaded = '1';
+    getJSON('/api/handoffs/' + det.dataset.hfdoc).then(function (h) {
+      var pre = det.querySelector('pre');
+      pre.textContent = h.doc || '(문서 없음)';
+      pre.classList.remove('dim');
+    }).catch(function () {
+      det.querySelector('pre').textContent = '불러오기 실패';
+      delete det.dataset.loaded;
+    });
+  });
 
   // ── 설정 탭 ──
   var SET_SITES = ['summary', 'digest', 'report'];
@@ -1498,27 +1498,11 @@
       .finally(function () { btn.disabled = false; });
   });
 
-  var AF = { device: '', agent: '', project: '', days: '0' };   // 자동화 탭 필터
+  var AF = { device: '', agent: '', fe: '', project: '', days: '0' };   // 자동화 탭 필터
   function renderAuto() {
-    var rows = HIST.autoSessions || [];
-    var devs = [], agents = [], projs = [];
-    rows.forEach(function (s) {
-      if (devs.indexOf(s.device) < 0) devs.push(s.device);
-      var al = agentLabel(s);
-      if (agents.indexOf(al) < 0) agents.push(al);
-      var pj = s.project || '(unknown)';
-      if (projs.indexOf(pj) < 0) projs.push(pj);
-    });
-    devs.sort(); agents.sort(); projs.sort();
-    var cutoff = daysCut(AF.days);
-    var shown = rows.filter(function (s) {
-      return (!AF.device || s.device === AF.device) &&
-        (!AF.agent || agentLabel(s) === AF.agent) &&
-        (!AF.project || (s.project || '(unknown)') === AF.project) &&
-        (!cutoff || tsMs(s.last_seen_hub) >= cutoff);
-    });
-    var p = pageSlice(shown, 'auto');
-    var html = p.rows.map(function (s, i) {
+    var res = HIST.auto || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
+    var fc = res.facets || {};
+    var html = res.rows.map(function (s, i) {
       var work = s.task_summary || s.last_prompt || '';
       var rid = 'autoev-' + i;
       return '<tr class="expandable" data-expand="' + rid + '" data-device="' + esc(s.device) + '"' +
@@ -1535,19 +1519,14 @@
     });
     document.getElementById('autoTable').innerHTML =
       '<div class="htbar">' +
-      '<select class="hsel" data-af="device">' + optsFor(devs, AF.device, '기기 전체') + '</select>' +
-      '<select class="hsel" data-af="agent">' + optsFor(agents, AF.agent, '에이전트 전체') + '</select>' +
-      '<select class="hsel" data-af="project">' + optsFor(projs, AF.project, '프로젝트 전체') + '</select>' +
-      '<select class="hsel" data-af="days">' +
-      '<option value="0"' + (AF.days === '0' ? ' selected' : '') + '>전체 기간</option>' +
-      '<option value="1"' + (AF.days === '1' ? ' selected' : '') + '>최근 24시간</option>' +
-      '<option value="7"' + (AF.days === '7' ? ' selected' : '') + '>최근 7일</option>' +
-      '<option value="30"' + (AF.days === '30' ? ' selected' : '') + '>최근 30일</option>' +
-      '</select>' +
-      '<span class="hcount">' + shown.length + '</span>' +
+      '<select class="hsel" data-af="device">' + optsFor(fc.devices || [], AF.device, '기기 전체') + '</select>' +
+      '<select class="hsel" data-af="agent">' + agentOptsFor(fc.agents, agentPairVal(AF)) + '</select>' +
+      '<select class="hsel" data-af="project">' + optsFor(fc.projects || [], AF.project, '프로젝트 전체') + '</select>' +
+      daysSel('data-af', AF.days) +
+      '<span class="hcount">' + res.total + '</span>' +
       '</div>' +
       table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '기간'], html) +
-      pgbar('auto', p);
+      pgbar('auto', res);
   }
 
   // 자동화 탭: 행 펼침 → 해당 세션 이벤트 로드
@@ -1618,26 +1597,10 @@
   }
 
   function renderTasks() {
-    var rows = (HIST.sessions || []).filter(function (s) { return s.frontend !== 'auto'; });
+    var res = HIST.tasks || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
+    var fc = res.facets || {};
     var f = HIST.taskF;
-    var devs = [], agents = [], projs = [];
-    rows.forEach(function (s) {
-      if (devs.indexOf(s.device) < 0) devs.push(s.device);
-      var al = agentLabel(s);
-      if (agents.indexOf(al) < 0) agents.push(al);
-      var p = s.project || '(unknown)';
-      if (projs.indexOf(p) < 0) projs.push(p);
-    });
-    devs.sort(); agents.sort(); projs.sort();
-    var cutoff = daysCut(f.days);
-    var shown = rows.filter(function (s) {
-      return (!f.device || s.device === f.device) &&
-        (!f.agent || agentLabel(s) === f.agent) &&
-        (!f.project || (s.project || '(unknown)') === f.project) &&
-        (!cutoff || tsMs(s.last_seen_hub) >= cutoff);
-    });
-    var p = pageSlice(shown, 'tasks');
-    var html = p.rows.map(function (s) {
+    var html = res.rows.map(function (s) {
       var work = s.task_summary || s.last_prompt || '';  // 응답문(last_summary)은 작업 칸에 싣지 않음
       return '<tr><td class="mono dim">#' + (s.row_id != null ? s.row_id : '') + '</td>' +
         '<td class="mono">' + esc(s.device) + '</td>' +
@@ -1654,19 +1617,14 @@
     });
     document.getElementById('tasksTable').innerHTML =
       '<div class="htbar">' +
-      '<select class="hsel" data-taskf="device">' + optsFor(devs, f.device, '기기 전체') + '</select>' +
-      '<select class="hsel" data-taskf="agent">' + optsFor(agents, f.agent, '에이전트 전체') + '</select>' +
-      '<select class="hsel" data-taskf="project">' + optsFor(projs, f.project, '프로젝트 전체') + '</select>' +
-      '<select class="hsel" data-taskf="days">' +
-      '<option value="0"' + (f.days === '0' ? ' selected' : '') + '>전체 기간</option>' +
-      '<option value="1"' + (f.days === '1' ? ' selected' : '') + '>최근 24시간</option>' +
-      '<option value="7"' + (f.days === '7' ? ' selected' : '') + '>최근 7일</option>' +
-      '<option value="30"' + (f.days === '30' ? ' selected' : '') + '>최근 30일</option>' +
-      '</select>' +
-      '<span class="hcount">' + shown.length + '</span>' +
+      '<select class="hsel" data-taskf="device">' + optsFor(fc.devices || [], f.device, '기기 전체') + '</select>' +
+      '<select class="hsel" data-taskf="agent">' + agentOptsFor(fc.agents, agentPairVal(f)) + '</select>' +
+      '<select class="hsel" data-taskf="project">' + optsFor(fc.projects || [], f.project, '프로젝트 전체') + '</select>' +
+      daysSel('data-taskf', f.days) +
+      '<span class="hcount">' + res.total + '</span>' +
       '</div>' +
       table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '모델', '기간', ''], html) +
-      pgbar('tasks', p);
+      pgbar('tasks', res);
   }
 
   // 이력 탭 상호작용 (위임)
@@ -1681,19 +1639,27 @@
       renderDevices(); return;
     }
     var dt = e.target.closest('[data-devtasks]');
-    if (dt) { HIST.taskF.device = dt.dataset.devtasks; setView('tasks'); }
+    if (dt) { HIST.taskF.device = dt.dataset.devtasks; PG.tasks = 1; setView('tasks'); }
   });
-  PG_RENDER.tasks = renderTasks; PG_RENDER.queue = renderQueue;
-  PG_RENDER.events = renderEvents; PG_RENDER.auto = renderAuto;
+  PG_RENDER.tasks = loadTasks; PG_RENDER.queue = loadQueue;
+  PG_RENDER.events = loadEvents; PG_RENDER.auto = loadAuto;
   document.addEventListener('change', function (e) {
     var sel = e.target.closest('[data-taskf]');
-    if (sel) { HIST.taskF[sel.dataset.taskf] = sel.value; PG.tasks = 1; renderTasks(); return; }
+    if (sel) {
+      if (sel.dataset.taskf === 'agent') setAgentPair(HIST.taskF, sel.value);
+      else HIST.taskF[sel.dataset.taskf] = sel.value;
+      PG.tasks = 1; loadTasks(); return;
+    }
     var qsel = e.target.closest('[data-qf]');
-    if (qsel) { QF[qsel.dataset.qf] = qsel.value; PG.queue = 1; renderQueue(); return; }
+    if (qsel) { QF[qsel.dataset.qf] = qsel.value; PG.queue = 1; loadQueue(); return; }
     var esel = e.target.closest('[data-ef]');
-    if (esel) { EF[esel.dataset.ef] = esel.value; PG.events = 1; renderEvents(); return; }
+    if (esel) { EF[esel.dataset.ef] = esel.value; PG.events = 1; loadEvents(); return; }
     var asel = e.target.closest('[data-af]');
-    if (asel) { AF[asel.dataset.af] = asel.value; PG.auto = 1; renderAuto(); }
+    if (asel) {
+      if (asel.dataset.af === 'agent') setAgentPair(AF, asel.value);
+      else AF[asel.dataset.af] = asel.value;
+      PG.auto = 1; loadAuto();
+    }
   });
 
   // 기기 폐기

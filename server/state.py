@@ -344,16 +344,41 @@ def assemble(c) -> dict:
     }
 
 
-def feed(c, limit: int = 50) -> list[dict]:
+_FEED_FROM = (
+    " FROM events e JOIN devices d ON d.id=e.device_id"
+    " LEFT JOIN sessions s ON s.device_id=e.device_id AND s.agent=e.agent"
+    "   AND s.session_id=e.session_id"
+)
+
+
+def _feed_conds(device: str = "", project: str = "", days: int = 0,
+                noauto: bool = False) -> tuple[list[str], list]:
+    """이벤트 피드 공용 WHERE 조각. '(unknown)'은 UI의 빈 프로젝트 표기와 같은 의미."""
+    conds, args = ["e.event != 'heartbeat'"], []
+    if noauto:
+        conds.append("(s.frontend IS NULL OR s.frontend != 'auto')")
+    if device:
+        conds.append("d.name = ?"); args.append(device)
+    if project == "(unknown)":
+        conds.append("(e.project IS NULL OR e.project = '')")
+    elif project:
+        conds.append("e.project = ?"); args.append(project)
+    if days > 0:
+        conds.append("e.ts_hub >= datetime('now', ?)"); args.append(f"-{int(days)} days")
+    return conds, args
+
+
+def feed(c, limit: int = 50, offset: int = 0, device: str = "", project: str = "",
+         days: int = 0, noauto: bool = False) -> list[dict]:
+    conds, args = _feed_conds(device, project, days, noauto)
     rows = c.execute(
         "SELECT e.id AS eid, e.ts_hub, e.event, e.agent, e.session_id, e.project,"
         " d.name AS device, e.payload, s.task_summary, s.last_prompt, s.frontend,"
         " s.rowid AS srow"
-        " FROM events e JOIN devices d ON d.id=e.device_id"
-        " LEFT JOIN sessions s ON s.device_id=e.device_id AND s.agent=e.agent"
-        "   AND s.session_id=e.session_id"
-        " WHERE e.event != 'heartbeat'"
-        " ORDER BY e.id DESC LIMIT ?", (limit if limit > 0 else -1,),  # 0 = 무제한
+        + _FEED_FROM +
+        " WHERE " + " AND ".join(conds) +
+        " ORDER BY e.id DESC LIMIT ? OFFSET ?",
+        args + [limit if limit > 0 else -1, max(offset, 0)],  # limit 0 = 무제한
     ).fetchall()
     out = []
     for r in rows:
@@ -375,3 +400,26 @@ def feed(c, limit: int = 50) -> list[dict]:
             "note": str(note)[:120],
         })
     return out
+
+
+def feed_page(c, page: int, per: int, device: str = "", project: str = "",
+              days: int = 0, noauto: bool = False) -> dict:
+    """이벤트 탭용 페이지 응답 — 필터를 서버에서 걸고 해당 페이지만 싣는다.
+    facets(드롭다운 옵션)는 기간·선택 필터와 무관하게 탭 범위(비heartbeat·noauto) 전체 기준."""
+    conds, args = _feed_conds(device, project, days, noauto)
+    total = c.execute(
+        "SELECT COUNT(*)" + _FEED_FROM + " WHERE " + " AND ".join(conds), args
+    ).fetchone()[0]
+    pages = max(1, -(-total // per))
+    page = min(max(page, 1), pages)
+    rows = feed(c, limit=per, offset=(page - 1) * per,
+                device=device, project=project, days=days, noauto=noauto)
+    fconds, fargs = _feed_conds(noauto=noauto)
+    fwhere = " WHERE " + " AND ".join(fconds)
+    devices = [r[0] for r in c.execute(
+        "SELECT DISTINCT d.name" + _FEED_FROM + fwhere + " ORDER BY d.name", fargs)]
+    projects = [r[0] or "(unknown)" for r in c.execute(
+        "SELECT DISTINCT COALESCE(e.project,'')" + _FEED_FROM + fwhere +
+        " ORDER BY 1", fargs)]
+    return {"rows": rows, "total": total, "page": page, "pages": pages,
+            "facets": {"devices": devices, "projects": sorted(set(projects))}}

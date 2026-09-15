@@ -152,10 +152,16 @@ async def get_state(request: Request):
 
 
 @app.get("/api/feed")
-async def get_feed(request: Request, limit: int = 50):
+async def get_feed(request: Request, limit: int = 50, page: int = 0, device: str = "",
+                   project: str = "", days: int = 0, noauto: int = 0):
+    """page=0(기본)은 기존 리스트 응답(메인 피드·구형 클라이언트).
+    page>=1이면 이벤트 탭용 {rows,total,page,pages,facets} — 필터·페이지 단위로만 싣는다."""
     _require(request, ("device", "admin"))
     with db.tx() as c:
-        return state.feed(c, limit)
+        if page < 1:
+            return state.feed(c, limit)
+        per = limit if 1 <= limit <= 200 else 20
+        return state.feed_page(c, page, per, device, project, days, bool(noauto))
 
 
 @app.get("/api/history/events")
@@ -193,23 +199,10 @@ async def history_events(request: Request, device: str = "", agent: str = "",
     return out
 
 
-@app.get("/api/history/sessions")
-async def history_sessions(request: Request, limit: int = 2000, days: int = 0):
-    """종료 포함 전체 세션 이력 — 태스크 탭용. days=0이면 전체 기간. 관리자 전용(기기 쪽 소비자 없음)."""
-    _require(request, ("admin",))
-    q = ("SELECT s.rowid AS row_id, s.*, d.name AS device, d.last_seen_at AS device_seen_at"
-         " FROM sessions s JOIN devices d ON d.id=s.device_id")
-    args: list = []
-    if days > 0:
-        q += " WHERE s.last_seen_hub >= datetime('now', ?)"
-        args.append(f"-{int(days)} days")
-    q += " ORDER BY s.last_seen_hub DESC LIMIT ?"
-    args.append(limit if limit > 0 else -1)  # 0 = 무제한
-    with db.tx() as c:
-        rows = [dict(r) for r in c.execute(q, args).fetchall()]
+def _overlay_unconfirmed(rows: list[dict]):
+    """unconfirmed 오버레이 — /api/state(state.assemble §4.1)와 같은 판정."""
     now = datetime.datetime.now(datetime.timezone.utc)
     for r in rows:
-        # unconfirmed 오버레이 — /api/state(state.assemble §4.1)와 같은 판정
         seen = state._age_min(now, r["last_seen_hub"]) or 0
         dev_age = state._age_min(now, r.pop("device_seen_at", None))
         dev_online = dev_age is not None and dev_age <= CFG.device_online_min
@@ -218,6 +211,85 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0):
             or (r["state"] in ("awaiting_input", "needs_approval") and not dev_online)
         )
     return rows
+
+
+# 태스크·자동화 탭 페이지 행 — s.* 대신 표시 컬럼만 (last_summary·tokens_cum 등 큰 필드 제외)
+_SESSION_PAGE_COLS = (
+    "s.rowid AS row_id, d.name AS device, s.agent, s.session_id, s.project, s.branch,"
+    " s.state, s.end_reason, s.turns, s.model, s.effort, s.frontend, s.started_at,"
+    " s.last_seen_hub, s.task_summary, substr(COALESCE(s.last_prompt,''), 1, 200) AS last_prompt,"
+    " d.last_seen_at AS device_seen_at"
+)
+
+
+def _session_conds(device: str = "", agent: str = "", fe: str = "",
+                   project: str = "", days: int = 0, auto: int = -1) -> tuple[list[str], list]:
+    """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭."""
+    conds, args = [], []
+    if auto == 1:
+        conds.append("s.frontend = 'auto'")
+    elif auto == 0:
+        conds.append("(s.frontend IS NULL OR s.frontend != 'auto')")
+    if device:
+        conds.append("d.name = ?"); args.append(device)
+    if agent:
+        conds.append("s.agent = ?"); args.append(agent)
+    if fe == "-":
+        conds.append("(s.frontend IS NULL OR s.frontend = '')")
+    elif fe:
+        conds.append("s.frontend = ?"); args.append(fe)
+    if project == "(unknown)":
+        conds.append("(s.project IS NULL OR s.project = '')")
+    elif project:
+        conds.append("s.project = ?"); args.append(project)
+    if days > 0:
+        conds.append("s.last_seen_hub >= datetime('now', ?)"); args.append(f"-{int(days)} days")
+    return conds, args
+
+
+@app.get("/api/history/sessions")
+async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
+                           page: int = 0, device: str = "", agent: str = "",
+                           fe: str = "", project: str = "", auto: int = -1):
+    """종료 포함 전체 세션 이력 — 태스크·자동화 탭용. 관리자 전용(기기 쪽 소비자 없음).
+    page=0(기본)은 기존 전체 리스트 응답. page>=1이면 필터·페이지 단위 {rows,total,page,pages,facets}."""
+    _require(request, ("admin",))
+    base_from = " FROM sessions s JOIN devices d ON d.id=s.device_id"
+    if page < 1:
+        q = "SELECT s.rowid AS row_id, s.*, d.name AS device, d.last_seen_at AS device_seen_at" + base_from
+        args: list = []
+        if days > 0:
+            q += " WHERE s.last_seen_hub >= datetime('now', ?)"
+            args.append(f"-{int(days)} days")
+        q += " ORDER BY s.last_seen_hub DESC LIMIT ?"
+        args.append(limit if limit > 0 else -1)  # 0 = 무제한
+        with db.tx() as c:
+            rows = [dict(r) for r in c.execute(q, args).fetchall()]
+        return _overlay_unconfirmed(rows)
+
+    per = limit if 1 <= limit <= 200 else 20
+    conds, cargs = _session_conds(device, agent, fe, project, days, auto)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    with db.tx() as c:
+        total = c.execute("SELECT COUNT(*)" + base_from + where, cargs).fetchone()[0]
+        pages = max(1, -(-total // per))
+        page = min(max(page, 1), pages)
+        rows = [dict(r) for r in c.execute(
+            "SELECT " + _SESSION_PAGE_COLS + base_from + where +
+            " ORDER BY s.last_seen_hub DESC LIMIT ? OFFSET ?",
+            cargs + [per, (page - 1) * per]).fetchall()]
+        # facets(드롭다운 옵션)는 탭 범위(auto 여부)만 반영 — 선택 필터·기간과 무관
+        fconds, fargs = _session_conds(auto=auto)
+        fwhere = (" WHERE " + " AND ".join(fconds)) if fconds else ""
+        devices = [r[0] for r in c.execute(
+            "SELECT DISTINCT d.name" + base_from + fwhere + " ORDER BY d.name", fargs)]
+        agents = [{"agent": r[0], "frontend": r[1]} for r in c.execute(
+            "SELECT DISTINCT s.agent, COALESCE(s.frontend,'')" + base_from + fwhere +
+            " ORDER BY 1, 2", fargs)]
+        projects = sorted({r[0] or "(unknown)" for r in c.execute(
+            "SELECT DISTINCT COALESCE(s.project,'')" + base_from + fwhere, fargs)})
+    return {"rows": _overlay_unconfirmed(rows), "total": total, "page": page, "pages": pages,
+            "facets": {"devices": devices, "agents": agents, "projects": projects}}
 
 
 @app.post("/api/sessions/end")
@@ -309,7 +381,8 @@ async def create_handoff(request: Request):
 
 
 @app.get("/api/handoffs")
-async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin: str = "", limit: int = 50):
+async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin: str = "", limit: int = 50,
+                        page: int = 0, src: str = "", dst: str = "", status: str = "", days: int = 0):
     actor = _require(request, ("device", "admin"))
     with db.tx() as c:
         if mine and actor["device"]:
@@ -328,6 +401,47 @@ async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin
                 q += " AND (" + " OR ".join(conds) + ")"
                 args += cargs
             rows = c.execute(q + " ORDER BY h.id", args).fetchall()
+        elif page >= 1:
+            # 핸드오프 탭 페이지 응답 — doc/patches(수백 KB)는 싣지 않고 펼칠 때 단건 조회
+            hf_from = (" FROM handoffs h"
+                       " LEFT JOIN devices fd ON fd.id=h.from_device"
+                       " LEFT JOIN devices td ON td.id=h.to_device")
+            conds, cargs = [], []
+            if src == "?":                      # 보낸 기기 미상(장치 기록 없음)
+                conds.append("fd.name IS NULL")
+            elif src:
+                conds.append("fd.name = ?"); cargs.append(src)
+            if dst == "?":
+                conds.append("td.name IS NULL")
+            elif dst:
+                conds.append("td.name = ?"); cargs.append(dst)
+            if repo:
+                conds.append("h.repo = ?"); cargs.append(repo)
+            if status:
+                conds.append("h.status = ?"); cargs.append(status)
+            if days > 0:
+                conds.append("h.created_at >= datetime('now', ?)"); cargs.append(f"-{int(days)} days")
+            where = (" WHERE " + " AND ".join(conds)) if conds else ""
+            per = limit if 1 <= limit <= 200 else 20
+            total = c.execute("SELECT COUNT(*)" + hf_from + where, cargs).fetchone()[0]
+            pages = max(1, -(-total // per))
+            page = min(max(page, 1), pages)
+            rows = c.execute(
+                "SELECT h.id, h.repo, h.branch, h.summary, h.status, h.created_at, h.delivered_at,"
+                " fd.name AS from_name, td.name AS to_name,"
+                " (h.doc IS NOT NULL AND h.doc != '') AS has_doc"
+                + hf_from + where + " ORDER BY h.id DESC LIMIT ? OFFSET ?",
+                cargs + [per, (page - 1) * per]).fetchall()
+            facets = {
+                "froms": [r[0] for r in c.execute(
+                    "SELECT DISTINCT COALESCE(fd.name,'?')" + hf_from + " ORDER BY 1")],
+                "tos": [r[0] for r in c.execute(
+                    "SELECT DISTINCT COALESCE(td.name,'?')" + hf_from + " ORDER BY 1")],
+                "projects": [r[0] for r in c.execute(
+                    "SELECT DISTINCT h.repo FROM handoffs h ORDER BY 1")],
+            }
+            return {"rows": [{**dict(r), "hf": f"HF-{r['id']:03d}"} for r in rows],
+                    "total": total, "page": page, "pages": pages, "facets": facets}
         else:
             rows = c.execute(
                 "SELECT h.*, fd.name AS from_name, td.name AS to_name FROM handoffs h"
@@ -337,6 +451,21 @@ async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin
         return [
             {**dict(r), "hf": f"HF-{r['id']:03d}"} for r in rows
         ]
+
+
+@app.get("/api/handoffs/{handoff_id}")
+async def get_handoff(request: Request, handoff_id: int):
+    """핸드오프 단건(문서 포함) — 핸드오프 탭 '문서 보기' 펼침용. 관리자 전용."""
+    _require(request, ("admin",))
+    with db.tx() as c:
+        r = c.execute(
+            "SELECT h.*, fd.name AS from_name, td.name AS to_name FROM handoffs h"
+            " LEFT JOIN devices fd ON fd.id=h.from_device"
+            " LEFT JOIN devices td ON td.id=h.to_device"
+            " WHERE h.id=?", (handoff_id,)).fetchone()
+    if not r:
+        raise HTTPException(404, "핸드오프 없음")
+    return {**dict(r), "hf": f"HF-{r['id']:03d}"}
 
 
 @app.patch("/api/handoffs/{handoff_id}")
