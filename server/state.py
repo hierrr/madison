@@ -34,6 +34,15 @@ def _parse_ts(ts: str) -> datetime | None:
         return None
 
 
+SYNTHETIC_MODEL = "<synthetic>"   # Claude Code가 API 응답 없이 로컬 생성한 메시지의 model 표식
+
+
+def _real_model(payload: dict) -> str:
+    """이벤트가 실은 model. "<synthetic>"(인증 만료·API 오류 등)은 실제 모델이 아니므로 빈 값."""
+    m = str(payload.get("model") or "")
+    return "" if m == SYNTHETIC_MODEL else m
+
+
 def ingest(c, device_id: int, ev: dict) -> str:
     """이벤트 1건 수신. 반환: inserted | duplicate | ignored.
     미지의 event 값도 저장은 하되(§14-3) 상태 폴드는 알려진 것만."""
@@ -133,9 +142,11 @@ def ingest(c, device_id: int, ev: dict) -> str:
     if payload.get("collection_mode"):
         sets += ["collection_mode=?"]; args += [str(payload["collection_mode"])[:20]]
 
-    # 모델·에포트: 어떤 이벤트든 실려 오면 최신값으로 반영
-    if payload.get("model"):
-        sets += ["model=?"]; args += [str(payload["model"])[:60]]
+    # 모델·에포트: 어떤 이벤트든 실려 오면 최신값으로 반영.
+    # 단 "<synthetic>"은 무시 — 구버전 수집기가 실어 와도 마지막 실제 모델을 지킨다.
+    model = _real_model(payload)
+    if model:
+        sets += ["model=?"]; args += [model[:60]]
     eff = payload.get("effort")
     if isinstance(eff, dict):  # 훅에 따라 {"level": "max"} 객체 형태 (실측)
         eff = eff.get("level")
@@ -182,7 +193,7 @@ def ingest(c, device_id: int, ev: dict) -> str:
             from . import tokens as toklib
             toklib.fold(c, device_id, agent, session_id,
                         project=str(project or row["project"] or ""),
-                        model=str(payload.get("model") or row["model"] or ""),
+                        model=_real_model(payload) or str(row["model"] or ""),
                         frontend=str(payload.get("frontend") or row["frontend"] or ""),
                         ts_device=ts_device, ts_hub=ts_hub,
                         tokens=payload["tokens"], count_turn=(event == "turn_done"))

@@ -133,6 +133,22 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(tok["cum"]["model-b"], {"in": 10, "out": 5, "cr": 0, "cw": 0, "th": 0})
         self.assertNotIn("<synthetic>", tok["cum"])
 
+    def test_claude_model_fallback_skips_synthetic_lines(self):
+        # 훅 입력에 model이 없으면 전사본 꼬리의 마지막 assistant 라인을 쓴다 — 인증 만료·API 오류 같은
+        # <synthetic> 라인이 마지막이어도 직전 정상 응답의 모델을 골라야 한다
+        hook = {"session_id": "s1", "cwd": str(REPO), "reason": "prompt_input_exit"}
+        transcript = "\n".join([
+            self.assistant_line("model-a", {"input_tokens": 20, "output_tokens": 8}),
+            self.assistant_line("<synthetic>", {"input_tokens": 0, "output_tokens": 0}),
+        ]) + "\n"
+        payload = self.run_report_with_transcript("claude-code", "session_end", dict(hook), transcript)
+        self.assertEqual(payload["detail"]["model"], "model-a")
+
+        # 정상 응답이 하나도 없으면 빈 값 — 허브가 기존 값을 유지한다
+        only_synthetic = self.assistant_line("<synthetic>", {"input_tokens": 0, "output_tokens": 0}) + "\n"
+        payload = self.run_report_with_transcript("claude-code", "session_end", dict(hook), only_synthetic)
+        self.assertEqual(payload["detail"]["model"], "")
+
     def test_codex_turn_done_uses_last_counter_and_splits_cached(self):
         transcript = "\n".join([
             json.dumps({"type": "session_meta", "payload": {"originator": "codex-tui", "source": "cli"}}),

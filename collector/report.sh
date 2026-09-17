@@ -206,6 +206,15 @@ fi
 
 # ── 모델/effort ───────────────────────────────────────
 # Codex는 model을 공식 훅 필드로 제공한다. effort는 훅 필드 우선, rollout turn_context 폴백.
+# Claude Code는 훅에 model이 없으면 전사본 꼬리의 마지막 assistant 라인에서 취한다.
+# "<synthetic>"은 Claude Code가 API 응답 없이 로컬 생성한 메시지(인증 만료·API 오류·한도 초과 등)의
+# 표식이라 실제 모델이 아니다 — 건너뛰고 직전 정상 응답의 모델을 쓴다(없으면 빈 값 → 허브가 기존 값 유지).
+claude_transcript_model() {
+  tail -n 60 "$TP" 2>/dev/null | jq -rs '
+    [.[] | select(type=="object" and .type=="assistant" and (.message.model // "") != "<synthetic>")]
+    | last | .message.model // ""
+  ' 2>/dev/null || true
+}
 MODEL=$(printf '%s' "$IN" | jq -r '.model // ""' 2>/dev/null) || MODEL=""
 EFFORT=$(printf '%s' "$IN" | jq -r '
   .effort | if type=="object" then (.level // "") elif type=="string" then . else "" end
@@ -218,9 +227,7 @@ if [ "$AGENT" = "codex-cli" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
     .payload.effort | if type=="object" then (.level // "") elif type=="string" then . else "" end
   ' 2>/dev/null) || EFFORT=""
 elif [ "$AGENT" = "claude-code" ] && [ -z "$MODEL" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
-  MODEL=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '
-    [.[] | select(type=="object" and .type=="assistant")] | last | .message.model // ""
-  ' 2>/dev/null) || MODEL=""
+  MODEL=$(claude_transcript_model)
 fi
 
 # ── 프로젝트/브랜치 ────────────────────────────────────
@@ -323,9 +330,7 @@ case "$EV" in
       if [ -z "$MODEL" ]; then
         # Stop 발화 직후 전사본 flush 레이스 — 한 번만 짧게 재시도
         sleep 0.3
-        MODEL=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '
-          [.[] | select(type=="object" and .type=="assistant")] | last | .message.model // ""
-        ' 2>/dev/null) || MODEL=""
+        MODEL=$(claude_transcript_model)
       fi
       if [ -z "$SUMMARY" ]; then
         SUMMARY=$(tail -n 60 "$TP" 2>/dev/null | jq -rs '

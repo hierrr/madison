@@ -55,6 +55,27 @@ class StateCollectionModeTests(unittest.TestCase):
         self.assertFalse(session["partial"])
         self.assertEqual(session["collection_mode"], "hooks")
 
+    def test_synthetic_model_never_overwrites_real_model(self):
+        # Claude Code 전사본의 <synthetic>(인증 만료·API 오류 메시지) 표식이 session_end에 실려 와도
+        # 마지막 실제 모델을 지킨다. effort는 빈 값이라 원래부터 덮이지 않는다.
+        base = {"frontend": "cli", "collection_mode": "hooks", "agent": "claude-code"}
+        real = {**self.event("turn_done", "e1", "2026-09-14T00:00:01Z",
+                             {"model": "claude-fable-5", "effort": "xhigh", "summary": "Done"}), **base}
+        synthetic = {**self.event("session_end", "e2", "2026-09-16T00:00:02Z",
+                                  {"model": "<synthetic>", "effort": "", "reason": "prompt_input_exit"}), **base}
+        state.ingest(self.conn, 1, real)
+        state.ingest(self.conn, 1, synthetic)
+        row = self.conn.execute("SELECT model, effort FROM sessions WHERE session_id='session-1'").fetchone()
+        self.assertEqual(row["model"], "claude-fable-5")
+        self.assertEqual(row["effort"], "xhigh")
+
+        # 처음부터 <synthetic>뿐인 세션(인증 만료로 응답이 전혀 없던 자동화 실행)은 모델을 비워 둔다
+        first = {**self.event("session_end", "e3", "2026-09-16T00:00:03Z",
+                              {"model": "<synthetic>", "reason": "other"}), **base, "session_id": "session-2"}
+        state.ingest(self.conn, 1, first)
+        row = self.conn.execute("SELECT model FROM sessions WHERE session_id='session-2'").fetchone()
+        self.assertIsNone(row["model"])
+
     def test_old_codex_event_remains_marked_as_partial(self):
         state.ingest(
             self.conn,
