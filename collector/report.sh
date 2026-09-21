@@ -25,15 +25,29 @@ command -v jq >/dev/null 2>&1 || exit 0
 mkdir -p "$THROTTLE_DIR" 2>/dev/null
 
 # ── 락 (mkdir 기반 — macOS엔 flock 기본 부재) ──────────
+LOCK_STALE_SEC=600  # 정상 보유 최장치(만선 스풀 flush ≈ 250s)의 2배 — 넘으면 소유자가 죽은 락
+
 lock_acquire() {
-  local i=0
+  local i=0 mt now
   while ! mkdir "$LOCK" 2>/dev/null; do
     i=$((i + 1)); [ "$i" -ge 20 ] && return 1
+    # 스테일 락 회수 — 잡은 채 죽은 락(강제 종료·전원 차단)을 방치하면 이후 모든 이벤트가
+    # 스풀에 갇혀 허브에 영영 안 간다 (2026-09-16 실사고). rename이 원자적이라
+    # 경합해도 한 인스턴스만 치우고, 진 쪽은 다음 바퀴의 mkdir 경쟁으로 돌아간다.
+    mt=$(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null) || mt=""
+    now=$(date +%s)
+    if [ -n "$mt" ] && [ $((now - mt)) -ge "$LOCK_STALE_SEC" ]; then
+      mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$" 2>/dev/null
+      continue
+    fi
     sleep 0.05
   done
+  # 보유 중 종료 신호에도 락을 정리 — kill -9·전원 차단만 위 나이 기준 회수에 맡긴다
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+  trap 'rmdir "$LOCK" 2>/dev/null; exit 0' INT TERM HUP
   return 0
 }
-lock_release() { rmdir "$LOCK" 2>/dev/null; return 0; }
+lock_release() { rmdir "$LOCK" 2>/dev/null; trap - EXIT INT TERM HUP; return 0; }
 
 spool_append() {  # $1=json 한 줄. O_APPEND 단일 write라 락 실패 시에도 안전한 편
   printf '%s\n' "$1" >> "$SPOOL" 2>/dev/null
@@ -55,6 +69,11 @@ post_events() {  # $1=timeout, $2=body → http code
 
 spool_flush() {  # 호출 전 락 획득 전제. rename-first로 동시(락 실패) append 유실 방지 (§7.2)
   local work="$SPOOL.inflight" n chunk body code total
+  # 죽은 flush가 남긴 inflight 회수 — 락 보유 중이라 안전. inflight가 더 오래됐으므로 앞에 둔다
+  if [ -s "$work" ]; then
+    [ -s "$SPOOL" ] && cat "$SPOOL" >> "$work"
+    mv "$work" "$SPOOL" 2>/dev/null || return 1
+  fi
   [ -s "$SPOOL" ] || return 0
   # 스풀을 먼저 옆으로 치운다 — 이후의 락-없는 append는 새로 생기는 $SPOOL로 감(유실 없음)
   mv "$SPOOL" "$work" 2>/dev/null || return 1
@@ -109,7 +128,7 @@ notify_handoffs() {  # 새 pending 핸드오프 → 데스크탑 알림 (macOS).
 # ── flush 전용 모드 (flush.sh/launchd 플러셔가 호출) ────
 if [ "$EV" = "__flush" ]; then
   notify_handoffs
-  if [ -s "$SPOOL" ]; then
+  if [ -s "$SPOOL" ] || [ -s "$SPOOL.inflight" ]; then
     if lock_acquire; then spool_flush; lock_release; fi
   fi
   exit 0
@@ -399,8 +418,8 @@ EVJSON=$(jq -cn \
   '{agent:$agent, session_id:$sid, event:$ev, ts:$ts, event_id:$eid,
     project:$project, branch:$branch, origin:$origin, subdir:$subdir, detail:$detail}' 2>/dev/null) || exit 0
 
-# ── 전송 (순서 보존: 스풀이 있으면 뒤에 붙여 함께 플러시) ──
-if [ -s "$SPOOL" ]; then
+# ── 전송 (순서 보존: 스풀·죽은 flush의 inflight가 있으면 뒤에 붙여 함께 플러시) ──
+if [ -s "$SPOOL" ] || [ -s "$SPOOL.inflight" ]; then
   if lock_acquire; then
     spool_append "$EVJSON"; spool_cap; spool_flush; lock_release
   else
