@@ -159,6 +159,16 @@ def recent_corrections(c, projects, days=30) -> list:
     return [dict(r) for r in c.execute(q, (f"-{days} days", *projects))]
 
 
+def period_corrections(c, days) -> list:
+    """기간에 속한 날들에 대한 사람의 재라벨 기록 — 주간·월간 프롬프트에 사례로 넣는다.
+    일일에서 바로잡아도 종합 생성이 서비스 단서에 끌려 같은 항목을 되돌리는 재발 방지."""
+    if not days:
+        return []
+    q = (f"SELECT day, project, before_service, after_service, reason FROM corrections"
+         f" WHERE day IN ({','.join('?' * len(days))}) ORDER BY id DESC LIMIT 20")
+    return [dict(r) for r in c.execute(q, tuple(days))]
+
+
 def relabel(range_: str, day: str, session_key: str, service: str, reason: str = "") -> dict:
     """사람의 재라벨 — 배치를 고치고 교정 기록을 남기며 그 날을 재생성 대기로 표시한다.
     본문은 다음 생성에서 바뀐다(즉시 문장을 고치지 않는다 — 문장은 모델이, 배치 결정은 사람이)."""
@@ -416,13 +426,16 @@ def daily_for(day: str, today: str) -> str:
 
 def gen_period(range_: str, day: str):
     today = today_local()
-    dailies = [(d, md) for d in report.period_days(range_, day, today)
+    days = report.period_days(range_, day, today)
+    dailies = [(d, md) for d in days
                for md in [daily_for(d, today)] if md and md != report.EMPTY_MD]
     if not dailies:
         return report.EMPTY_MD, None, None
     with db.tx() as c:
         reg = registry.snapshot(c)
-    res = llm.run("report", report.build_period_prompt(range_, day, dailies, reg), ref=f"{range_}:{day}")
+        corrections = period_corrections(c, days)
+    res = llm.run("report", report.build_period_prompt(range_, day, dailies, reg, corrections),
+                  ref=f"{range_}:{day}")
     fallback = report.fallback_period_md(dailies)
     if not res.ok:
         return None, res, fallback

@@ -557,9 +557,10 @@ def build_day_prompt(day, work, reg: Registry | None = None, prev=None, correcti
             + _corrections_note(corrections) + output + "로그:\n" + "\n\n".join(blocks))
 
 
-def build_period_prompt(range_, day, dailies, reg: Registry | None = None):
+def build_period_prompt(range_, day, dailies, reg: Registry | None = None, corrections=()):
     """주간·월간: 일일 업무일지 모음 → 종합 보고 요청 (LLM 1회 호출, 텍스트 출력).
-    dailies = [(날짜, 업무일지 md)] 날짜순. 원본 로그가 아니라 일일 결과를 재료로 쓴다."""
+    dailies = [(날짜, 업무일지 md)] 날짜순. 원본 로그가 아니라 일일 결과를 재료로 쓴다.
+    corrections: 기간 내 사람의 재라벨 기록 — 일일에서 바로잡은 배치를 종합이 단서로 되돌리지 않게 한다."""
     reg = reg or Registry.from_env()
     label = {"week": "한 주(월~일)", "month": "한 달"}[range_]
     kind = {"week": "주간보고", "month": "월간보고"}[range_]
@@ -591,6 +592,7 @@ def build_period_prompt(range_, day, dailies, reg: Registry | None = None):
     }[range_]
     body = "\n\n".join(f"=== {d} ({_weekday(d)}) ===\n{md}" for d, md in dailies)
     return (head + structure + rules + _STYLE + _services_note(reg, allow_proposals=False)
+            + _corrections_note(corrections)
             + "출력: 머리말·맺음말·헤더 없이 불릿만, 들여쓰기 0/4/8/12칸.\n\n업무일지:\n" + body)
 
 
