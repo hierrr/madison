@@ -268,14 +268,21 @@ def gather(c, range_, day):
     지시·응답이 하나도 없는 프로젝트, REPORT_EXCLUDE_PROJECTS 프로젝트, 자동화 세션은 제외."""
     pred = _pred(range_)
     skip = ("", "summarizer", "llm-cwd") + CFG.report_exclude_projects
+    # 제외 프로젝트의 세션이 다른 디렉터리(상위·형제 cwd)에서 낸 이벤트는 다른 project로 라벨돼
+    # 이벤트 단위 필터를 빠져나간다 — 세션의 소속 프로젝트로도 한 번 더 거른다
+    excl = CFG.report_exclude_projects
+    sess_excl = (f" AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id"
+                 f" AND s.agent=e.agent AND s.session_id=e.session_id"
+                 f" AND s.project IN ({','.join('?' * len(excl))}))" if excl else "")
     rows = c.execute(
         f"SELECT e.project, e.event, e.session_id, e.device_id, e.payload, d.name AS device,"
         f" strftime('%m/%d %H:%M', e.ts_hub, 'localtime') AS t"
         f" FROM events e LEFT JOIN devices d ON d.id=e.device_id"
         f" WHERE e.event IN ('prompt','turn_done')"
         f"   AND COALESCE(e.project,'') NOT IN ({','.join('?' * len(skip))})"
+        f"{sess_excl}"
         f"   AND {pred} AND {NOT_AUTO} ORDER BY e.ts_hub, e.id",
-        skip + _params(range_, day)).fetchall()
+        skip + excl + _params(range_, day)).fetchall()
     proj = {}
     for r in rows:
         p = proj.setdefault(r["project"], {"sess": {}, "turns": 0})
