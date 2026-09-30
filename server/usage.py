@@ -314,13 +314,14 @@ def parse_codex_rpc(result: dict) -> dict:
 
 
 def codex_transcript_snapshot():
-    """~/.codex/sessions 최신 전사본의 token_count.rate_limits — RPC 실패 시 대체."""
+    """~/.codex/sessions 최신 전사본의 token_count.rate_limits — RPC 실패 시 대체.
+    반환: (rate_limits, 관측 epoch) — 관측 시각은 이벤트 timestamp, 없으면 파일 mtime."""
     try:
         files = sorted(CODEX_SESSIONS_DIR.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return None
     for path in files[:5]:
-        latest = None
+        latest, seen_at = None, None
         try:
             with path.open(encoding="utf-8") as fh:
                 for line in fh:
@@ -330,11 +331,13 @@ def codex_transcript_snapshot():
                         continue
                     pl = ev.get("payload") if isinstance(ev, dict) else None
                     if isinstance(pl, dict) and pl.get("type") == "token_count" and isinstance(pl.get("rate_limits"), dict):
-                        latest = pl["rate_limits"]
+                        latest, seen_at = pl["rate_limits"], to_epoch(ev.get("timestamp"))
+            if latest and seen_at is None:
+                seen_at = path.stat().st_mtime
         except OSError:
             continue
         if latest:
-            return latest
+            return latest, seen_at
     return None
 
 
@@ -351,17 +354,35 @@ def parse_codex_transcript(rl: dict) -> dict:
     return {"windows": windows, "plan": rl.get("plan_type"), "reset_credits": None}
 
 
+def codex_fallback(exc: UsageError, now: float) -> dict:
+    """RPC 실패 시 전사본 스냅샷 — 마지막 수집값보다 새 관측일 때만 쓴다. 전사본은 codex를 쓸 때만
+    갱신되므로 대개 며칠~몇 주 묵은 값이고, 그대로 기록하면 %가 옛값으로 튀었다 돌아오며
+    가짜 리셋(하락)이 잡힌다. 이미 만료된 창(resets_at 경과)도 버린다."""
+    found = codex_transcript_snapshot()
+    if found is None:
+        raise UsageError(f"{exc}; 전사본 스냅샷도 없음") from exc
+    rl, seen_at = found
+    with _lock:
+        last = to_epoch((_snap.get("codex") or {}).get("updated"))
+    if last is not None and seen_at <= last:
+        raise UsageError(f"{exc}; 전사본 스냅샷이 마지막 수집값보다 오래됨") from exc
+    parsed = parse_codex_transcript(rl)
+    parsed["windows"] = [w for w in parsed["windows"]
+                         if not (isinstance(w["resets_at"], float) and w["resets_at"] <= now)]
+    if not parsed["windows"]:
+        raise UsageError(f"{exc}; 전사본 스냅샷의 창이 모두 만료됨") from exc
+    return {**parsed, "seen_at": seen_at}
+
+
 def collect_codex(now=None) -> dict:
     now = now or time.time()
     parsed = _codex_cache["parsed"] if now - _codex_cache["at"] < CODEX_RPC_TTL else None
     if parsed is None:
         try:
-            parsed = parse_codex_rpc(codex_rpc())
+            parsed = {**parse_codex_rpc(codex_rpc()), "seen_at": now}
         except UsageError as exc:
-            snap = codex_transcript_snapshot()
-            if snap is None:
-                raise UsageError(f"{exc}; 전사본 스냅샷도 없음") from exc
-            parsed = parse_codex_transcript(snap)
+            log.info("codex RPC 실패 — 전사본 대체 시도: %s", exc)
+            parsed = codex_fallback(exc, now)
         _codex_cache.update(at=now, parsed=parsed)
     if not parsed.get("windows"):
         raise UsageError("Codex 응답에 한도 창이 없음")
@@ -371,7 +392,7 @@ def collect_codex(now=None) -> dict:
         extras.append({"title": "Reset credits", "value": f"{parsed['reset_credits']} available",
                        "count": parsed["reset_credits"]})
     return {"plan": plan.capitalize() if plan else "", "windows": _finish(parsed["windows"], now),
-            "extras": extras, "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_codex_cache["at"]))}
+            "extras": extras, "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(parsed["seen_at"]))}
 
 
 # ── 수집 루프·스냅샷 ─────────────────────────────────
@@ -401,15 +422,23 @@ def load_persisted():
                     _snap[p] = data[p]
 
 
+# 관측 시점에 이미 resets_at이 지난 행 = 묵은 스냅샷(예: 몇 주 전 codex 전사본). 그 %는 현재 창의 값이
+# 아니므로 차트·리셋 감지에서 뺀다. 과거에 이렇게 쌓인 행은 지우지 않고 조회에서 거른다.
+_LIVE = "(resets_at IS NULL OR resets_at > CAST(strftime('%s', ts) AS REAL))"
+
+
 def record_history(c, provider: str, windows: list, ts: str | None = None) -> int:
     """창별 마지막 행과 pct가 다를 때만 usage_history에 append. 반환: 추가 행 수.
     변화만 쌓아 폴링 주기와 무관하게 용량을 억제한다(같은 pct로 돌아오는 리셋은 안 보이지만
-    차트 해상도에선 무해). 조회는 계단선(step-after)으로 사이를 메운다."""
+    차트 해상도에선 무해). 조회는 계단선(step-after)으로 사이를 메운다. 이미 만료된 창은 기록하지 않는다."""
     ts = ts or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    at = to_epoch(ts)
     n = 0
     for w in windows:
+        if isinstance(w.get("resets_at"), (int, float)) and at is not None and w["resets_at"] <= at:
+            continue
         last = c.execute(
-            "SELECT pct FROM usage_history WHERE provider=? AND win=? ORDER BY id DESC LIMIT 1",
+            f"SELECT pct FROM usage_history WHERE provider=? AND win=? AND {_LIVE} ORDER BY id DESC LIMIT 1",
             (provider, w["title"])).fetchone()
         if last is None or last["pct"] != w["pct"]:
             c.execute("INSERT INTO usage_history (ts, provider, win, pct, resets_at) VALUES (?,?,?,?,?)",
@@ -421,21 +450,31 @@ def record_history(c, provider: str, windows: list, ts: str | None = None) -> in
 RESET_EARLY_SLACK = 600   # 초 — 예정 리셋 시각보다 이만큼 이르면 프로바이더 발 조기 리셋으로 본다
 
 
+def _rewound(prev, row) -> bool:
+    """창 끝 시각이 뒤로 갔다 = 새 창이 아니라 옛 창의 값이 늦게 들어온 것. 진짜 리셋(정상·조기 모두)의
+    새 창은 리셋 시점 + 창 길이에 끝나므로 항상 이전 창보다 늦게 끝난다."""
+    a, b = prev["resets_at"], row["resets_at"]
+    return isinstance(a, (int, float)) and isinstance(b, (int, float)) and b < a - RESET_EARLY_SLACK
+
+
 def detect_resets(c, provider: str, win: str, frm: float | None) -> list:
     """pct 하락 = 창 리셋. 직전 행의 resets_at보다 이르면 early(프로바이더가 임의 초기화한 경우).
+    만료 스냅샷 행은 건너뛰고, 창 끝 시각이 뒤로 간 하락은 리셋이 아니다.
     반환: [{ts, from, to, early}] — 범위 안의 하락만 (직전 기준행은 범위 밖에서 이어받는다)."""
     if frm is not None:
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(frm))
         prev = c.execute("SELECT ts, pct, resets_at FROM usage_history WHERE provider=? AND win=?"
-                         " AND ts < ? ORDER BY id DESC LIMIT 1", (provider, win, cutoff)).fetchone()
+                         f" AND ts < ? AND {_LIVE} ORDER BY id DESC LIMIT 1", (provider, win, cutoff)).fetchone()
         rows = c.execute("SELECT ts, pct, resets_at FROM usage_history WHERE provider=? AND win=?"
-                         " AND ts >= ? ORDER BY id", (provider, win, cutoff))
+                         f" AND ts >= ? AND {_LIVE} ORDER BY id", (provider, win, cutoff))
     else:
         prev = None
         rows = c.execute("SELECT ts, pct, resets_at FROM usage_history WHERE provider=? AND win=?"
-                         " ORDER BY id", (provider, win))
+                         f" AND {_LIVE} ORDER BY id", (provider, win))
     out = []
     for r in rows:
+        if prev is not None and _rewound(prev, r):
+            continue   # 옛 창 값 — 다음 행의 기준으로도 쓰지 않는다
         if prev is not None and r["pct"] < prev["pct"]:
             ts = to_epoch(r["ts"])
             early = (isinstance(prev["resets_at"], (int, float)) and ts is not None
@@ -466,13 +505,13 @@ def history(c, days: int = 30) -> dict:
             if frm is not None:
                 cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(frm))
                 carry = c.execute(
-                    "SELECT ts, pct FROM usage_history WHERE provider=? AND win=? AND ts < ?"
+                    f"SELECT ts, pct FROM usage_history WHERE provider=? AND win=? AND ts < ? AND {_LIVE}"
                     " ORDER BY id DESC LIMIT 1", (provider, win, cutoff)).fetchone()
                 if carry:
                     series.append([int(frm), carry["pct"]])
-                pred, args = "AND ts >= ?", (provider, win, cutoff)
+                pred, args = f"AND ts >= ? AND {_LIVE}", (provider, win, cutoff)
             else:
-                pred, args = "", (provider, win)
+                pred, args = f"AND {_LIVE}", (provider, win)
             if span_days <= 14:
                 q = f"SELECT ts, pct FROM usage_history WHERE provider=? AND win=? {pred} ORDER BY id"
             elif span_days <= 92:

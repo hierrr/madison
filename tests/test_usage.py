@@ -150,6 +150,76 @@ class HistoryTests(unittest.TestCase):
         resets = h["claude"]["resets"]["5h"]
         self.assertEqual([(r["from"], r["to"], r["early"]) for r in resets], [(70, 10, True)])
 
+    def test_expired_window_not_recorded(self):
+        # 관측 시점에 resets_at이 이미 지난 창 = 묵은 스냅샷 — 기록하지 않는다
+        n = usage.record_history(self.conn, "codex", [self.win("7d", 9, usage.to_epoch("2026-08-31T02:25:58Z"))],
+                                 ts="2026-09-28T01:43:36Z")
+        self.assertEqual(n, 0)
+
+    def test_stale_rows_already_stored_are_ignored(self):
+        # 09-28 실측 패턴: 실값 16%(10-05 리셋) 사이사이 08-31에 끝난 창의 9%가 끼어 16→9 조기 리셋이 잡혔다
+        real, stale = usage.to_epoch("2026-10-05T02:47:34Z"), usage.to_epoch("2026-08-31T02:25:58Z")
+        rows = [("2026-09-28T03:38:58Z", 16, real), ("2026-09-28T06:22:49Z", 9, stale),
+                ("2026-09-28T06:28:51Z", 16, real), ("2026-09-28T07:11:33Z", 9, stale),
+                ("2026-09-28T07:17:35Z", 16, real), ("2026-09-28T08:49:17Z", 18, real)]
+        self.conn.executemany("INSERT INTO usage_history (ts, provider, win, pct, resets_at) VALUES (?,'codex','7d',?,?)",
+                              rows)
+        h = usage.history(self.conn, days=0)
+        self.assertNotIn("7d", h["codex"]["resets"])
+        self.assertEqual([p[1] for p in h["codex"]["windows"]["7d"]], [16, 16, 16, 18])
+        # 다음 기록의 비교 기준도 만료 행이 아니라 마지막 실값(18)
+        self.assertEqual(usage.record_history(self.conn, "codex", [self.win("7d", 18, real)],
+                                             ts="2026-09-28T09:00:00Z"), 0)
+
+    def test_rewound_window_is_not_a_reset(self):
+        # 아직 만료 전이지만 이전 창 값(끝 시각이 뒤로 감) — 리셋 아님, 이후 기준행으로도 쓰지 않는다
+        old_end, cur_end = usage.to_epoch("2026-10-05T02:47:34Z"), usage.to_epoch("2026-10-06T05:32:27Z")
+        usage.record_history(self.conn, "codex", [self.win("7d", 26, cur_end)], ts="2026-09-30T04:00:00Z")
+        usage.record_history(self.conn, "codex", [self.win("7d", 20, old_end)], ts="2026-09-30T04:06:00Z")
+        usage.record_history(self.conn, "codex", [self.win("7d", 26, cur_end)], ts="2026-09-30T04:12:00Z")
+        new_end = usage.to_epoch("2026-10-08T00:00:00Z")
+        usage.record_history(self.conn, "codex", [self.win("7d", 0, new_end)], ts="2026-10-01T00:00:00Z")
+        resets = usage.history(self.conn, days=0)["codex"]["resets"]["7d"]
+        self.assertEqual([(r["from"], r["to"], r["early"]) for r in resets], [(26, 0, True)])
+
+
+class CodexFallbackTests(unittest.TestCase):
+    def setUp(self):
+        with usage._lock:
+            self.saved = usage._snap["codex"]
+        self.orig = usage.codex_transcript_snapshot
+        self.now = usage.to_epoch("2026-09-28T02:00:00Z")
+
+    def tearDown(self):
+        usage.codex_transcript_snapshot = self.orig
+        with usage._lock:
+            usage._snap["codex"] = self.saved
+
+    def use(self, rl, seen_iso, last_iso):
+        usage.codex_transcript_snapshot = lambda: (rl, usage.to_epoch(seen_iso))
+        with usage._lock:
+            usage._snap["codex"] = {"updated": last_iso} if last_iso else None
+
+    def test_older_than_last_collection_is_rejected(self):
+        rl = {"primary": {"used_percent": 27, "window_minutes": 10080, "resets_at": 1791168454}}
+        self.use(rl, "2026-09-28T01:00:00Z", "2026-09-28T01:55:00Z")
+        with self.assertRaisesRegex(usage.UsageError, "오래됨"):
+            usage.codex_fallback(usage.UsageError("timeout"), self.now)
+
+    def test_newer_snapshot_used_and_expired_windows_dropped(self):
+        rl = {"primary": {"used_percent": 71, "window_minutes": 300, "resets_at": 1790000000},   # 이미 지남
+              "secondary": {"used_percent": 27, "window_minutes": 10080, "resets_at": 1791168454}}
+        self.use(rl, "2026-09-28T01:59:00Z", "2026-09-28T01:55:00Z")
+        parsed = usage.codex_fallback(usage.UsageError("timeout"), self.now)
+        self.assertEqual([(w["title"], w["pct"]) for w in parsed["windows"]], [("7d", 27)])
+        self.assertEqual(parsed["seen_at"], usage.to_epoch("2026-09-28T01:59:00Z"))
+
+    def test_no_prior_snapshot_still_drops_expired(self):
+        rl = {"primary": {"used_percent": 9, "window_minutes": 10080, "resets_at": 1788143158}}
+        self.use(rl, "2026-08-24T03:35:00Z", None)
+        with self.assertRaisesRegex(usage.UsageError, "만료"):
+            usage.codex_fallback(usage.UsageError("timeout"), self.now)
+
 
 class EpochTests(unittest.TestCase):
     def test_naive_iso_is_utc(self):
