@@ -65,12 +65,14 @@ class CollectorTests(unittest.TestCase):
         )
         return bindir
 
-    def run_report(self, originator: str, event: str, hook: dict):
+    def run_report(self, originator: str, event: str, hook: dict, codex_index: str = ""):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home, mad = self.make_home(root)
             bindir = self.fake_path(root)
             capture = root / "capture.json"
+            if codex_index:
+                (home / ".codex" / "session_index.jsonl").write_text(codex_index)
             transcript = root / "rollout.jsonl"
             transcript.write_text(
                 json.dumps({"type": "session_meta", "payload": {"originator": originator, "source": "vscode" if originator == "Codex Desktop" else "cli"}}) + "\n"
@@ -148,6 +150,41 @@ class CollectorTests(unittest.TestCase):
         only_synthetic = self.assistant_line("<synthetic>", {"input_tokens": 0, "output_tokens": 0}) + "\n"
         payload = self.run_report_with_transcript("claude-code", "session_end", dict(hook), only_synthetic)
         self.assertEqual(payload["detail"]["model"], "")
+
+    def test_claude_session_name_prefers_rename_over_auto_title(self):
+        # /rename(custom-title)이 자동 제목(ai-title)보다 우선, 둘 다 마지막 기록이 이긴다. 줄바꿈은 공백으로
+        hook = {"session_id": "s1", "cwd": str(REPO), "prompt": "hi"}
+        transcript = "\n".join([
+            json.dumps({"type": "ai-title", "aiTitle": "첫 자동 제목", "sessionId": "s1"}),
+            json.dumps({"type": "custom-title", "customTitle": "옛 이름", "sessionId": "s1"}),
+            json.dumps({"type": "user"}),
+            json.dumps({"type": "ai-title", "aiTitle": "나중 자동 제목", "sessionId": "s1"}),
+            json.dumps({"type": "custom-title", "customTitle": "새\n이름", "sessionId": "s1"}),
+        ]) + "\n"
+        payload = self.run_report_with_transcript("claude-code", "prompt", dict(hook), transcript)
+        self.assertEqual(payload["detail"]["session_name"], "새 이름")
+
+        # 이름을 안 정했으면 자동 제목(앱·/resume 목록의 그것) — 2026-10-01 결정: 자동 제목 포함
+        only_ai = json.dumps({"type": "ai-title", "aiTitle": "자동 제목", "sessionId": "s1"}) + "\n"
+        payload = self.run_report_with_transcript("claude-code", "prompt", dict(hook), only_ai)
+        self.assertEqual(payload["detail"]["session_name"], "자동 제목")
+
+        # 둘 다 없으면(헤드리스 실행 등) 키 자체가 없다 — 허브가 기존 값을 유지
+        none = json.dumps({"type": "user"}) + "\n"
+        payload = self.run_report_with_transcript("claude-code", "prompt", dict(hook), none)
+        self.assertNotIn("session_name", payload["detail"])
+
+    def test_codex_session_name_from_thread_index(self):
+        index = "\n".join([
+            json.dumps({"id": "other", "thread_name": "다른 스레드"}),
+            json.dumps({"id": "codex-s1", "thread_name": "분석하고 전사 문제 파악"}),
+        ]) + "\n"
+        payload = self.run_report("codex-tui", "prompt", {"session_id": "codex-s1", "cwd": str(REPO), "prompt": "x"},
+                                  codex_index=index)
+        self.assertEqual(payload["detail"]["session_name"], "분석하고 전사 문제 파악")
+        payload = self.run_report("codex-tui", "prompt", {"session_id": "codex-s2", "cwd": str(REPO), "prompt": "x"},
+                                  codex_index=index)
+        self.assertNotIn("session_name", payload["detail"])
 
     def test_codex_turn_done_uses_last_counter_and_splits_cached(self):
         transcript = "\n".join([

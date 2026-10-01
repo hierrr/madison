@@ -48,6 +48,9 @@ push a piece of work from one machine to another without walking over to it.
   small model on the hub (never on the device, never in the hook's critical path).
 - **Session traceability** — every session id is one click away and can be resumed
   on its machine with `claude --resume <id>` or `codex resume <id>`.
+- **Session names** — the name you give a Claude Code session with `/rename` (or its
+  auto-generated title, including the desktop app's) and the Codex thread name show up on
+  the session card and in the attention list.
 - **Handoff** — carry a task's context (handoff doc + change diffs, hub-carried,
   no commit or push) to another machine; the target gets a desktop notification
   (macOS) and every new session there is briefed until you `/pickup` — in Claude
@@ -384,3 +387,6 @@ surfaces are collected through global hooks. The Windows collector remains beta
 ## License
 
 [MIT](LICENSE) © hierrr
+
+Dashboard icons are [Lucide](https://lucide.dev) (ISC); see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

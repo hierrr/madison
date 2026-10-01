@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   bg_agents INTEGER DEFAULT 0, -- 그중 서브에이전트 수
   bg_shells INTEGER DEFAULT 0, -- 그중 백그라운드 셸 수
   bg_ts TEXT,             -- 마지막 bg 이벤트 허브 시각 (표시 감쇠용)
+  session_name TEXT,      -- 세션 이름: Claude /rename·앱 제목(custom-title)·자동 제목(ai-title), Codex thread_name
   PRIMARY KEY (device_id, agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -196,6 +197,7 @@ MIGRATIONS = (
     "ALTER TABLE sessions ADD COLUMN bg_ts TEXT",
     "ALTER TABLE sessions ADD COLUMN bg_agents INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN bg_shells INTEGER DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN session_name TEXT",   # 세션 이름 표시 (2026-10-01)
 )
 
 

@@ -55,6 +55,27 @@ class StateCollectionModeTests(unittest.TestCase):
         self.assertFalse(session["partial"])
         self.assertEqual(session["collection_mode"], "hooks")
 
+    def test_session_name_sticks_and_is_exposed(self):
+        # 세션 이름은 어떤 이벤트에 실려 와도 최신값으로 반영되고, 안 실린 이벤트가 지우지 않는다
+        base = {"frontend": "cli", "collection_mode": "hooks"}
+        state.ingest(self.conn, 1, self.event("session_start", "n1", "2026-10-01T00:00:01Z", {**base}))
+        state.ingest(self.conn, 1, self.event("prompt", "n2", "2026-10-01T00:00:02Z",
+                                               {**base, "prompt": "x", "session_name": "회의록 파이프라인"}))
+        row = self.conn.execute("SELECT session_name FROM sessions").fetchone()
+        self.assertEqual(row["session_name"], "회의록 파이프라인")
+        # 이름 없이 오는 heartbeat·turn_done은 유지, 빈 문자열도 무시
+        state.ingest(self.conn, 1, self.event("turn_done", "n3", "2026-10-01T00:00:03Z", {**base, "summary": "ok"}))
+        state.ingest(self.conn, 1, self.event("heartbeat", "n4", "2026-10-01T00:00:04Z", {**base, "session_name": ""}))
+        row = self.conn.execute("SELECT session_name FROM sessions").fetchone()
+        self.assertEqual(row["session_name"], "회의록 파이프라인")
+        # /rename으로 바뀐 이름은 다음 신호에 반영, 120자 상한
+        state.ingest(self.conn, 1, self.event("prompt", "n5", "2026-10-01T00:00:05Z",
+                                               {**base, "prompt": "y", "session_name": "새 이름" + "가" * 200}))
+        row = self.conn.execute("SELECT session_name FROM sessions").fetchone()
+        self.assertEqual(len(row["session_name"]), 120)
+        self.assertTrue(row["session_name"].startswith("새 이름"))
+        self.assertEqual(state.assemble(self.conn)["sessions"][0]["session_name"], row["session_name"])
+
     def test_synthetic_model_never_overwrites_real_model(self):
         # Claude Code 전사본의 <synthetic>(인증 만료·API 오류 메시지) 표식이 session_end에 실려 와도
         # 마지막 실제 모델을 지킨다. effort는 빈 값이라 원래부터 덮이지 않는다.

@@ -141,6 +141,10 @@ def ingest(c, device_id: int, ev: dict) -> str:
         sets += ["frontend=?"]; args += [str(payload["frontend"])[:20]]
     if payload.get("collection_mode"):
         sets += ["collection_mode=?"]; args += [str(payload["collection_mode"])[:20]]
+    # 세션 이름(/rename·앱 제목·자동 제목·Codex thread_name): 실려 오면 최신값. 빈 값은 무시 —
+    # 이름을 지우는 신호는 없고, 전사본 없이 뜨는 이벤트(session_start 등)가 기존 이름을 비우면 안 된다
+    if payload.get("session_name"):
+        sets += ["session_name=?"]; args += [str(payload["session_name"])[:120]]
 
     # 모델·에포트: 어떤 이벤트든 실려 오면 최신값으로 반영.
     # 단 "<synthetic>"은 무시 — 구버전 수집기가 실어 와도 마지막 실제 모델을 지킨다.
@@ -279,7 +283,7 @@ def assemble(c) -> dict:
             "state_min": _age_min(now, s["state_since"]) or 0,
             "seen_min": seen_min,
             "last_prompt": s["last_prompt"], "last_summary": s["last_summary"],
-            "task_summary": s["task_summary"],
+            "task_summary": s["task_summary"], "session_name": s["session_name"],
             "model": s["model"], "effort": s["effort"], "frontend": s["frontend"],
             "collection_mode": s["collection_mode"],
             "approval_msg": s["approval_msg"], "current_tool": s["current_tool"],

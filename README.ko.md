@@ -84,6 +84,8 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
   CLI에서 그대로 불러옵니다. 모든 호출은 `llm_runs`에 기록됩니다.
 - **에이전트·실행 경로 구분** — `CLAUDE CODE` / `CLAUDE APP` / `CODEX CLI` / `CODEX APP`
   세션을 가려서 보여 주고, 자동화(cron·launchd의 headless 실행) 세션은 전용 탭으로 분리합니다.
+- **세션 이름** — Claude Code에서 `/rename`으로 정한 이름(없으면 자동 제목, 데스크톱 앱의 제목 포함)과
+  Codex 스레드 이름을 세션 카드와 주의 필요 목록에 보여 줍니다.
 - **로컬 우선, 메타데이터만** — 특정 벤더의 원격·클라우드 세션 인프라에 기대지 않습니다.
   허브는 온전히 당신 것입니다.
 
@@ -337,3 +339,6 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 ## 라이선스
 
 [MIT](LICENSE) © hierrr
+
+대시보드 아이콘은 [Lucide](https://lucide.dev)(ISC)입니다 —
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 참조.

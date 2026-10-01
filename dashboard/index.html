@@ -96,7 +96,7 @@
   }
   .tstats { display: flex; align-items: center; gap: 16px; flex: none; flex-wrap: wrap; }
   .tstat { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
-  .tstat .ic { width: 14px; height: 14px; color: var(--ink-3); flex: none; }
+  .tstat .ico { margin-right: 0; background-color: var(--ink-3); }
   .tstat b { font-family: var(--mono); font-weight: 650; }
   .brand .mark { align-self: center; flex: none; }
   .mark stop { stop-color: var(--c); }
@@ -263,6 +263,22 @@
   .agent { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--ink-2); flex: none; }
   .agent.cc { color: var(--agent-claude); border-color: var(--agent-claude); }
   .agent.cx { color: var(--agent-codex); border-color: var(--agent-codex); }
+  /* 아이콘은 전부 Lucide(ISC, THIRD_PARTY_NOTICES.md) — 원본 SVG 파일을 assets/lucide/에 두고 CSS mask로 그린다.
+     색은 currentColor(라이트·다크 공통), .dim은 --ink-3 보조색. 글리프(⎇ ◀ ▶ ✓ →)·인라인 path 사용 금지 (2026-10-01 통일).
+     구분: message-square-code = 세션 이름(대화), folder-open = 프로젝트(디렉터리), git-branch = 브랜치 */
+  .ico { display: inline-block; width: 14px; height: 14px; margin-right: 4px; vertical-align: -2.5px; flex: none; background-color: currentColor;
+    -webkit-mask: var(--ico) center / contain no-repeat; mask: var(--ico) center / contain no-repeat; }
+  .ico.dim { background-color: var(--ink-3); }
+  .ico-hard-drive { --ico: url(/assets/lucide/hard-drive.svg); }
+  .ico-square-terminal { --ico: url(/assets/lucide/square-terminal.svg); }
+  .ico-message-square-code { --ico: url(/assets/lucide/message-square-code.svg); }
+  .ico-folder-open { --ico: url(/assets/lucide/folder-open.svg); }
+  .ico-git-branch { --ico: url(/assets/lucide/git-branch.svg); }
+  .ico-chevron-left { --ico: url(/assets/lucide/chevron-left.svg); }
+  .ico-chevron-right { --ico: url(/assets/lucide/chevron-right.svg); }
+  .ico-check { --ico: url(/assets/lucide/check.svg); }
+  .ico-arrow-right { --ico: url(/assets/lucide/arrow-right.svg); }
+  .sname { font-size: 13.5px; font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; }
   .proj { font-family: var(--mono); font-size: 13.5px; font-weight: 700; }
   .branch { font-family: var(--mono); font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
   .chip { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--ink-2); border-radius: 999px; padding: 2px 10px; flex: none; }
@@ -338,11 +354,13 @@
   .hf { border: 1px solid var(--line); border-radius: 7px; background: var(--ground); padding: 9px 11px; }
   .hf + .hf { margin-top: 8px; }
   .hfroute { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 12.5px; font-weight: 700; flex-wrap: wrap; }
-  .hfroute .arr { color: var(--ink-3); font-weight: 400; }
+  .hfroute .arr { color: var(--ink-3); font-weight: 400; display: inline-flex; }
+  .hfroute .arr .ico { margin: 0; }
   .hfid { font-size: 10.5px; color: var(--ink-3); font-weight: 400; }
   .hfstate { margin-left: auto; font-family: var(--sans); font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; color: var(--ink-2); }
   .hfstate.ok { background: var(--good-bg); }
-  .hfstate.ok::before { content: "✓ "; color: var(--good-text); }
+  .hfstate.ok::before { content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 3px; vertical-align: -1.5px; background-color: var(--good-text);
+    -webkit-mask: url(/assets/lucide/check.svg) center / contain no-repeat; mask: url(/assets/lucide/check.svg) center / contain no-repeat; }
   .hfstate.pend { background: var(--warn); color: #0b0b0b; }  /* 진한 노랑 — 타일 sub의 대기 점과 동일 계열 */
   .hfstate.done { background: var(--stale-bg); }
   .hf.term { opacity: 0.55; }
@@ -374,6 +392,7 @@
   .rpt-date { display: inline-flex; align-items: center; gap: 6px; }
   .navb { font: inherit; font-size: 12px; color: var(--ink-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; cursor: pointer; white-space: nowrap; flex: none; }
   .navb:hover { color: var(--ink); border-color: var(--line-2); }
+  .navb .ico { width: 12px; height: 12px; margin: 0; vertical-align: -2px; }
   #rptDate { font-family: var(--mono); font-size: 12.5px; min-width: 176px; text-align: center; color: var(--ink); }
   .rpt-report { padding: 4px 18px 14px; line-height: 1.62; }
   /* 헤더는 폴백 렌더일 뿐 — 브랜드 바(|)는 최상위 불릿(.svc) 전용 */
@@ -483,6 +502,7 @@
     .wrap { padding: 16px 14px 40px; }
     .kpis { gap: 8px; }
     .branch { max-width: 130px; }
+    .sname { max-width: 180px; }
     .dstats { width: 100%; justify-content: space-between; }
     #rptDate { min-width: 0; }   /* 날짜 라벨이 버튼들을 밀어 "오늘"이 세로로 찌부러지지 않게 */
   }
@@ -517,11 +537,11 @@
     </div>
     <div class="tstats">
       <span class="tstat" title="등록 기기">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" x2="2" y1="12" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" x2="6.01" y1="16" y2="16"/><line x1="10" x2="10.01" y1="16" y2="16"/></svg>
+        <i class="ico ico-hard-drive" aria-hidden="true"></i>
         <b id="statDevices">–</b><span class="lbl"> 기기</span>
       </span>
       <span class="tstat" title="활성 세션">
-        <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 11 2-2-2-2"/><path d="M12 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/></svg>
+        <i class="ico ico-square-terminal" aria-hidden="true"></i>
         <b id="statSessions">–</b><span class="lbl"> 세션</span>
       </span>
       <div class="sync" id="sync"><span class="live-dot"></span><span id="syncFull">연결 중…</span><span id="syncRel" class="rel">…</span></div>
@@ -663,9 +683,9 @@
         <button data-r="month">월간</button>
       </div>
       <div class="rpt-date">
-        <button class="navb" id="rptPrev" title="이전">◀</button>
+        <button class="navb" id="rptPrev" title="이전"><i class="ico ico-chevron-left" aria-hidden="true"></i></button>
         <span id="rptDate">–</span>
-        <button class="navb" id="rptNext" title="다음">▶</button>
+        <button class="navb" id="rptNext" title="다음"><i class="ico ico-chevron-right" aria-hidden="true"></i></button>
         <button class="navb" id="rptToday">오늘</button>
       </div>
       <button class="copy act-primary" id="rptRefresh">갱신</button>
@@ -834,8 +854,9 @@
       '</div><div class="cbody">' +
       '<div class="row1">' +
       '<span class="agent ' + agentCls + '">' + aLabel + '</span>' +
-      '<span class="proj">' + nameOr(s.project) + '</span>' +
-      (s.branch ? '<span class="branch">⎇ ' + esc(s.branch) + '</span>' : '') +
+      (s.session_name ? '<span class="sname" title="' + esc(s.session_name) + '"><i class="ico ico-message-square-code dim"></i>' + esc(s.session_name) + '</span>' : '') +
+      '<span class="proj"><i class="ico ico-folder-open dim"></i>' + nameOr(s.project) + '</span>' +
+      (s.branch ? '<span class="branch"><i class="ico ico-git-branch"></i>' + esc(s.branch) + '</span>' : '') +
       '<span class="chip ' + chipCls + '"><i class="dot"></i>' + esc(chipLabel) + '</span>' +
       (subN > 0 ? '<span class="chip subs"><i class="dot"></i>서브에이전트 ' + subN + '</span>' : '') +
       (bgN > 0 ? '<span class="chip bgs"><i class="dot"></i>백그라운드 ' + bgN + '</span>' : '') +
@@ -984,11 +1005,12 @@
           return '<li><i class="dot ' + (s.state === 'needs_approval' ? 'crit' : 'warn') + '"></i>' +
             '<span class="where">' + esc(s.device) + '</span>' +
             '<img class="aicon" src="/assets/' + agentIconFile(s.agent) + '" alt="" title="' + esc(agentLabel(s)) + '">' +
-            '<span class="what">' + nameOr(s.project) + ' · ' +
+            '<span class="what">' + (s.session_name ? '<i class="ico ico-message-square-code dim"></i>' + esc(s.session_name)
+                                                    : '<i class="ico ico-folder-open dim"></i>' + nameOr(s.project)) + ' · ' +
             esc(s.state === 'needs_approval' ? (s.approval_msg || '권한 승인') : '다음 지시 대기') + '</span>' +
             '<span class="age">' + esc(dur(s.state_min)) + '</span></li>';
         }).join('')
-      : '<li class="none" style="border:none;background:none">지금 나를 기다리는 세션 없음 ✓</li>';
+      : '<li class="none" style="border:none;background:none">지금 나를 기다리는 세션 없음 <i class="ico ico-check"></i></li>';
 
     // 핸드오프 — 현황엔 활성(대기/수신)만 표시. 완료/취소는 히스토리 핸드오프 탭에서 (2026-08-18 사용자 결정)
     var hfs = st.handoffs;
@@ -1003,10 +1025,10 @@
             : h.status === 'pending' ? '대상 기기에 알림·세션 안내 중 — /pickup으로 착수하면 수신됨'
             : '';  // 끝난 항목은 상태 라벨·흐림 처리로 충분
           return '<div class="hf' + (active ? '' : ' term') + '"><div class="hfroute">' + esc(h.from || '?') +
-            ' <span class="arr">→</span> ' + esc(h.to) +
+            ' <span class="arr"><i class="ico ico-arrow-right"></i></span> ' + esc(h.to) +
             ' <span class="hfid">#' + h.id + '</span>' +
             '<span class="hfstate ' + stateCls + '">' + esc(stateLabel) + '</span></div>' +
-            '<div class="hfrepo">' + esc(h.repo) + (h.branch ? ' ⎇ ' + esc(h.branch) : '') + '</div>' +
+            '<div class="hfrepo">' + esc(h.repo) + (h.branch ? ' <i class="ico ico-git-branch dim"></i>' + esc(h.branch) : '') + '</div>' +
             (h.summary ? '<p>' + esc(h.summary) + '</p>' : '') +
             (meta ? '<div class="hfmeta">' + meta + '</div>' : '') +
             (active
@@ -1026,8 +1048,9 @@
       ? autos.slice(0, 10).map(function (s) {
           var work = s.task_summary || s.last_prompt || '';
           return '<li><time title="마지막 신호">' + age(s.seen_min) + '</time>' +
-            '<span class="etxt">' + sessDot(s) +
-            esc(s.device) + ' · ' + esc(s.project || s.agent) +
+            '<span class="etxt">' + sessDot(s) + '<span class="tid">#' + s.id + '</span> ' +
+            esc(s.device) + ' · ' + (s.project ? '<i class="ico ico-folder-open dim"></i>' + esc(s.project) : esc(s.agent)) +
+            (s.unconfirmed ? ' · 신호 없음' : '') +
             (work ? ' — ' + esc(String(work).slice(0, 72)) : '') + '</span></li>';
         }).join('')
       : '<li class="none" style="border-bottom:none">실행 중인 자동화 세션 없음</li>';
@@ -1110,7 +1133,7 @@
     var text = el.dataset.copy;
     function done() {
       var orig = el.textContent;
-      el.textContent = '복사됨 ✓';
+      el.innerHTML = '복사됨 <i class="ico ico-check" aria-hidden="true"></i>';
       setTimeout(function () { el.textContent = orig; }, 1200);
     }
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1253,6 +1276,14 @@
     return '<span class="hcount">' + (res.total || 0) + '</span>' +
       (res.hidden ? '<span class="hnote" title="프롬프트·턴 없이 뜬 세션(모델 프로브·빈 창)은 이벤트 원장에만 남기고 목록에서 감춤">빈 세션 ' + res.hidden + '건 제외</span>' : '');
   }
+  // 세션 상태 필터 — 'stale'은 상태값이 아니라 현황의 '신호 없음' 오버레이와 같은 판정(서버 _session_conds)
+  function stateSel(attr, cur) {
+    return '<select class="hsel" ' + attr + '="state">' +
+      [['', '상태 전체'], ['working', '작업 중'], ['awaiting_input', '입력 대기'], ['needs_approval', '승인 필요'],
+       ['ended', '종료'], ['stale', '신호 없음']].map(function (o) {
+        return '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select>';
+  }
   function daysSel(attr, cur) {
     return '<select class="hsel" ' + attr + '="days">' +
       [['0', '전체 기간'], ['1', '최근 24시간'], ['7', '최근 7일'], ['30', '최근 30일']].map(function (o) {
@@ -1269,7 +1300,7 @@
   }
   function loadAuto() {
     getJSON('/api/history/sessions?' + qsBuild({ page: PG.auto, limit: 20, auto: 1,
-      device: AF.device, agent: AF.agent, fe: AF.fe, project: AF.project,
+      device: AF.device, agent: AF.agent, fe: AF.fe, project: AF.project, state: AF.state,
       days: AF.days === '0' ? '' : AF.days }))
       .then(function (res) { HIST.auto = res; PG.auto = res.page; renderAuto(); })
       .catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
@@ -1290,9 +1321,9 @@
   function pgbar(key, p) {
     if (p.pages <= 1) return '';
     return '<div class="pgbar">' +
-      '<button class="navb" data-pg="' + key + '" data-dir="-1"' + (p.page <= 1 ? ' disabled' : '') + '>◀</button>' +
+      '<button class="navb" data-pg="' + key + '" data-dir="-1"' + (p.page <= 1 ? ' disabled' : '') + '><i class="ico ico-chevron-left"></i></button>' +
       '<span class="pginfo">' + p.page + ' / ' + p.pages + '</span>' +
-      '<button class="navb" data-pg="' + key + '" data-dir="1"' + (p.page >= p.pages ? ' disabled' : '') + '>▶</button></div>';
+      '<button class="navb" data-pg="' + key + '" data-dir="1"' + (p.page >= p.pages ? ' disabled' : '') + '><i class="ico ico-chevron-right"></i></button></div>';
   }
   document.addEventListener('click', function (e) {
     var b = e.target.closest('[data-pg]');
@@ -1331,8 +1362,8 @@
     var html = res.rows.map(function (h) {
       var label = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[h.status] || h.status;
       return '<tr><td class="mono dim">#' + h.id + '</td>' +
-        '<td class="mono">' + esc(h.from_name || '?') + ' → ' + esc(h.to_name || '?') + '</td>' +
-        '<td class="mono">' + esc(h.repo) + (h.branch ? ' <span class="dim">⎇ ' + esc(h.branch) + '</span>' : '') + '</td>' +
+        '<td class="mono">' + esc(h.from_name || '?') + ' <i class="ico ico-arrow-right dim"></i>' + esc(h.to_name || '?') + '</td>' +
+        '<td class="mono">' + esc(h.repo) + (h.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(h.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(h.summary || '') +
           (h.has_doc ? '<details class="hfdoc" data-hfdoc="' + h.id + '"><summary>문서 보기</summary><pre class="dim">불러오는 중…</pre></details>' : '') + '</td>' +
         '<td>' + sdot(HANDOFF_DOT[h.status] || 's-end') + esc(label) + '</td>' +
@@ -1505,7 +1536,7 @@
       .finally(function () { btn.disabled = false; });
   });
 
-  var AF = { device: '', agent: '', fe: '', project: '', days: '0' };   // 자동화 탭 필터
+  var AF = { device: '', agent: '', fe: '', project: '', state: '', days: '0' };   // 자동화 탭 필터
   function renderAuto() {
     var res = HIST.auto || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
     var fc = res.facets || {};
@@ -1529,6 +1560,7 @@
       '<select class="hsel" data-af="device">' + optsFor(fc.devices || [], AF.device, '기기 전체') + '</select>' +
       '<select class="hsel" data-af="agent">' + agentOptsFor(fc.agents, agentPairVal(AF)) + '</select>' +
       '<select class="hsel" data-af="project">' + optsFor(fc.projects || [], AF.project, '프로젝트 전체') + '</select>' +
+      stateSel('data-af', AF.state) +
       daysSel('data-af', AF.days) +
       hcountHtml(res) +
       '</div>' +
@@ -1613,7 +1645,7 @@
         '<td class="mono">' + esc(s.device) + '</td>' +
         '<td><span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' +
         agentLabel(s) + '</span></td>' +
-        '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim">⎇ ' + esc(s.branch) + '</span>' : '') + '</td>' +
+        '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(s.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
         '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + (s.end_reason ? ' <span class="dim">(' + esc(s.end_reason) + ')</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +

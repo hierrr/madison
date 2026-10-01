@@ -137,6 +137,32 @@ function Trunc([string]$value, [int]$max) {
     return $value.Substring(0, [Math]::Min($max, $value.Length))
 }
 
+# 세션 이름 — Claude: 전사본 꼬리의 custom-title(/rename·앱 제목), 없으면 ai-title(자동 제목).
+# Codex: ~/.codex/session_index.jsonl의 thread_name. 없으면 안 싣는다(허브가 빈 값은 무시). report.sh와 동일 규칙.
+$sessionName = ""
+try {
+    if ($AgentName -eq "claude-code" -and $transcriptPath -and (Test-Path $transcriptPath)) {
+        $customTitle = ""; $aiTitle = ""
+        foreach ($line in (Get-Content $transcriptPath -Tail 4000)) {
+            if ($line -match '"type":\s*"custom-title"') {
+                $t = "$(($line | ConvertFrom-Json).customTitle)"; if ($t) { $customTitle = $t }
+            } elseif ($line -match '"type":\s*"ai-title"') {
+                $t = "$(($line | ConvertFrom-Json).aiTitle)"; if ($t) { $aiTitle = $t }
+            }
+        }
+        $sessionName = if ($customTitle) { $customTitle } else { $aiTitle }
+    } elseif ($AgentName -eq "codex-cli") {
+        $index = Join-Path $env:USERPROFILE ".codex\session_index.jsonl"
+        if (Test-Path $index) {
+            $needle = '"id":\s*"' + [regex]::Escape($sid) + '"'
+            foreach ($line in (Get-Content $index)) {
+                if ($line -match $needle) { $t = "$(($line | ConvertFrom-Json).thread_name)"; if ($t) { $sessionName = $t } }
+            }
+        }
+    }
+} catch {}
+$sessionName = Trunc ($sessionName -replace '[\r\n\t]+', ' ') 120
+
 # 프로젝트/브랜치
 $project = ""; $branch = ""; $origin = ""
 if ($cwd -and (Test-Path $cwd)) {
@@ -166,6 +192,7 @@ $detail.frontend = $frontend
 $detail.model = $model
 $detail.effort = $effort
 $detail.collection_mode = "hooks"
+if ($sessionName) { $detail.session_name = $sessionName }
 
 $eventId = [guid]::NewGuid().ToString()
 if ($AgentName -eq "codex-cli" -and $hook.turn_id -and $EventName -in @("prompt", "turn_done")) {

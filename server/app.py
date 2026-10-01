@@ -217,7 +217,8 @@ def _overlay_unconfirmed(rows: list[dict]):
 _SESSION_PAGE_COLS = (
     "s.rowid AS row_id, d.name AS device, s.agent, s.session_id, s.project, s.branch,"
     " s.state, s.end_reason, s.turns, s.model, s.effort, s.frontend, s.started_at,"
-    " s.last_seen_hub, s.task_summary, substr(COALESCE(s.last_prompt,''), 1, 200) AS last_prompt,"
+    " s.last_seen_hub, s.task_summary, s.session_name,"
+    " substr(COALESCE(s.last_prompt,''), 1, 200) AS last_prompt,"
     " d.last_seen_at AS device_seen_at"
 )
 
@@ -231,10 +232,22 @@ _SUBSTANTIVE_SQL = "(s.turns > 0 OR COALESCE(s.last_prompt, '') != '')"
 
 def _session_conds(device: str = "", agent: str = "", fe: str = "",
                    project: str = "", days: int = 0, auto: int = -1,
-                   substantive: bool = True) -> tuple[list[str], list]:
+                   substantive: bool = True, state: str = "") -> tuple[list[str], list]:
     """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭.
-    substantive=True면 프롬프트·턴 없는 no-op 세션을 제외한다."""
+    substantive=True면 프롬프트·턴 없는 no-op 세션을 제외한다.
+    state는 세션 상태값 그대로, 또는 'stale' = 현황의 '신호 없음' 오버레이(_overlay_unconfirmed)와 같은 판정:
+    working은 TTL 초과, 대기 상태는 기기 오프라인. 종료 훅을 못 받고 남은 좀비 세션을 골라내는 용도."""
     conds, args = [], []
+    if state == "stale":
+        # 저장 형식이 'YYYY-MM-DDTHH:MM:SSZ'라 datetime()의 공백 구분 문자열과는 같은 날짜에서 비교가 어긋난다 — strftime으로 맞춘다
+        fmt = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
+        conds.append(
+            f"((s.state = 'working' AND s.last_seen_hub < {fmt})"
+            " OR (s.state IN ('awaiting_input', 'needs_approval')"
+            f"     AND (d.last_seen_at IS NULL OR d.last_seen_at < {fmt})))")
+        args += [f"-{int(CFG.ttl_stale_min)} minutes", f"-{int(CFG.device_online_min)} minutes"]
+    elif state:
+        conds.append("s.state = ?"); args.append(state)
     if substantive:
         conds.append(_SUBSTANTIVE_SQL)
     if auto == 1:
@@ -261,9 +274,10 @@ def _session_conds(device: str = "", agent: str = "", fe: str = "",
 @app.get("/api/history/sessions")
 async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
                            page: int = 0, device: str = "", agent: str = "",
-                           fe: str = "", project: str = "", auto: int = -1):
+                           fe: str = "", project: str = "", auto: int = -1, state: str = ""):
     """종료 포함 전체 세션 이력 — 태스크·자동화 탭용. 관리자 전용(기기 쪽 소비자 없음).
-    page=0(기본)은 기존 전체 리스트 응답. page>=1이면 필터·페이지 단위 {rows,total,page,pages,facets}."""
+    page=0(기본)은 기존 전체 리스트 응답. page>=1이면 필터·페이지 단위 {rows,total,page,pages,facets}.
+    state: working|awaiting_input|needs_approval|ended 또는 stale(신호 없음) — 자동화 탭 상태 필터(2026-10-01)."""
     _require(request, ("admin",))
     base_from = " FROM sessions s JOIN devices d ON d.id=s.device_id"
     if page < 1:
@@ -279,7 +293,7 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
         return _overlay_unconfirmed(rows)
 
     per = limit if 1 <= limit <= 200 else 20
-    conds, cargs = _session_conds(device, agent, fe, project, days, auto)
+    conds, cargs = _session_conds(device, agent, fe, project, days, auto, state=state)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
     with db.tx() as c:
         total = c.execute("SELECT COUNT(*)" + base_from + where, cargs).fetchone()[0]
@@ -290,7 +304,7 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
             " ORDER BY s.last_seen_hub DESC LIMIT ? OFFSET ?",
             cargs + [per, (page - 1) * per]).fetchall()]
         # 같은 필터에서 감춘 no-op 세션 수 — 조용히 버리지 않고 탭에 "N건 제외"로 알린다
-        nconds, nargs = _session_conds(device, agent, fe, project, days, auto, substantive=False)
+        nconds, nargs = _session_conds(device, agent, fe, project, days, auto, substantive=False, state=state)
         nconds.append("NOT " + _SUBSTANTIVE_SQL)
         hidden = c.execute("SELECT COUNT(*)" + base_from +
                            " WHERE " + " AND ".join(nconds), nargs).fetchone()[0]
@@ -579,8 +593,9 @@ async def favicon():
     return FileResponse(ASSETS_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
-@app.get("/assets/{name}")
+@app.get("/assets/{name:path}")
 async def assets(name: str):
+    """대시보드 정적 자산 — 하위 폴더(assets/lucide/ 아이콘 원본)까지. 경로 이탈은 parents 검사로 차단."""
     path = (ASSETS_DIR / name).resolve()
     if not path.is_file() or ASSETS_DIR.resolve() not in path.parents:
         raise HTTPException(404)

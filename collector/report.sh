@@ -249,6 +249,27 @@ elif [ "$AGENT" = "claude-code" ] && [ -z "$MODEL" ] && [ -n "$TP" ] && [ -f "$T
   MODEL=$(claude_transcript_model)
 fi
 
+# ── 세션 이름 ─────────────────────────────────────────
+# Claude Code: /rename 이름이 전사본에 custom-title 레코드로 남고 이후 매 턴 다시 붙는다(실측). 데스크톱 앱은
+#   자동 제목을 같은 레코드로 쓴다. 없으면 자동 제목 ai-title(/resume 목록의 그것) — 자동 제목 포함은
+#   2026-10-01 사용자 결정. 꼬리만 본다: 턴마다 반복 기록되므로 충분하고 전체 스캔 비용을 지지 않는다.
+# Codex: 훅 입력·rollout 어디에도 없고 ~/.codex/session_index.jsonl의 thread_name뿐(첫 지시로 자동 생성,
+#   앱에서 바꾼 이름도 같은 필드). 허브는 빈 값을 무시하므로 없으면 안 싣는다.
+SESSION_NAME=""
+if [ "$AGENT" = "claude-code" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
+  SESSION_NAME=$(tail -n 4000 "$TP" 2>/dev/null | grep -E '"type": ?"(custom-title|ai-title)"' | jq -rs '
+    (([.[] | select(type=="object" and .type=="custom-title") | .customTitle // ""] | map(select(. != "")) | last)
+     // ([.[] | select(type=="object" and .type=="ai-title") | .aiTitle // ""] | map(select(. != "")) | last)
+     // "") | tostring | gsub("[\\n\\r\\t]+"; " ") | .[0:120]
+  ' 2>/dev/null) || SESSION_NAME=""
+elif [ "$AGENT" = "codex-cli" ] && [ -f "$HOME/.codex/session_index.jsonl" ]; then
+  # 라인 단위 fromjson? — 쓰다 만 마지막 줄이 있어도 나머지는 읽힌다. 같은 id가 여러 번이면 마지막(최신)
+  SESSION_NAME=$(jq -Rrn --arg id "$SID" '
+    [inputs | fromjson? | select(type=="object" and .id == $id) | .thread_name // "" | tostring]
+    | map(select(. != "")) | last // "" | gsub("[\\n\\r\\t]+"; " ") | .[0:120]
+  ' "$HOME/.codex/session_index.jsonl" 2>/dev/null) || SESSION_NAME=""
+fi
+
 # ── 프로젝트/브랜치 ────────────────────────────────────
 PROJECT=""; BRANCH=""; ORIGIN=""; SUBDIR=""
 if [ -n "$CWD" ] && [ -d "$CWD" ]; then
@@ -386,6 +407,12 @@ BGSET=$(printf '%s' "$IN" | jq -c '
   else empty end' 2>/dev/null) || BGSET=""
 if [ -n "$BGSET" ]; then
   MERGED=$(printf '%s' "$DETAIL" | jq -c --argjson s "$BGSET" '. + $s' 2>/dev/null) \
+    && [ -n "$MERGED" ] && DETAIL="$MERGED"
+fi
+
+# 세션 이름은 모든 이벤트에 싣는다 — 이름은 세션 중간에 생기거나 바뀌므로(/rename, 앱 제목 생성) 매 신호가 갱신 기회
+if [ -n "$SESSION_NAME" ]; then
+  MERGED=$(printf '%s' "$DETAIL" | jq -c --arg n "$SESSION_NAME" '. + {session_name: $n}' 2>/dev/null) \
     && [ -n "$MERGED" ] && DETAIL="$MERGED"
 fi
 
