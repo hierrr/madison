@@ -199,17 +199,34 @@ async def history_events(request: Request, device: str = "", agent: str = "",
     return out
 
 
+def _is_unconfirmed(st: str, last_seen_hub, device_seen_at, now=None) -> bool:
+    """'신호 없음' 판정 — /api/state(state.assemble §4.1)와 같은 규칙: working은 TTL 초과, 대기 상태는 기기 오프라인."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    seen = state._age_min(now, last_seen_hub) or 0
+    dev_age = state._age_min(now, device_seen_at)
+    dev_online = dev_age is not None and dev_age <= CFG.device_online_min
+    return ((st == "working" and seen > CFG.ttl_stale_min)
+            or (st in ("awaiting_input", "needs_approval") and not dev_online))
+
+
 def _overlay_unconfirmed(rows: list[dict]):
-    """unconfirmed 오버레이 — /api/state(state.assemble §4.1)와 같은 판정."""
+    """unconfirmed 오버레이 — 행마다 _is_unconfirmed."""
     now = datetime.datetime.now(datetime.timezone.utc)
     for r in rows:
-        seen = state._age_min(now, r["last_seen_hub"]) or 0
-        dev_age = state._age_min(now, r.pop("device_seen_at", None))
-        dev_online = dev_age is not None and dev_age <= CFG.device_online_min
-        r["unconfirmed"] = (
-            (r["state"] == "working" and seen > CFG.ttl_stale_min)
-            or (r["state"] in ("awaiting_input", "needs_approval") and not dev_online)
-        )
+        r["unconfirmed"] = _is_unconfirmed(r["state"], r["last_seen_hub"], r.pop("device_seen_at", None), now)
+    return rows
+
+
+def end_reason_for(c, device_id: int, agent: str, session_id: str) -> str | None:
+    """수동 종료 처리의 사유 — 신호가 끊긴 세션이면 'lost'(신호 끊김), 살아 있는 세션을 사람이 닫으면 'manual'.
+    나중에 봐도 왜 종료됐는지 알 수 있게 허브가 판정해 기록한다(2026-10-01 사용자 요청). 세션 없으면 None."""
+    row = c.execute(
+        "SELECT s.state, s.last_seen_hub, d.last_seen_at AS device_seen_at FROM sessions s"
+        " JOIN devices d ON d.id=s.device_id WHERE s.device_id=? AND s.agent=? AND s.session_id=?",
+        (device_id, agent, session_id)).fetchone()
+    if row is None:
+        return None
+    return "lost" if _is_unconfirmed(row["state"], row["last_seen_hub"], row["device_seen_at"]) else "manual"
     return rows
 
 
@@ -235,8 +252,8 @@ def _session_conds(device: str = "", agent: str = "", fe: str = "",
                    substantive: bool = True, state: str = "") -> tuple[list[str], list]:
     """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭.
     substantive=True면 프롬프트·턴 없는 no-op 세션을 제외한다.
-    state는 세션 상태값 그대로, 또는 'stale' = 현황의 '신호 없음' 오버레이(_overlay_unconfirmed)와 같은 판정:
-    working은 TTL 초과, 대기 상태는 기기 오프라인. 종료 훅을 못 받고 남은 좀비 세션을 골라내는 용도."""
+    state는 세션 상태값 그대로, 'stale' = 현황의 '신호 없음' 오버레이(_overlay_unconfirmed)와 같은 판정(working은 TTL 초과,
+    대기 상태는 기기 오프라인 — 종료 훅을 못 받고 남은 좀비 세션용), 또는 'ended:<사유>' = 종료 사유별('-'는 사유 없음, 2026-10-01)."""
     conds, args = [], []
     if state == "stale":
         # 저장 형식이 'YYYY-MM-DDTHH:MM:SSZ'라 datetime()의 공백 구분 문자열과는 같은 날짜에서 비교가 어긋난다 — strftime으로 맞춘다
@@ -246,6 +263,13 @@ def _session_conds(device: str = "", agent: str = "", fe: str = "",
             " OR (s.state IN ('awaiting_input', 'needs_approval')"
             f"     AND (d.last_seen_at IS NULL OR d.last_seen_at < {fmt})))")
         args += [f"-{int(CFG.ttl_stale_min)} minutes", f"-{int(CFG.device_online_min)} minutes"]
+    elif state.startswith("ended:"):
+        reason = state[len("ended:"):]
+        conds.append("s.state = 'ended'")
+        if reason == "-":
+            conds.append("COALESCE(s.end_reason, '') = ''")
+        else:
+            conds.append("s.end_reason = ?"); args.append(reason)
     elif state:
         conds.append("s.state = ?"); args.append(state)
     if substantive:
@@ -277,7 +301,7 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
                            fe: str = "", project: str = "", auto: int = -1, state: str = ""):
     """종료 포함 전체 세션 이력 — 태스크·자동화 탭용. 관리자 전용(기기 쪽 소비자 없음).
     page=0(기본)은 기존 전체 리스트 응답. page>=1이면 필터·페이지 단위 {rows,total,page,pages,facets}.
-    state: working|awaiting_input|needs_approval|ended 또는 stale(신호 없음) — 자동화 탭 상태 필터(2026-10-01)."""
+    state: working|awaiting_input|needs_approval|ended|stale(신호 없음)|ended:<사유> — 자동화·태스크 탭 상태 필터(2026-10-01)."""
     _require(request, ("admin",))
     base_from = " FROM sessions s JOIN devices d ON d.id=s.device_id"
     if page < 1:
@@ -318,9 +342,13 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
             " ORDER BY 1, 2", fargs)]
         projects = sorted({r[0] or "(unknown)" for r in c.execute(
             "SELECT DISTINCT COALESCE(s.project,'')" + base_from + fwhere, fargs)})
+        # 종료 사유 선택지 — 탭 범위에 실제로 있는 사유만, 많은 순. ''(사유 없음)은 '-'로
+        reasons = [r[0] or "-" for r in c.execute(
+            "SELECT COALESCE(s.end_reason,'') AS r, COUNT(*) AS n" + base_from + fwhere +
+            " AND s.state = 'ended' GROUP BY r ORDER BY n DESC, r", fargs)]
     return {"rows": _overlay_unconfirmed(rows), "total": total, "hidden": hidden,
             "page": page, "pages": pages,
-            "facets": {"devices": devices, "agents": agents, "projects": projects}}
+            "facets": {"devices": devices, "agents": agents, "projects": projects, "reasons": reasons}}
 
 
 @app.post("/api/sessions/end")
@@ -333,15 +361,18 @@ async def end_session(request: Request):
         dev = c.execute("SELECT id FROM devices WHERE name=?", (name,)).fetchone()
         if not dev:
             raise HTTPException(404, f"기기 '{name}' 없음")
-        now = state.utcnow()
-        cur = c.execute(
-            "UPDATE sessions SET state='ended', ended_at=?, end_reason='manual', state_since=?"
-            " WHERE device_id=? AND agent=? AND session_id=?",
-            (now, now, dev["id"], str(body.get("agent") or ""), str(body.get("session_id") or "")),
-        )
-        if cur.rowcount != 1:
+        agent = str(body.get("agent") or "")
+        sid = str(body.get("session_id") or "")
+        reason = end_reason_for(c, dev["id"], agent, sid)
+        if reason is None:
             raise HTTPException(404, "세션 없음")
-    return {"ok": True}
+        now = state.utcnow()
+        c.execute(
+            "UPDATE sessions SET state='ended', ended_at=?, end_reason=?, state_since=?"
+            " WHERE device_id=? AND agent=? AND session_id=?",
+            (now, reason, now, dev["id"], agent, sid),
+        )
+    return {"ok": True, "end_reason": reason}
 
 
 @app.get("/api/devices")

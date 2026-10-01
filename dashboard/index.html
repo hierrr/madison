@@ -349,6 +349,18 @@
   /* 에이전트 아이콘 — 라벨 대신. 각 아이콘이 자체 배경을 가짐 */
   .att .aicon { width: 18px; height: 18px; flex: none; border-radius: 4px; object-fit: contain; }
   .att .what { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 우측 레일(주의 필요·최근 이벤트·자동화)은 폭이 좁아 한 줄 말줄임이 대부분 잘린다 — 잘린 항목에 마우스를 올리면
+     카드를 늘리지 않고 마우스 옆에 전체 내용을 띄운다(2026-10-01 사용자 지정: 제자리 확장이 아니라 툴팁 박스). JS의 #tip 참조 */
+  #tip { position: fixed; z-index: 50; max-width: 380px; padding: 7px 10px; font-size: 12.5px; line-height: 1.45; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--line-2); border-radius: 7px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+    pointer-events: none; white-space: normal; overflow-wrap: anywhere; display: none; }
+  /* 자동화 레일의 신호 끊긴 항목: 체크 버튼으로 종료 처리(표시만) — 자동화 세션은 카드가 없어 여기가 유일한 정리 지점 */
+  .feed .endchk { flex: none; align-self: center; margin-left: auto; width: 20px; height: 20px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid var(--line-2); border-radius: 5px; background: var(--surface); color: var(--ink-3); cursor: pointer; font: inherit; font-size: 10px; }
+  .feed .endchk:hover { color: var(--good-text); border-color: var(--good-text); }
+  .feed .endchk .ico { width: 12px; height: 12px; margin: 0; }
+  .feed .endchk.done { color: var(--good-text); border-color: var(--good-text); background: var(--good-bg); cursor: default; }
+  .feed .endchk.fail { color: var(--crit); border-color: var(--crit); }
   .att .age { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-3); flex: none; }
 
   .hf { border: 1px solid var(--line); border-radius: 7px; background: var(--ground); padding: 9px 11px; }
@@ -838,7 +850,7 @@
       task = esc(workText || '작업 중');
       if (s.current_tool) task += ' — <b>' + esc(s.current_tool) + ' 실행 중</b>';
     } else {
-      task = esc(workText) + (s.end_reason ? ' — 종료(' + esc(s.end_reason) + ')' : '');
+      task = esc(workText) + (s.end_reason ? ' — 종료 · ' + reasonLabel(s.end_reason) : '');
     }
     if (s.unconfirmed) task += ' <b>· 마지막 신호 ' + age(s.seen_min) + '</b>';
     var taskTitle = s.last_summary ? ' title="마지막 응답: ' + esc(s.last_summary) + '"' : '';
@@ -1051,7 +1063,12 @@
             '<span class="etxt">' + sessDot(s) + '<span class="tid">#' + s.id + '</span> ' +
             esc(s.device) + ' · ' + (s.project ? '<i class="ico ico-folder-open dim"></i>' + esc(s.project) : esc(s.agent)) +
             (s.unconfirmed ? ' · 신호 없음' : '') +
-            (work ? ' — ' + esc(String(work).slice(0, 72)) : '') + '</span></li>';
+            (work ? ' — ' + esc(String(work).slice(0, 72)) : '') + '</span>' +
+            (s.unconfirmed
+              ? '<button class="endchk" data-endsession="1" data-device="' + esc(s.device) + '" data-agent="' + esc(s.agent) + '"' +
+                ' data-sid="' + esc(s.session_id) + '" title="신호가 끊긴 자동화 세션 — 체크하면 종료 처리 (표시만, 프로세스 무관)">' +
+                '<i class="ico ico-check"></i></button>'
+              : '') + '</li>';
         }).join('')
       : '<li class="none" style="border-bottom:none">실행 중인 자동화 세션 없음</li>';
 
@@ -1111,6 +1128,38 @@
       .catch(function () { btn.textContent = '실패'; });
   });
 
+  // 우측 레일 툴팁: 말줄임으로 잘린 항목(.att .what, .feed .etxt)에 마우스를 올리면 전체 내용을 마우스 옆 박스로 띄운다.
+  // 잘리지 않은 항목은 띄우지 않는다. 항목이 5초 폴링으로 교체돼도 문서 위임이라 그대로 동작한다.
+  var TIP_SEL = '.att .what, .feed .etxt';
+  var tipEl = document.createElement('div');
+  tipEl.id = 'tip';
+  document.body.appendChild(tipEl);
+  function tipMove(e) {
+    var pad = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+    var x = e.clientX + pad, y = e.clientY + pad;
+    if (x + w > window.innerWidth - 8) x = Math.max(8, e.clientX - w - pad);   // 오른쪽이 모자라면 왼쪽에
+    if (y + h > window.innerHeight - 8) y = Math.max(8, e.clientY - h - pad);  // 아래가 모자라면 위에
+    tipEl.style.left = x + 'px';
+    tipEl.style.top = y + 'px';
+  }
+  document.addEventListener('mouseover', function (e) {
+    var el = e.target.closest(TIP_SEL);
+    if (!el || el.scrollWidth <= el.clientWidth + 1) return;
+    tipEl.textContent = el.textContent.trim();
+    tipEl.style.display = 'block';
+    tipMove(e);
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (tipEl.style.display !== 'block') return;
+    if (!e.target.closest(TIP_SEL)) { tipEl.style.display = 'none'; return; }
+    tipMove(e);
+  });
+  document.addEventListener('mouseout', function (e) {
+    var el = e.target.closest(TIP_SEL);
+    if (!el || (e.relatedTarget && el.contains(e.relatedTarget))) return;
+    tipEl.style.display = 'none';
+  });
+
   // 세션 수동 종료 (표시상 — 종료 신호가 없는 세션 정리용)
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-endsession]');
@@ -1121,8 +1170,13 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device: btn.dataset.device, agent: btn.dataset.agent, session_id: btn.dataset.sid })
     }).then(function (r) {
-      btn.textContent = r.ok ? '종료됨' : '실패';
-    }).catch(function () { btn.textContent = '실패'; });
+      // 레일의 체크 버튼은 아이콘만 — 글자를 넣으면 20px 안에서 '종료/됨'으로 줄바꿈된다(2026-10-01 실사고)
+      if (btn.classList.contains('endchk')) { btn.classList.add(r.ok ? 'done' : 'fail'); btn.title = r.ok ? '종료 처리됨' : '실패'; }
+      else btn.textContent = r.ok ? '종료됨' : '실패';
+    }).catch(function () {
+      if (btn.classList.contains('endchk')) { btn.classList.add('fail'); btn.title = '실패'; }
+      else btn.textContent = '실패';
+    });
   });
 
   // 복사 (세션 ID / resume 명령) — 위임
@@ -1174,6 +1228,9 @@
       ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
   }
   var STATE_LABEL = { working: '작업 중', awaiting_input: '입력 대기', needs_approval: '승인 필요', ended: '종료' };
+  // 종료 사유는 원문 그대로 — 에이전트가 보고한 공식 값(other·prompt_input_exit·clear·resume…)도, 허브가 대시보드 종료 처리 때
+  // 적는 값(manual=살아 있는 세션을 사람이 닫음, lost=신호 끊긴 세션 정리)도 한글로 바꾸지 않는다 (2026-10-01 사용자 결정: 통일성)
+  function reasonLabel(r) { return esc(r || ''); }
   function sdot(cls) { return '<span class="sdot ' + cls + '"></span>'; }
   var SESSION_DOT = { working: 's-work', awaiting_input: 's-await', needs_approval: 's-appr', ended: 's-end' };
   // 세션 상태점 — 끊김 의심(unconfirmed)이면 상태색 대신 stale 회색 (현황 카드 칩과 같은 기준)
@@ -1247,7 +1304,7 @@
     tasks: null, queue: null, events: null, auto: null,   // 탭별 서버 페이지 응답 {rows,total,page,pages,facets}
     devF: { online: true, quiet: true, revoked: false },
     devSort: { key: 'seen', dir: 'asc' },
-    taskF: { device: '', agent: '', fe: '', project: '', days: '0' }
+    taskF: { device: '', agent: '', fe: '', project: '', state: '', days: '0' }
   };
 
   // ── 공용 페이지네이션 (페이지당 20개, 서버 페이징) ──
@@ -1276,13 +1333,19 @@
     return '<span class="hcount">' + (res.total || 0) + '</span>' +
       (res.hidden ? '<span class="hnote" title="프롬프트·턴 없이 뜬 세션(모델 프로브·빈 창)은 이벤트 원장에만 남기고 목록에서 감춤">빈 세션 ' + res.hidden + '건 제외</span>' : '');
   }
-  // 세션 상태 필터 — 'stale'은 상태값이 아니라 현황의 '신호 없음' 오버레이와 같은 판정(서버 _session_conds)
-  function stateSel(attr, cur) {
-    return '<select class="hsel" ' + attr + '="state">' +
-      [['', '상태 전체'], ['working', '작업 중'], ['awaiting_input', '입력 대기'], ['needs_approval', '승인 필요'],
-       ['ended', '종료'], ['stale', '신호 없음']].map(function (o) {
-        return '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
-      }).join('') + '</select>';
+  // 세션 상태 필터 — 'stale'은 상태값이 아니라 현황의 '신호 없음' 오버레이와 같은 판정(서버 _session_conds).
+  // 종료는 사유별로도 고를 수 있다('ended:<사유>') — 선택지는 서버가 그 탭 범위에 실제로 있는 사유만 내려준다 (2026-10-01)
+  function stateSel(attr, cur, reasons) {
+    function opt(v, label) { return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' + label + '</option>'; }
+    var html = [['', '상태 전체'], ['working', '작업 중'], ['awaiting_input', '입력 대기'], ['needs_approval', '승인 필요'],
+                ['stale', '신호 없음'], ['ended', '종료 전체']].map(function (o) { return opt(o[0], o[1]); }).join('');
+    if (reasons && reasons.length) {
+      // '종료 전체' 바로 아래에 사유만 들여써서 — 그룹 제목·'종료 ·' 접두어 없이 (2026-10-01 사용자 지정)
+      html += reasons.map(function (r) {
+        return opt('ended:' + r, '\u00a0\u00a0\u00a0\u00a0' + (r === '-' ? '(사유 없음)' : reasonLabel(r)));
+      }).join('');
+    }
+    return '<select class="hsel" ' + attr + '="state">' + html + '</select>';
   }
   function daysSel(attr, cur) {
     return '<select class="hsel" ' + attr + '="days">' +
@@ -1293,7 +1356,7 @@
   function loadTasks() {
     var f = HIST.taskF;
     getJSON('/api/history/sessions?' + qsBuild({ page: PG.tasks, limit: 20, auto: 0,
-      device: f.device, agent: f.agent, fe: f.fe, project: f.project,
+      device: f.device, agent: f.agent, fe: f.fe, project: f.project, state: f.state,
       days: f.days === '0' ? '' : f.days }))
       .then(function (res) { HIST.tasks = res; PG.tasks = res.page; renderTasks(); })
       .catch(function () { document.getElementById('tasksTable').textContent = '불러오기 실패'; });
@@ -1550,7 +1613,8 @@
         '<td><span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
-        '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + '</td>' +
+        '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') +
+          (s.state === 'ended' && s.end_reason ? ' <span class="dim">· ' + reasonLabel(s.end_reason) + '</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
         '<td class="mono dim">' + fmtTs(s.started_at) + ' → ' + fmtTs(s.last_seen_hub) + '</td></tr>' +
         '<tr class="subrow hidden" id="' + rid + '"><td colspan="8"><div class="subev">이벤트 불러오는 중…</div></td></tr>';
@@ -1560,7 +1624,7 @@
       '<select class="hsel" data-af="device">' + optsFor(fc.devices || [], AF.device, '기기 전체') + '</select>' +
       '<select class="hsel" data-af="agent">' + agentOptsFor(fc.agents, agentPairVal(AF)) + '</select>' +
       '<select class="hsel" data-af="project">' + optsFor(fc.projects || [], AF.project, '프로젝트 전체') + '</select>' +
-      stateSel('data-af', AF.state) +
+      stateSel('data-af', AF.state, fc.reasons) +
       daysSel('data-af', AF.days) +
       hcountHtml(res) +
       '</div>' +
@@ -1647,7 +1711,7 @@
         agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(s.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
-        '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + (s.end_reason ? ' <span class="dim">(' + esc(s.end_reason) + ')</span>' : '') + '</td>' +
+        '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + (s.end_reason ? ' <span class="dim">· ' + reasonLabel(s.end_reason) + '</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
         '<td class="mono dim">' + esc(String(s.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '')) +
         (s.effort ? '/' + esc(s.effort) : '') + '</td>' +
@@ -1659,6 +1723,7 @@
       '<select class="hsel" data-taskf="device">' + optsFor(fc.devices || [], f.device, '기기 전체') + '</select>' +
       '<select class="hsel" data-taskf="agent">' + agentOptsFor(fc.agents, agentPairVal(f)) + '</select>' +
       '<select class="hsel" data-taskf="project">' + optsFor(fc.projects || [], f.project, '프로젝트 전체') + '</select>' +
+      stateSel('data-taskf', f.state, fc.reasons) +
       daysSel('data-taskf', f.days) +
       hcountHtml(res) +
       '</div>' +
