@@ -349,9 +349,9 @@
   /* 에이전트 아이콘 — 라벨 대신. 각 아이콘이 자체 배경을 가짐 */
   .att .aicon { width: 18px; height: 18px; flex: none; border-radius: 4px; object-fit: contain; }
   .att .what { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* 우측 레일(주의 필요·최근 이벤트·자동화)은 폭이 좁아 한 줄 말줄임이 대부분 잘린다 — 잘린 항목에 마우스를 올리면
-     카드를 늘리지 않고 마우스 옆에 전체 내용을 띄운다(2026-10-01 사용자 지정: 제자리 확장이 아니라 툴팁 박스). JS의 #tip 참조 */
-  #tip { position: fixed; z-index: 50; max-width: 380px; padding: 7px 10px; font-size: 12.5px; line-height: 1.45; color: var(--ink);
+  /* 우측 레일(주의 필요·자동화·최근 이벤트)은 폭이 좁아 한 줄 말줄임이 대부분 잘린다 — 잘린 항목에 마우스를 올리면
+     카드를 늘리지 않고 마우스 옆에 전체 내용을 띄운다(2026-10-01 사용자 지정: 제자리 확장이 아니라 툴팁 박스). JS의 #railtip 참조 — 기존 data-d 툴팁(#tip, .tip)과 id가 겹치면 그쪽이 display:none 이 되어 리포트·사용량 호버가 사라진다(2026-10-07 실사고) */
+  #railtip { position: fixed; z-index: 50; max-width: 380px; padding: 7px 10px; font-size: 12.5px; line-height: 1.45; color: var(--ink);
     background: var(--surface); border: 1px solid var(--line-2); border-radius: 7px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
     pointer-events: none; white-space: normal; overflow-wrap: anywhere; display: none; }
   /* 자동화 레일의 신호 끊긴 항목: 체크 버튼으로 종료 처리(표시만) — 자동화 세션은 카드가 없어 여기가 유일한 정리 지점 */
@@ -565,8 +565,8 @@
     <button class="tab" data-view="devices" aria-selected="false">기기</button>
     <button class="tab" data-view="tasks" aria-selected="false">태스크</button>
     <button class="tab" data-view="handoff" aria-selected="false">핸드오프</button>
-    <button class="tab" data-view="events" aria-selected="false">이벤트</button>
     <button class="tab" data-view="auto" aria-selected="false">자동화</button>
+    <button class="tab" data-view="events" aria-selected="false">이벤트</button>
     <button class="tab" data-view="report" aria-selected="false">리포트</button>
     <button class="tab" data-view="usage" aria-selected="false">사용량</button>
     <button class="tab" data-view="settings" aria-selected="false">설정</button>
@@ -632,14 +632,14 @@
         <div id="hfList"></div>
       </section>
 
-      <section class="panel" aria-label="최근 이벤트">
-        <h2><span class="hmk" style="background:var(--lg-blue)"></span>최근 이벤트</h2>
-        <ul class="feed" id="feed"></ul>
+      <section class="panel" aria-label="자동화">
+        <h2><span class="hmk" style="background:var(--lg-blue)"></span>자동화 <span class="count" id="autoLiveCount">0</span></h2>
+        <ul class="feed" id="autoLive"></ul>
       </section>
 
-      <section class="panel" aria-label="자동화">
-        <h2><span class="hmk" style="background:var(--lg-violet)"></span>자동화 <span class="count" id="autoLiveCount">0</span></h2>
-        <ul class="feed" id="autoLive"></ul>
+      <section class="panel" aria-label="최근 이벤트">
+        <h2><span class="hmk" style="background:var(--lg-violet)"></span>최근 이벤트</h2>
+        <ul class="feed" id="feed"></ul>
       </section>
 
       <section class="panel" aria-label="상태 정의">
@@ -661,17 +661,17 @@
   <div id="view-handoff" class="view hidden">
     <div class="htwrap" id="queueTable">불러오는 중…</div>
   </div>
-  <div id="view-events" class="view hidden"><div class="htwrap" id="eventsTable">불러오는 중…</div></div>
   <div id="view-auto" class="view hidden"><div class="htwrap" id="autoTable">불러오는 중…</div></div>
+  <div id="view-events" class="view hidden"><div class="htwrap" id="eventsTable">불러오는 중…</div></div>
   <div id="view-usage" class="view hidden">
     <div class="rpt-controls">
       <div class="seg" id="uRange">
-        <button data-d="1">24시간</button>
-        <button data-d="7">7일</button>
-        <button data-d="30" class="on">30일</button>
-        <button data-d="90">90일</button>
-        <button data-d="365">1년</button>
-        <button data-d="0">전체</button>
+        <button data-days="1">24시간</button>
+        <button data-days="7">7일</button>
+        <button data-days="30" class="on">30일</button>
+        <button data-days="90">90일</button>
+        <button data-days="365">1년</button>
+        <button data-days="0">전체</button>
       </div>
       <div class="seg" id="uAgent">
         <button data-a="" class="on">전체</button>
@@ -1132,7 +1132,7 @@
   // 잘리지 않은 항목은 띄우지 않는다. 항목이 5초 폴링으로 교체돼도 문서 위임이라 그대로 동작한다.
   var TIP_SEL = '.att .what, .feed .etxt';
   var tipEl = document.createElement('div');
-  tipEl.id = 'tip';
+  tipEl.id = 'railtip';
   document.body.appendChild(tipEl);
   function tipMove(e) {
     var pad = 14, w = tipEl.offsetWidth, h = tipEl.offsetHeight;
@@ -2225,8 +2225,8 @@
 
   document.getElementById('uRange').addEventListener('click', function (e) {
     var b = e.target.closest('button'); if (!b) return;
-    UF.days = b.dataset.d;
-    Array.prototype.forEach.call(this.children, function (c) { c.classList.toggle('on', c.dataset.d === UF.days); });
+    UF.days = b.dataset.days;
+    Array.prototype.forEach.call(this.children, function (c) { c.classList.toggle('on', c.dataset.days === UF.days); });
     loadUsage();
   });
   document.getElementById('uAgent').addEventListener('click', function (e) {
