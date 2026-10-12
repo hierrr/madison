@@ -503,7 +503,8 @@
   .foot { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--ink-3); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .foot .mono { font-family: var(--mono); font-size: 11px; }
 
-  .tip { position: fixed; z-index: 10; pointer-events: none; background: var(--ink); color: var(--ground); font-family: var(--mono); font-size: 11px; border-radius: 5px; padding: 3px 8px; opacity: 0; transition: opacity 0.1s; white-space: nowrap; }
+  /* 긴 내용(사용량 갱신 실패 사유 등)은 접어 보인다 — 짧은 스파크바 툴팁은 max-width 안이라 그대로 한 줄 */
+  .tip { position: fixed; z-index: 10; pointer-events: none; background: var(--ink); color: var(--ground); font-family: var(--mono); font-size: 11px; border-radius: 5px; padding: 3px 8px; opacity: 0; transition: opacity 0.1s; white-space: normal; overflow-wrap: anywhere; max-width: min(640px, calc(100vw - 16px)); }
   .tip.show { opacity: 1; }
 
   @media (max-width: 1020px) {
@@ -925,9 +926,11 @@
         return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
       }).join('');
       var ago = d.updated ? Math.round((Date.now() - new Date(d.updated).getTime()) / 60000) : null;
-      if (d.error) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" title="' + esc(d.error) + '">실패 · 마지막 값</span></div></div>';
+      // 실패 사유는 공용 data-d 툴팁(#tip)으로 — 브라우저 기본 title은 5초 폴링마다 행이 다시 그려져 뜨기 전에 사라졌다.
+      // 사유에 줄바꿈 포함 JSON 본문이 올 수 있어 공백을 한 칸으로 접는다.
+      if (d.error) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" data-d="' + esc(String(d.error).replace(/\s+/g, ' ').trim()) + '">실패 · 마지막 값</span></div></div>';
       else if (ago !== null && ago > 5) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim">' + ago + '분 전</span></div></div>';
-      rows.innerHTML = html;
+      if (rows._html !== html) { rows._html = html; rows.innerHTML = html; }   // 같은 내용이면 다시 그리지 않는다 — 호버 중인 요소 보존
     });
   }
   function sparkHtml(items, key, labelFn) {
