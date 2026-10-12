@@ -303,7 +303,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 | `EVENT_RETENTION_DAYS` | `0` | 이벤트 로그 보존 일수 — `0`이면 무기한 보존 |
 | `TASK_SUMMARY` | `1` | 허브의 한 줄 요약 — 허브 기기에 선택한 프로바이더의 CLI 필요(없으면 원문 발췌로 대체) |
 | `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | 요약 워커가 호출하는 모델·`claude` 바이너리 |
-| `CODEX_BIN` | 자동 탐색 | 프로바이더를 Codex로 고를 때 쓰는 `codex` 바이너리 (PATH → 최신 nvm 설치본 순) |
+| `CODEX_BIN` | 자동 탐색 | Codex 프로바이더·한도 수집에 쓰는 `codex` 바이너리 (PATH → `codex update`가 두는 standalone 설치본 `~/.local/bin/codex` → 최신 nvm 설치본 순) |
 | `REPORT` | `1` | 일일/주간/월간 업무 리포트 |
 | `REPORT_MODEL` | `claude-sonnet-5` | 리포트 생성 모델 |
 | `DIGEST_MODEL` | `claude-sonnet-5` | 프로젝트 블록이 예산을 넘을 때 긴 세션을 미리 압축하는 모델 — 추출 작업이라 리포트 모델보다 싼 모델로 충분 |

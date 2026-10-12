@@ -20,13 +20,19 @@ def _load_env(path: Path) -> dict:
 
 
 def _find_codex() -> str:
-    """PATH → nvm 설치본 순으로 codex를 찾는다 (launchd의 최소 PATH 대비)."""
+    """PATH → standalone 설치본 → nvm 설치본 순으로 codex를 찾는다 (launchd의 최소 PATH 대비).
+    `codex update`는 npm 전역본을 ~/.codex/packages/standalone 아래 독립 바이너리로 옮기고
+    ~/.local/bin/codex 심링크를 남긴다 — 둘 다 launchd PATH 밖이라 직접 본다."""
     import glob
     import shutil
     found = shutil.which("codex")
     if found:
         return found
-    cands = glob.glob(str(Path.home() / ".nvm/versions/node/*/bin/codex"))
+    home = Path.home()
+    for cand in (home / ".local/bin/codex", home / ".codex/packages/standalone/current/bin/codex"):
+        if cand.exists():
+            return str(cand)
+    cands = glob.glob(str(home / ".nvm/versions/node/*/bin/codex"))
     if cands:
         return max(cands, key=lambda p: Path(p).stat().st_mtime)  # 최근 설치본
     return "codex"

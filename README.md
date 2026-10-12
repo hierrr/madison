@@ -347,7 +347,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `EVENT_RETENTION_DAYS` | `0` | Event log retention in days — `0` keeps events forever |
 | `TASK_SUMMARY` | `1` | One-line summaries on the hub — needs the selected provider's CLI on the hub machine (else it falls back to a raw excerpt) |
 | `TASK_SUMMARY_MODEL` / `TASK_SUMMARY_BIN` | Haiku / `~/.local/bin/claude` | Model and `claude` binary the summary worker calls |
-| `CODEX_BIN` | auto-detected | `codex` binary, used when a provider is set to Codex (searches PATH, then the newest nvm install) |
+| `CODEX_BIN` | auto-detected | `codex` binary for the Codex provider and the rate-limit poll (searches PATH, then the standalone install that `codex update` leaves at `~/.local/bin/codex`, then the newest nvm install) |
 | `REPORT` | `1` | Daily/weekly/monthly work reports |
 | `REPORT_MODEL` | `claude-sonnet-5` | Model for report generation |
 | `DIGEST_MODEL` | `claude-sonnet-5` | Model that pre-compresses long sessions when a project block exceeds its budget — extraction work, so a cheaper model than the report model is fine |
