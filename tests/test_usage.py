@@ -226,3 +226,60 @@ class EpochTests(unittest.TestCase):
         self.assertEqual(usage.to_epoch("2026-08-28T00:00:00"), usage.to_epoch("2026-08-28T00:00:00Z"))
         self.assertEqual(usage.to_epoch("2026-08-28T09:00:00+09:00"), usage.to_epoch("2026-08-28T00:00:00Z"))
         self.assertIsNone(usage.to_epoch("nope")); self.assertIsNone(usage.to_epoch(True))
+
+
+class PlanHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_record_only_on_change_and_skip_empty(self):
+        self.assertTrue(usage.record_plan(self.conn, "codex", "Team", ts="2026-09-03T00:00:00Z"))
+        self.assertFalse(usage.record_plan(self.conn, "codex", "Team", ts="2026-09-04T00:00:00Z"))
+        self.assertFalse(usage.record_plan(self.conn, "codex", "", ts="2026-09-05T00:00:00Z"))   # 응답에 플랜 없음
+        self.assertTrue(usage.record_plan(self.conn, "codex", "Prolite", ts="2026-10-12T03:20:15Z"))
+        rows = self.conn.execute("SELECT plan FROM usage_plan_history WHERE provider='codex' ORDER BY id").fetchall()
+        self.assertEqual([r["plan"] for r in rows], ["Team", "Prolite"])
+
+    def test_last_plan_by_ts_not_id(self):
+        # 백필: 현재 플랜이 먼저(id 작게) 들어가고 과거 플랜이 나중에 들어가도 마지막 행은 ts 기준
+        usage.record_plan(self.conn, "codex", "Prolite", ts="2026-10-12T03:20:15Z")
+        self.conn.execute("INSERT INTO usage_plan_history (ts, provider, plan) VALUES (?,?,?)",
+                          ("2026-09-03T00:00:00Z", "codex", "Team"))
+        self.assertFalse(usage.record_plan(self.conn, "codex", "Prolite", ts="2026-10-12T03:23:00Z"))
+
+    def test_changes_within_range_with_carry_in(self):
+        usage.record_plan(self.conn, "codex", "Team", ts="2026-09-03T00:00:00Z")
+        usage.record_plan(self.conn, "codex", "Prolite", ts="2026-10-12T03:20:15Z")
+        usage.record_plan(self.conn, "claude", "Max", ts="2026-09-03T00:00:00Z")
+        # 범위가 변경 이전에서 시작하면 직전 플랜을 범위 밖에서 이어받는다
+        ch = usage.plan_changes(self.conn, "codex", usage.to_epoch("2026-10-01T00:00:00Z"))
+        self.assertEqual(ch, [{"ts": int(usage.to_epoch("2026-10-12T03:20:15Z")), "from": "Team", "to": "Prolite", "drops": []}])
+        # 범위가 변경 이후에서 시작하면 변경 없음; 첫 관측만 있는 프로바이더도 변경 없음
+        self.assertEqual(usage.plan_changes(self.conn, "codex", usage.to_epoch("2026-10-12T04:00:00Z")), [])
+        self.assertEqual(usage.plan_changes(self.conn, "claude", None), [])
+        # 전체 범위
+        self.assertEqual(len(usage.plan_changes(self.conn, "codex", None)), 1)
+        # history()에 실린다
+        h = usage.history(self.conn, days=0)
+        self.assertEqual(h["codex"]["plan_changes"][0]["to"], "Prolite")
+        self.assertEqual(h["claude"]["plan_changes"], [])
+
+    def test_drop_at_plan_change_is_not_an_early_reset(self):
+        # 2026-10-12 실측: Team 7d 16%(리셋 예정 10-15) → 플랜 변경 1초 뒤 Prolite 7d 2% — 조기 리셋이 아니라 새 플랜의 한도
+        win = HistoryTests.win
+        usage.record_plan(self.conn, "codex", "Team", ts="2026-09-03T00:00:00Z")
+        usage.record_history(self.conn, "codex", [win("7d", 16, usage.to_epoch("2026-10-15T08:34:34Z"))], ts="2026-10-08T09:05:19Z")
+        usage.record_plan(self.conn, "codex", "Prolite", ts="2026-10-12T03:20:15Z")
+        usage.record_history(self.conn, "codex", [win("7d", 2, usage.to_epoch("2026-10-19T02:50:34Z"))], ts="2026-10-12T03:20:16Z")
+        # 플랜과 무관한 진짜 조기 리셋(변경 하루 뒤)은 그대로 남는다
+        usage.record_history(self.conn, "codex", [win("7d", 40, usage.to_epoch("2026-10-19T02:50:34Z"))], ts="2026-10-13T00:00:00Z")
+        usage.record_history(self.conn, "codex", [win("7d", 0, usage.to_epoch("2026-10-20T00:00:00Z"))], ts="2026-10-13T06:00:00Z")
+        h = usage.history(self.conn, days=0)
+        self.assertEqual(h["codex"]["plan_changes"][0]["drops"], [{"win": "7d", "from": 16, "to": 2}])
+        early = [(r["from"], r["to"]) for r in h["codex"]["resets"]["7d"] if r["early"]]
+        self.assertEqual(early, [(40, 0)])

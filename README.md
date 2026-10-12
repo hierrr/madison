@@ -83,6 +83,8 @@ push a piece of work from one machine to another without walking over to it.
 - **Subscription usage** — the overview shows Claude Code and Codex rate-limit
   windows (5-hour, weekly, reset credits) with bars and warning colors; the hub
   reads them itself from the providers' own endpoints (see Security model).
+  Plan changes (e.g. Team → Pro) are recorded and marked on the usage tab's
+  history chart, since windows and quotas differ between plans.
   The gauges are **for the account signed in on the hub machine** — limits are
   per-account, so consumption from every device on that account is already
   included, while devices signed into a different account never appear in any

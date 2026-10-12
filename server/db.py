@@ -148,6 +148,13 @@ CREATE TABLE IF NOT EXISTS usage_history (
   resets_at REAL                  -- epoch (없으면 NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_history ON usage_history(provider, win, ts);
+CREATE TABLE IF NOT EXISTS usage_plan_history (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,               -- 허브 UTC ISO — 그 플랜을 처음 관측한 수집 시각
+  provider TEXT NOT NULL,         -- 'claude' | 'codex'
+  plan TEXT NOT NULL              -- 타일 표기 그대로('Max', 'Team', 'Prolite' …)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_plan_history ON usage_plan_history(provider, ts);
 CREATE TABLE IF NOT EXISTS token_daily (
   day TEXT NOT NULL,              -- ts_device 기준 로컬 날짜 'YYYY-MM-DD'
   device_id INTEGER NOT NULL,

@@ -753,7 +753,7 @@ async def get_metrics(request: Request, range: str = "day", date: str = ""):
 
 @app.get("/api/usage/history")
 async def get_usage_history(request: Request, days: int = 30):
-    """구독 한도 % 변화 이력 — 변화 시점만 저장, 계단선으로 그린다. 조기 리셋도 표시."""
+    """구독 한도 % 변화 이력 — 변화 시점만 저장, 계단선으로 그린다. 조기 리셋·플랜 변경도 표시."""
     _require(request, ("admin",))
     with db.tx() as c:
         h = usage.history(c, days)

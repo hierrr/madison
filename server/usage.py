@@ -447,6 +447,66 @@ def record_history(c, provider: str, windows: list, ts: str | None = None) -> in
     return n
 
 
+def record_plan(c, provider: str, plan, ts: str | None = None) -> bool:
+    """플랜명이 마지막 행과 다를 때만 usage_plan_history에 append. 반환: 추가 여부.
+    플랜이 바뀌면 창 구성·한도 자체가 달라 전후 %는 비교 대상이 아니므로 차트에 경계를 그리기 위해 남긴다.
+    빈 플랜(응답에 없음)은 기록하지 않는다. 마지막 행은 ts 기준 — 손으로 넣은 과거 행(백필)이 id 순서와
+    어긋나도 현재 플랜을 바르게 본다."""
+    plan = str(plan or "").strip()
+    if not plan:
+        return False
+    ts = ts or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    last = c.execute("SELECT plan FROM usage_plan_history WHERE provider=? ORDER BY ts DESC, id DESC LIMIT 1",
+                     (provider,)).fetchone()
+    if last is not None and last["plan"] == plan:
+        return False
+    c.execute("INSERT INTO usage_plan_history (ts, provider, plan) VALUES (?,?,?)", (ts, provider, plan))
+    return True
+
+
+def plan_changes(c, provider: str, frm: float | None) -> list:
+    """범위 안의 플랜 변경 [{ts, from, to}] — 직전 플랜은 범위 밖 마지막 행에서 이어받는다.
+    이전 행이 없는 첫 관측은 변경이 아니다."""
+    if frm is not None:
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(frm))
+        prev = c.execute("SELECT plan FROM usage_plan_history WHERE provider=? AND ts < ?"
+                         " ORDER BY ts DESC, id DESC LIMIT 1", (provider, cutoff)).fetchone()
+        rows = c.execute("SELECT ts, plan FROM usage_plan_history WHERE provider=? AND ts >= ? ORDER BY ts, id",
+                         (provider, cutoff))
+    else:
+        prev = None
+        rows = c.execute("SELECT ts, plan FROM usage_plan_history WHERE provider=? ORDER BY ts, id", (provider,))
+    out, prev_plan = [], (prev["plan"] if prev else None)
+    for r in rows:
+        if prev_plan is not None and r["plan"] != prev_plan:
+            ts = to_epoch(r["ts"])
+            out.append({"ts": int(ts) if ts else None, "from": prev_plan, "to": r["plan"], "drops": []})
+        prev_plan = r["plan"]
+    return out
+
+
+PLAN_CHANGE_SLACK = 600   # 초 — 플랜 변경 관측과 이만큼 가까운 pct 하락은 리셋이 아니라 새 플랜의 한도로 본다
+
+
+def _claim_plan_drops(resets: list, changes: list, win: str) -> list:
+    """플랜 변경 시점(±PLAN_CHANGE_SLACK)에 잡힌 하락은 그 변경의 drops로 옮기고 리셋 목록에서 뺀다.
+    플랜이 바뀌면 한도 자체가 달라져 %가 떨어지는데(2026-10-12 Team→Prolite: 7d 16%→2%), 이는 조기
+    리셋(프로바이더 발 초기화)이 아니다. 반환: 남은 리셋."""
+    kept = []
+    for r in resets:
+        hit = None
+        if r.get("ts") is not None:
+            for pc in changes:
+                if pc.get("ts") is not None and abs(r["ts"] - pc["ts"]) <= PLAN_CHANGE_SLACK:
+                    hit = pc
+                    break
+        if hit is None:
+            kept.append(r)
+        else:
+            hit["drops"].append({"win": win, "from": r["from"], "to": r["to"]})
+    return kept
+
+
 RESET_EARLY_SLACK = 600   # 초 — 예정 리셋 시각보다 이만큼 이르면 프로바이더 발 조기 리셋으로 본다
 
 
@@ -486,7 +546,7 @@ def detect_resets(c, provider: str, win: str, frm: float | None) -> list:
 
 
 def history(c, days: int = 30) -> dict:
-    """한도 % 시계열 — {provider: {windows: {win: [[epoch, pct], …]}, resets: {win: […]}}, from, to}.
+    """한도 % 시계열 — {provider: {windows: {win: [[epoch, pct], …]}, resets: {win: […]}, plan_changes: […]}, from, to}.
     변화 시점만 저장돼 있으므로 범위 직전 carry-in 1행을 붙여 계단선 시작 레벨을 준다.
     다운샘플은 **실제 데이터 폭** 기준(≤14일 원본, ≤92일 시간별, 그 이상 일별) — 요청 범위가
     길어도 이력이 짧으면 원본 그대로. 버킷은 마지막 행(MAX(id)의 bare column, SQLite 보장) —
@@ -497,8 +557,10 @@ def history(c, days: int = 30) -> dict:
     first = to_epoch((c.execute("SELECT MIN(ts) t FROM usage_history").fetchone() or {"t": None})["t"])
     span_start = max(first, frm) if (first is not None and frm is not None) else (first if first is not None else now)
     span_days = max(1, int((now - span_start) // 86_400) + 1)
-    out = {p: {"windows": {}, "resets": {}} for p in PROVIDERS}
+    out = {p: {"windows": {}, "resets": {}, "plan_changes": []} for p in PROVIDERS}
     for provider in PROVIDERS:
+        changes = plan_changes(c, provider, frm)
+        out[provider]["plan_changes"] = changes
         for row in c.execute("SELECT DISTINCT win FROM usage_history WHERE provider=?", (provider,)):
             win = row["win"]
             series = []
@@ -526,7 +588,7 @@ def history(c, days: int = 30) -> dict:
                     series.append([int(epoch), r["pct"]])
             if series:
                 out[provider]["windows"][win] = series
-            resets = detect_resets(c, provider, win, frm)
+            resets = _claim_plan_drops(detect_resets(c, provider, win, frm), changes, win)
             if resets:
                 out[provider]["resets"][win] = resets
     return {**out, "from": int(frm) if frm else None, "to": int(now)}
@@ -543,8 +605,10 @@ def refresh() -> dict:
                 _snap[name] = data
             changed = True
             try:
+                ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())   # 같은 시각으로 — 플랜 변경과 그 하락이 짝지어지게
                 with db.tx() as c:
-                    record_history(c, name, data["windows"])
+                    record_history(c, name, data["windows"], ts)
+                    record_plan(c, name, data.get("plan"), ts)
             except Exception:
                 log.exception("usage 히스토리 append 실패")
         except UsageError as exc:

@@ -463,10 +463,12 @@
   .uchart .axis { fill: var(--ink-3); font-size: 9px; font-family: var(--mono); }
   .uchart path.w { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
   .uchart circle.reset { fill: var(--crit); stroke: var(--surface); stroke-width: 1; }
+  .uchart circle.plan { fill: var(--lg-blue); stroke: var(--surface); stroke-width: 1; }
   .ulegend { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-2); margin-top: 8px; }
   .ulegend .mono { font-family: var(--mono); color: var(--ink-3); }
   .ulegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
   .ulegend .reset-note { color: var(--crit); }
+  .ulegend .plan-note { color: var(--lg-blue); }
   .uscroll { overflow-x: auto; padding-bottom: 2px; }
   .tstack { display: flex; gap: 2px; align-items: flex-end; height: 110px; min-width: 100%; width: max-content; }
   /* 컬럼은 전체 높이 히트 영역(호버 툴팁) — 세그먼트는 column-reverse로 바닥부터 쌓인다 */
@@ -1988,7 +1990,7 @@
 
   // 한도 % 계단선 차트 — 라이브러리 없이 인라인 SVG (뷰박스 고정, 폭에 맞춰 비율 유지 스케일)
   // resets: {win: [{ts, from, to, early}]} — 조기(프로바이더 발) 리셋만 마커로 표시
-  function svgSteps(windows, from, to, resets) {
+  function svgSteps(windows, from, to, resets, planChanges) {
     var names = Object.keys(windows);
     if (!names.length) return '<div class="none">아직 기록 없음 — 한도가 변할 때마다 쌓입니다</div>';
     var W = 640, H = 150, L = 30, R = 6, T = 8, B = 16;
@@ -2054,11 +2056,23 @@
           return e.w.replace(' all models', ' 전체') + ' ' + e.r.from + '%→' + e.r.to + '%';
         }).join(' · ') + ' · 조기 리셋 (프로바이더 발)') + '"/>';
     });
+    // 플랜 변경 마커 — 조기 리셋과 같은 줄에 다른 색 점, 같은 호버 툴팁. 플랜이 다르면 창 구성(예: Pro는 7d만)과
+    // 한도 자체가 달라 전후 %는 비교 대상이 아니다. 변경 시점의 하락(drops)은 허브가 리셋에서 빼 여기에 붙인다.
+    var planN = 0;
+    (planChanges || []).forEach(function (pc) {
+      if (pc.ts == null || pc.ts < from || pc.ts > to) return;
+      planN++;
+      var drops = (pc.drops || []).map(function (d) { return d.win.replace(' all models', ' 전체') + ' ' + d.from + '%→' + d.to + '%'; });
+      out += '<circle class="plan" cx="' + x(pc.ts) + '" cy="6" r="3.5" data-d="' +
+        esc(fmtEpoch(pc.ts, short) + ' · 플랜 변경 ' + (pc.from || '?') + ' → ' + (pc.to || '?') +
+            (drops.length ? ' · ' + drops.join(' · ') : '')) + '"/>';
+    });
     out += '</svg><div class="ulegend">' + names.map(function (w, i) {
       var s = windows[w], last = s.length ? s[s.length - 1][1] : null;
       return '<span><i style="background:' + WINCOLORS[i % WINCOLORS.length] + '"></i>' +
         esc(w.replace(' all models', ' 전체')) + (last == null ? '' : ' <span class="mono">' + last + '%</span>') + '</span>';
-    }).join('') + (earlyN ? '<span class="reset-note">● 조기 리셋 ' + earlyN + '회</span>' : '') + '</div>';
+    }).join('') + (earlyN ? '<span class="reset-note">● 조기 리셋 ' + earlyN + '회</span>' : '') +
+      (planN ? '<span class="plan-note">● 플랜 변경 ' + planN + '회</span>' : '') + '</div>';
     return out;
   }
 
@@ -2179,7 +2193,7 @@
       var cap = p === 'claude' ? 'Claude' : 'Codex';
       return '<section class="panel"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
         cap + (d.plan ? ' · ' + esc(d.plan) : '') + '</h2>' +
-        '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}) + '</div></section>';
+        '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}, d.plan_changes || []) + '</div></section>';
     }
     function stat(label, val) {
       return '<div class="mstat"><div class="ml">' + label + '</div><div class="mv">' + val + '</div></div>';
