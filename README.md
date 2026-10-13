@@ -235,6 +235,15 @@ collector path. Open `/hooks` in Codex after installation to review and trust th
 new command hooks. Restart any already-open Claude Code and Codex sessions. Rotate
 `ENROLL_SECRET` once the whole fleet is enrolled.
 
+After upgrading the hub, rerun the installer on each enrolled machine to refresh
+the collector and both agents' handoff skills. The device token is kept, so no
+name or enrollment secret is needed:
+
+```bash
+source ~/.claude/madison/env
+curl -fsSL "$MADISON_URL/install.sh" | bash
+```
+
 ### Windows (beta)
 
 Windows collectors ship as PowerShell scripts (`collector/install.ps1`,
@@ -253,9 +262,11 @@ Linux `install.sh` instead — that path is fully supported, not beta.
   commits, oversized, or binary changes fall back to a pushed `wip/` branch. The
   target machine shows a desktop notification (macOS, within its 5-minute poll), and any
   new session for that repo — Claude Code or Codex — is briefed at start. Nothing
-  is consumed automatically: the handoff stays *pending* until you approve starting
-  it via `/pickup`, which applies the diffs (`git apply -3`), marks it *delivered*,
-  and, when the work is finished, *done*.
+  is consumed by notifications: `/pickup` reads only *pending* handoffs and marks
+  each one *delivered* after reading and summarizing its contents. Receipt does
+  not require approval to start work. When authorized follow-up work begins, it
+  becomes *in_progress*; any required diffs are applied with `git apply -3`.
+  Finished work becomes *done*, and cancelled work becomes *cancelled*.
 
 ## Service registry (report top-level names)
 

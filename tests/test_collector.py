@@ -376,6 +376,29 @@ class CollectorTests(unittest.TestCase):
             self.assertIn("madison.test", log_text)
             self.assertNotIn("example.com", log_text)
 
+    def test_installer_rerun_refreshes_skills_without_reenroll(self):
+        # 허브 갱신 뒤 등록된 기기에서 재실행: enroll 없이 env(토큰)를 보존하고, 두 에이전트의 설치된 스킬을 정본으로 덮는다
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            log = root / "curl.log"
+            original_env = (mad / "env").read_bytes()
+            for agent in (".claude", ".codex"):
+                for skill in ("handoff", "pickup"):
+                    installed = home / agent / "skills" / skill / "SKILL.md"
+                    installed.parent.mkdir(parents=True, exist_ok=True)
+                    installed.write_text("구버전 스킬\n")
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_LOG": str(log)})
+            subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO, check=True, capture_output=True, text=True)
+            self.assertNotIn("/api/enroll", log.read_text())
+            self.assertEqual((mad / "env").read_bytes(), original_env)
+            for agent in (".claude", ".codex"):
+                for skill in ("handoff", "pickup"):
+                    self.assertEqual((home / agent / "skills" / skill / "SKILL.md").read_bytes(),
+                                     (REPO / "collector" / "skills" / skill / "SKILL.md").read_bytes(), f"{agent}/{skill}")
+
     def test_installer_requires_hub_on_first_install(self):
         # 첫 설치(env 없음)에서 --hub 미지정이면 터널 기본값으로 가지 않고 안내와 함께 거절한다
         with tempfile.TemporaryDirectory() as tmp:
