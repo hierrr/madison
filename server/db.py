@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
   summary TEXT,
   doc TEXT,               -- 핸드오프 문서 본문 (허브 운반 — 64KB 상한은 API에서)
   patches TEXT,           -- JSON [{repo, base, diff}] (1MB 상한은 API에서)
-  status TEXT DEFAULT 'pending',
+  status TEXT DEFAULT 'pending',  -- pending | delivered | in_progress | done | cancelled
   created_at TEXT, delivered_at TEXT
 );
 CREATE TABLE IF NOT EXISTS summary_cache (

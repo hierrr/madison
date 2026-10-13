@@ -325,7 +325,7 @@ def assemble(c) -> dict:
         "SELECT h.*, fd.name AS from_name, td.name AS to_name FROM handoffs h"
         " LEFT JOIN devices fd ON fd.id = h.from_device"
         " JOIN devices td ON td.id = h.to_device"
-        " WHERE h.status IN ('pending','delivered')"
+        " WHERE h.status IN ('pending','delivered','in_progress')"
         " ORDER BY h.id DESC LIMIT 10"):
         handoffs.append({
             "id": h["id"], "hf": f"HF-{h['id']:03d}",

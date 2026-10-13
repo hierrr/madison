@@ -541,10 +541,10 @@ async def patch_handoff(request: Request, handoff_id: int):
     actor = _require(request, ("device", "admin"), state_change=True)
     body = await request.json()
     status = str(body.get("status") or "")
-    if status not in ("delivered", "done", "cancelled"):
-        raise HTTPException(400, "status는 delivered|done|cancelled")
+    if status not in ("delivered", "in_progress", "done", "cancelled"):
+        raise HTTPException(400, "status는 delivered|in_progress|done|cancelled")
     with db.tx() as c:
-        sets = "status=?, delivered_at=?" if status == "delivered" else "status=?"
+        sets = "status=?, delivered_at=COALESCE(delivered_at,?)" if status == "delivered" else "status=?"
         args = [status, state.utcnow()] if status == "delivered" else [status]
         # 기기 토큰은 자기 앞으로 온 핸드오프만 전이 가능(admin은 전체)
         where = "id=?"
