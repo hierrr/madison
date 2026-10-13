@@ -224,9 +224,8 @@ if ($EventName -eq "session_start" -and "$($hook.source)" -in @("startup", "resu
         $q = "mine=1&repo=$([uri]::EscapeDataString($project))&origin=$([uri]::EscapeDataString("$origin"))"
         $hs = Invoke-RestMethod -Uri "$($cfg.MADISON_URL)/api/handoffs?$q" -Headers $Headers -TimeoutSec 1
         foreach ($h in $hs) {
-            Write-Output "[MADISON] $($h.from_name)발 핸드오프 $($h.hf) 도착: $($h.summary). 브랜치 $($h.branch)를 체크아웃하고 $($h.doc_path)를 읽은 뒤, 이어서 진행할지 사용자에게 확인하세요."
-            Invoke-RestMethod -Uri "$($cfg.MADISON_URL)/api/handoffs/$($h.id)" -Method Patch -Headers $Headers `
-                -Body '{"status":"delivered"}' -TimeoutSec 1 | Out-Null
+            # 자동 안내는 상태 불변. 문서를 확인한 pickup이 delivered로 기록한다.
+            Write-Output "[MADISON] $($h.from_name)발 핸드오프 $($h.hf) 대기 중: $($h.summary). pickup 스킬(/pickup)로 내용을 확인하고 수신 처리하세요. 후속 작업 착수는 사용자 지시에 따릅니다."
         }
     } catch {}
 }

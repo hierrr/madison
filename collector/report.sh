@@ -472,12 +472,12 @@ if [ "$EV" = "session_start" ]; then
       HLIST=$(curl -sS -m 1 -H "Authorization: Bearer $MADISON_TOKEN" \
         "$MADISON_URL/api/handoffs?mine=1&repo=$QREPO&origin=$QORIGIN" 2>/dev/null) || HLIST=""
       if [ -n "$HLIST" ] && printf '%s' "$HLIST" | jq -e 'type=="array" and length>0' >/dev/null 2>&1; then
-        # 상태는 바꾸지 않는다 — 수신됨(delivered)은 사용자가 착수를 지시할 때 pickup 절차가 찍는다 (§9).
+        # 자동 안내는 상태를 바꾸지 않는다 — pickup에서 문서 확인을 마치면 delivered로 기록한다 (§9).
         # 그래서 픽업 전까지는 새 세션마다(에이전트 무관) 같은 안내가 반복 주입된다.
         printf '%s' "$HLIST" | jq -r '.[] |
           "[MADISON] \(.from_name // "다른 기기")발 핸드오프 \(.hf) 대기 중: \(.summary // "요약 없음") " +
           "(리포 \(.repo // "?"), 브랜치 \(.branch // "?")). " +
-          "이어받을지 사용자에게 확인하고, 승인하면 pickup 스킬(/pickup) 절차로 진행하세요."' 2>/dev/null
+          "pickup 스킬(/pickup)로 내용을 확인하고 수신 처리하세요. 후속 작업 착수는 사용자 지시에 따릅니다."' 2>/dev/null
       fi
       ;;
   esac
