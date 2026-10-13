@@ -17,6 +17,7 @@
     --warn: #fab219; --warn-text: #8a5d00; --warn-bg: rgba(250, 178, 25, 0.16);
     --crit: #d03b3b; --crit-bg: rgba(208, 59, 59, 0.10);
     --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.12);
+    --hf-received: #006f80; --hf-received-bg: rgba(0, 127, 148, 0.12);
     --shadow: 0 1px 2px rgba(11, 11, 11, 0.05);
     --shadow-up: 0 3px 10px rgba(11, 11, 11, 0.09);
     --lg-green: #0FA968; --lg-teal: #00A9C4; --lg-tealdeep: #007F94; --lg-blue: #2E62D9; --lg-violet: #6A44E0;
@@ -41,6 +42,7 @@
       --warn: #fab219; --warn-text: #fab219; --warn-bg: rgba(250, 178, 25, 0.14);
       --crit: #d03b3b; --crit-bg: rgba(208, 59, 59, 0.18);
       --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.16);
+      --hf-received: #00b3c6; --hf-received-bg: rgba(0, 179, 198, 0.16);
       --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
       --shadow-up: 0 3px 10px rgba(0, 0, 0, 0.5);
       --lg-green: #2EE58A; --lg-teal: #00E5FF; --lg-tealdeep: #00B3C6; --lg-blue: #3D7BFF; --lg-violet: #8A5CFF;
@@ -61,6 +63,7 @@
     --warn: #fab219; --warn-text: #fab219; --warn-bg: rgba(250, 178, 25, 0.14);
     --crit: #d03b3b; --crit-bg: rgba(208, 59, 59, 0.18);
     --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.16);
+    --hf-received: #00b3c6; --hf-received-bg: rgba(0, 179, 198, 0.16);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-up: 0 3px 10px rgba(0, 0, 0, 0.5);
     --lg-green: #2EE58A; --lg-teal: #00E5FF; --lg-tealdeep: #00B3C6; --lg-blue: #3D7BFF; --lg-violet: #8A5CFF;
@@ -146,7 +149,7 @@
   .sdot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; flex: none; }
   .s-work { background: var(--accent); } .s-await { background: var(--warn); }
   .s-appr { background: var(--crit); } .s-end { background: var(--line-2); } .s-stale { background: var(--stale); }
-  .s-ok { background: var(--good); } .s-fail { background: var(--crit); }
+  .s-fail { background: var(--crit); }
   .s-run { background: var(--accent); } .s-queue { background: var(--ink-3); }
   .s-on { background: var(--good); } .s-off { background: var(--ink-3); } .s-revoked { background: var(--crit); }
   .ht .num { color: var(--accent); font-weight: 650; }
@@ -198,6 +201,7 @@
   .tile .t-sub { font-size: 12px; color: var(--ink-3); margin-top: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .t-sub .mini { display: inline-flex; align-items: center; gap: 5px; }
   .t-sub .mini i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  #tileHf .t-sub { flex-direction: column; align-items: flex-start; gap: 3px; }  /* 대기·수신됨·작업 중 셋은 한 줄에 안 들어가 세로로 */
 
   .spark { display: flex; align-items: flex-end; gap: 2px; height: 30px; }
   .spark i { width: 7px; border-radius: 2px 2px 0 0; background: var(--spark-dim); height: calc(var(--v) * 100%); min-height: 2px; cursor: default; }
@@ -321,9 +325,7 @@
   .copy:hover { color: #fff; background: var(--accent); border-color: var(--accent); }
   .copy:active { transform: translateY(0.5px); }
   .copy:disabled { opacity: 0.5; cursor: default; transform: none; }
-  /* 완료=녹색, 폐기·종료·취소=빨강, 등록(primary)=accent — 평상시부터 해당 색 채움 */
-  .copy.act-good { color: var(--good-text); background: var(--good-bg); border-color: var(--good); }
-  .copy.act-good:hover { color: #fff; background: var(--good); border-color: var(--good); }
+  /* 폐기·종료=빨강, 등록(primary)=accent — 평상시부터 해당 색 채움. 핸드오프 버튼은 상태색을 따르는 .hfaction */
   .copy.act-danger { color: var(--crit); background: var(--crit-bg); border-color: var(--crit); }
   .copy.act-danger:hover { color: #fff; background: var(--crit); border-color: var(--crit); }
   .copy.act-primary { color: var(--accent); background: var(--accent-bg); border-color: var(--accent); }
@@ -369,12 +371,20 @@
   .hfroute .arr { color: var(--ink-3); font-weight: 400; display: inline-flex; }
   .hfroute .arr .ico { margin: 0; }
   .hfid { font-size: 10.5px; color: var(--ink-3); font-weight: 400; }
-  .hfstate { margin-left: auto; font-family: var(--sans); font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px; color: var(--ink-2); }
-  .hfstate.ok { background: var(--good-bg); }
-  .hfstate.ok::before { content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 3px; vertical-align: -1.5px; background-color: var(--good-text);
+  /* 핸드오프 상태색 — 라벨·건수·이력·해당 상태로 바꾸는 버튼에서 함께 사용 */
+  .hf-pending { --hf-color: var(--warn); --hf-text: var(--warn-text); --hf-bg: var(--warn-bg); }
+  .hf-delivered { --hf-color: var(--hf-received); --hf-text: var(--hf-received); --hf-bg: var(--hf-received-bg); }
+  .hf-in-progress { --hf-color: var(--accent); --hf-text: var(--accent); --hf-bg: var(--accent-bg); }
+  .hf-done { --hf-color: var(--good); --hf-text: var(--good-text); --hf-bg: var(--good-bg); }
+  .hf-cancelled { --hf-color: var(--crit); --hf-text: var(--crit); --hf-bg: var(--crit-bg); }
+  .hfdot { background: var(--hf-color, var(--stale)); }
+  .hfstate { margin-left: auto; font-family: var(--sans); font-size: 11px; font-weight: 600; border-radius: 999px; padding: 1px 8px;
+    color: var(--hf-text, var(--ink-2)); background: var(--hf-bg, var(--stale-bg)); }
+  .hfstate.hf-pending { background: var(--hf-color); color: #0b0b0b; }  /* 진한 노랑 — 타일 sub의 대기 점과 동일 계열 */
+  .hfstate.hf-delivered::before, .hfstate.hf-done::before { content: ""; display: inline-block; width: 11px; height: 11px; margin-right: 3px; vertical-align: -1.5px; background-color: currentColor;
     -webkit-mask: url(/assets/lucide/check.svg) center / contain no-repeat; mask: url(/assets/lucide/check.svg) center / contain no-repeat; }
-  .hfstate.pend { background: var(--warn); color: #0b0b0b; }  /* 진한 노랑 — 타일 sub의 대기 점과 동일 계열 */
-  .hfstate.done { background: var(--stale-bg); }
+  .copy.hfaction { color: var(--hf-text); background: var(--hf-bg); border-color: var(--hf-color); }
+  .copy.hfaction:not(:disabled):hover { color: #fff; background: var(--hf-color); border-color: var(--hf-color); }
   .hf.term { opacity: 0.55; }
   .hfacts { display: flex; gap: 6px; margin-top: 6px; }
   .hfrepo { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); margin-top: 4px; }
@@ -595,12 +605,13 @@
       <span class="t-value"><span id="kDevOn">–</span><small>/<span id="kDevAll">–</span></small></span>
       <span class="t-sub" id="kDevNote"></span>
     </div>
-    <div class="tile">
+    <div class="tile" id="tileHf">
       <span class="t-label"><span class="hmk" style="background:var(--lg-teal);height:11px"></span>핸드오프 큐</span>
       <span class="t-value" id="kHf">–</span>
       <span class="t-sub">
-        <span class="mini"><i style="background:var(--warn)"></i>대기 <span id="kHfPend">0</span></span>
-        <span class="mini"><i style="background:var(--good)"></i>수신됨 <span id="kHfDeliv">0</span></span>
+        <span class="mini"><i class="hfdot hf-pending"></i>대기 <span id="kHfPend">0</span></span>
+        <span class="mini"><i class="hfdot hf-delivered"></i>수신됨 <span id="kHfDeliv">0</span></span>
+        <span class="mini"><i class="hfdot hf-in-progress"></i>작업 중 <span id="kHfWork">0</span></span>
       </span>
     </div>
     <div class="tile usage" id="tileClaude">
@@ -969,12 +980,13 @@
     document.getElementById('kDevAll').textContent = st.kpi.devices_total;
     var offNames = st.devices.filter(function (d) { return !d.online; }).map(function (d) { return d.name; });
     document.getElementById('kDevNote').textContent = offNames.length ? offNames.join(' · ') + ' 무신호' : '전 기기 온라인';
-    // 핸드오프 큐 타일 — 활성(대기/수신) 건수, sub는 주의 필요와 같은 색점 형식
-    var hfActive = st.handoffs.filter(function (h) { return h.status === 'pending' || h.status === 'delivered'; });
-    var hfPend = hfActive.filter(function (h) { return h.status === 'pending'; }).length;
-    document.getElementById('kHf').textContent = hfActive.length;
-    document.getElementById('kHfPend').textContent = hfPend;
-    document.getElementById('kHfDeliv').textContent = hfActive.length - hfPend;
+    // 핸드오프 큐 타일 — 활성(대기/수신/작업 중) 건수, sub는 주의 필요와 같은 색점 형식
+    var hfLive = st.handoffs.filter(hfActive);
+    var hfCount = function (status) { return hfLive.filter(function (h) { return h.status === status; }).length; };
+    document.getElementById('kHf').textContent = hfLive.length;
+    document.getElementById('kHfPend').textContent = hfCount('pending');
+    document.getElementById('kHfDeliv').textContent = hfCount('delivered');
+    document.getElementById('kHfWork').textContent = hfCount('in_progress');
 
     renderUsage(st.kpi.usage);
     document.getElementById('statDevices').textContent = st.kpi.devices_total;
@@ -1029,29 +1041,29 @@
         }).join('')
       : '<li class="none" style="border:none;background:none">지금 나를 기다리는 세션 없음 <i class="ico ico-check"></i></li>';
 
-    // 핸드오프 — 현황엔 활성(대기/수신)만 표시. 완료/취소는 히스토리 핸드오프 탭에서 (2026-08-18 사용자 결정)
+    // 핸드오프 — 현황엔 활성(대기/수신/작업 중)만 표시. 완료/취소는 히스토리 핸드오프 탭에서 (2026-08-18 사용자 결정)
     var hfs = st.handoffs;
-    document.getElementById('hfCount').textContent =
-      hfs.filter(function (h) { return h.status === 'pending' || h.status === 'delivered'; }).length;
+    document.getElementById('hfCount').textContent = hfs.filter(hfActive).length;
     document.getElementById('hfList').innerHTML = hfs.length
       ? hfs.map(function (h) {
-          var active = h.status === 'pending' || h.status === 'delivered';
-          var stateCls = h.status === 'delivered' ? 'ok' : h.status === 'pending' ? 'pend' : 'done';
-          var stateLabel = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[h.status] || h.status;
-          var meta = h.status === 'delivered' ? '수신 기기에서 착수함 — 작업이 끝나면 완료 처리'
-            : h.status === 'pending' ? '대상 기기에 알림·세션 안내 중 — /pickup으로 착수하면 수신됨'
+          var active = hfActive(h);
+          var stateLabel = HF_LABEL[h.status] || h.status;
+          var meta = h.status === 'delivered' ? '내용 수신 완료 — 후속 작업 착수 전'
+            : h.status === 'in_progress' ? '후속 작업 진행 중 — 작업이 끝나면 완료 처리'
+            : h.status === 'pending' ? '대상 기기에 알림·세션 안내 중 — /pickup으로 수신'
             : '';  // 끝난 항목은 상태 라벨·흐림 처리로 충분
           return '<div class="hf' + (active ? '' : ' term') + '"><div class="hfroute">' + esc(h.from || '?') +
             ' <span class="arr"><i class="ico ico-arrow-right"></i></span> ' + esc(h.to) +
             ' <span class="hfid">#' + h.id + '</span>' +
-            '<span class="hfstate ' + stateCls + '">' + esc(stateLabel) + '</span></div>' +
+            '<span class="hfstate ' + hfCls(h.status) + '">' + esc(stateLabel) + '</span></div>' +
             '<div class="hfrepo">' + esc(h.repo) + (h.branch ? ' <i class="ico ico-git-branch dim"></i>' + esc(h.branch) : '') + '</div>' +
             (h.summary ? '<p>' + esc(h.summary) + '</p>' : '') +
             (meta ? '<div class="hfmeta">' + meta + '</div>' : '') +
             (active
               ? '<div class="hfacts">' +
-                '<button class="copy act-good" data-hfact="done" data-hfid="' + h.id + '">완료 처리</button>' +
-                '<button class="copy act-danger" data-hfact="cancelled" data-hfid="' + h.id + '">취소</button>' +
+                (h.status === 'delivered' ? '<button class="copy hfaction hf-in-progress" data-hfact="in_progress" data-hfid="' + h.id + '">작업 중</button>' : '') +
+                '<button class="copy hfaction hf-done" data-hfact="done" data-hfid="' + h.id + '">완료</button>' +
+                '<button class="copy hfaction hf-cancelled" data-hfact="cancelled" data-hfid="' + h.id + '">취소</button>' +
                 '</div>'
               : '') +
             '</div>';
@@ -1120,7 +1132,7 @@
     applyFilter();
   });
 
-  // 핸드오프 완료/취소 처리
+  // 핸드오프 상태 변경
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-hfact]');
     if (!btn) return;
@@ -1240,8 +1252,11 @@
   var SESSION_DOT = { working: 's-work', awaiting_input: 's-await', needs_approval: 's-appr', ended: 's-end' };
   // 세션 상태점 — 끊김 의심(unconfirmed)이면 상태색 대신 stale 회색 (현황 카드 칩과 같은 기준)
   function sessDot(s) { return sdot(s.unconfirmed ? 's-stale' : SESSION_DOT[s.state] || 's-end'); }
-  // 완료(done)=회색 s-end, 취소(cancelled)=자동화 '신호 없음'과 같은 s-stale 로 분리
-  var HANDOFF_DOT = { pending: 's-await', delivered: 's-ok', done: 's-end', cancelled: 's-stale' };
+  // 핸드오프 상태 라벨·활성 판정 — 현황 카드·타일·핸드오프 탭·상태 필터 공용. 클래스는 hf-<상태>(언더스코어는 하이픈으로)
+  var HF_LABEL = { pending: '대기 중', delivered: '수신됨', in_progress: '작업 중', done: '완료', cancelled: '취소' };
+  var HF_ACTIVE = { pending: true, delivered: true, in_progress: true };  // 현황에 남는 상태 — 완료/취소는 히스토리 핸드오프 탭에서
+  function hfActive(h) { return !!HF_ACTIVE[h.status]; }
+  function hfCls(status) { return 'hf-' + esc(String(status || '')).replace(/_/g, '-'); }
   // 이벤트 유형 색: 생명주기=파랑, 완료/유휴=노랑, 승인요청=빨강 (현황 피드와 동일 체계)
   var EVENT_CLS = { session_start: 'life', prompt: 'life', tool_start: '', heartbeat: '',
     turn_done: 'stop', idle: 'stop', permission_request: 'noti', session_end: '' };
@@ -1428,13 +1443,13 @@
     var res = HIST.queue || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
     var fc = res.facets || {};
     var html = res.rows.map(function (h) {
-      var label = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[h.status] || h.status;
+      var label = HF_LABEL[h.status] || h.status;
       return '<tr><td class="mono dim">#' + h.id + '</td>' +
         '<td class="mono">' + esc(h.from_name || '?') + ' <i class="ico ico-arrow-right dim"></i>' + esc(h.to_name || '?') + '</td>' +
         '<td class="mono">' + esc(h.repo) + (h.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(h.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(h.summary || '') +
           (h.has_doc ? '<details class="hfdoc" data-hfdoc="' + h.id + '"><summary>문서 보기</summary><pre class="dim">불러오는 중…</pre></details>' : '') + '</td>' +
-        '<td>' + sdot(HANDOFF_DOT[h.status] || 's-end') + esc(label) + '</td>' +
+        '<td><span class="hfstate ' + hfCls(h.status) + '">' + esc(label) + '</span></td>' +
         '<td class="mono dim">' + fmtTs(h.created_at) + (h.delivered_at ? ' → ' + fmtTs(h.delivered_at) : '') + '</td></tr>';
     });
     document.getElementById('queueTable').innerHTML =
@@ -1444,9 +1459,8 @@
       '<select class="hsel" data-qf="project">' + optsFor(fc.projects || [], QF.project, '프로젝트 전체') + '</select>' +
       '<select class="hsel" data-qf="status">' +
       '<option value="">상태 전체</option>' +
-      ['pending', 'delivered', 'done', 'cancelled'].map(function (v) {
-        var lab = { pending: '대기 중', delivered: '수신됨', done: '완료', cancelled: '취소' }[v];
-        return '<option value="' + v + '"' + (QF.status === v ? ' selected' : '') + '>' + lab + '</option>';
+      Object.keys(HF_LABEL).map(function (v) {
+        return '<option value="' + v + '"' + (QF.status === v ? ' selected' : '') + '>' + HF_LABEL[v] + '</option>';
       }).join('') + '</select>' +
       daysSel('data-qf', QF.days) +
       hcountHtml(res) +
