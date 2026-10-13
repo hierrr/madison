@@ -517,16 +517,22 @@ async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin
 
 @app.get("/api/handoffs/{handoff_id}")
 async def get_handoff(request: Request, handoff_id: int):
-    """핸드오프 단건(문서 포함) — 핸드오프 탭 '문서 보기' 펼침용. 관리자 전용."""
-    _require(request, ("admin",))
+    """핸드오프 단건(문서 포함) — 핸드오프 탭 '문서 보기' 펼침용.
+    기기 토큰은 자기가 받았거나 보낸 건만 조회 가능(admin은 전체) — PATCH와 같은 범위 규칙."""
+    actor = _require(request, ("device", "admin"))
+    where = "h.id=?"
+    args: list = [handoff_id]
+    if actor["kind"] == "device":
+        where += " AND (h.to_device=? OR h.from_device=?)"
+        args += [actor["device"]["id"], actor["device"]["id"]]
     with db.tx() as c:
         r = c.execute(
             "SELECT h.*, fd.name AS from_name, td.name AS to_name FROM handoffs h"
             " LEFT JOIN devices fd ON fd.id=h.from_device"
             " LEFT JOIN devices td ON td.id=h.to_device"
-            " WHERE h.id=?", (handoff_id,)).fetchone()
+            f" WHERE {where}", args).fetchone()
     if not r:
-        raise HTTPException(404, "핸드오프 없음")
+        raise HTTPException(404, "핸드오프 없음 또는 권한 없음")
     return {**dict(r), "hf": f"HF-{r['id']:03d}"}
 
 
