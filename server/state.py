@@ -213,6 +213,18 @@ def _age_min(now: datetime, ts: str | None) -> int | None:
     return int((now - dt).total_seconds() // 60) if dt else None
 
 
+def is_unconfirmed(st: str, frontend, seen_min: int, dev_online: bool, ttl: int) -> bool:
+    """'신호 없음' 판정 (§4.1) — 현황 오버레이·이력 탭 stale 필터·수동 종료 사유(lost/manual)가 모두 이 규칙 하나를 쓴다.
+    working은 TTL 초과, 대기 상태(awaiting_input·needs_approval)는 사람이 기다리는 게 정상이라 기기 오프라인일 때만.
+    헤드리스(frontend=auto) 세션은 기다릴 사람이 없어 대기 상태가 실제일 수 없으므로 종료 전까지 상태와 무관하게 TTL로 판정한다
+    (2026-10-14: session_end를 잃은 claude -p 세션이 awaiting_input에 남아, 기기가 온라인인 한 대시보드에서 끝낼 수 없었던 사례)."""
+    if st == "ended":
+        return False
+    if (st == "working" or frontend == "auto") and seen_min > ttl:
+        return True
+    return st in ("awaiting_input", "needs_approval") and not dev_online
+
+
 def assemble(c) -> dict:
     """GET /api/state 응답 — 세션·기기·주의필요·핸드오프·KPI·스파크."""
     now = datetime.now(timezone.utc)
@@ -261,12 +273,8 @@ def assemble(c) -> dict:
         if dev is None:
             continue
         seen_min = _age_min(now, s["last_seen_hub"]) or 0
-        # unconfirmed 오버레이 (§4.1): working만 TTL 판정, 대기 상태는 기기 오프라인일 때만
-        unconfirmed = False
-        if s["state"] == "working" and seen_min > ttl:
-            unconfirmed = True
-        elif s["state"] in ("awaiting_input", "needs_approval") and not dev["online"]:
-            unconfirmed = True
+        # unconfirmed 오버레이 (§4.1) — 규칙은 is_unconfirmed 한 곳 (이력 탭 stale 필터·종료 사유도 같은 규칙)
+        unconfirmed = is_unconfirmed(s["state"], s["frontend"], seen_min, dev["online"], ttl)
         # bg 표시 감쇠: 종료 훅 유실로 카운터가 남아도 2시간 지나면 배지를 내린다
         bg_n = s["bg_count"] or 0
         bg_ag = s["bg_agents"] or 0

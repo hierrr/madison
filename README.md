@@ -148,6 +148,8 @@ fire it). So MADISON uses two signals: tool-use hooks emit a throttled heartbeat
 while a session works, and the hub marks a *working* session **unconfirmed**
 after 15 minutes of silence. Sessions that are legitimately idle (waiting on you)
 are never demoted by the timer — only genuinely silent *working* sessions are.
+Headless sessions (`claude -p`, cron jobs) have nobody to wait for, so the same
+timer applies to them in every state until they end.
 
 ## Agent support
 
@@ -354,7 +356,7 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `ENROLL_SECRET` | — | Shared secret for device enrollment; clear/rotate after onboarding |
 | `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | Tunnel setups only — human vs machine hostname (the hub itself checks only `API_HOST`, to limit that host to `/api/*` and installer paths) |
 | `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | Tunnel setups only — Cloudflare Access JWT verification for remote dashboard access; leave empty on a LAN-only hub |
-| `TTL_STALE_MIN` | `15` | Minutes of silence before a working session is *unconfirmed* |
+| `TTL_STALE_MIN` | `15` | Minutes of silence before a working session (or any headless session) is *unconfirmed* |
 | `DEVICE_ONLINE_MIN` | `10` | Minutes since last signal to still count a device online |
 | `ENDED_HIDE_HOURS` | `24` | Hours before an ended session drops off the live view |
 | `EVENT_RETENTION_DAYS` | `0` | Event log retention in days — `0` keeps events forever |

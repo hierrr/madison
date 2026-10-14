@@ -126,7 +126,8 @@ flowchart LR
 두 가지 신호를 씁니다. 도구를 쓸 때마다 훅이 스로틀된 하트비트를 보내 세션이 살아 일하고
 있음을 알리고, 허브는 *작업 중*이던 세션이 15분간 조용하면 **끊김 의심(unconfirmed)**으로
 표시합니다. 정당하게 쉬고 있는(사람을 기다리는) 세션은 타이머로 끌어내리지 않습니다.
-진짜로 조용해진 *작업 중* 세션만 걸립니다.
+진짜로 조용해진 *작업 중* 세션만 걸립니다. 헤드리스 세션(`claude -p`, cron 잡)은 기다릴
+사람이 없으므로 종료 전까지 어느 상태에서든 같은 타이머로 판정합니다.
 
 ## 에이전트 지원
 
@@ -309,7 +310,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 | `ENROLL_SECRET` | — | 기기 등록용 공유 시크릿; 온보딩 후 비우거나 로테이트 |
 | `DASHBOARD_HOST` / `API_HOST` | `madison.example.com` / `madison-api.example.com` | 터널 구성 전용 — 사람용/기계용 호스트명 (허브 코드는 `API_HOST`만 검사해 그 호스트를 `/api/*`·설치 경로로 제한) |
 | `CF_ACCESS_TEAM_DOMAIN` / `CF_ACCESS_AUD` | — | 터널 구성 전용 — 대시보드용 Cloudflare Access JWT 검증. 내부망 전용이면 비워둠 |
-| `TTL_STALE_MIN` | `15` | 작업 중 세션이 *끊김 의심*이 되기까지의 무신호 분 |
+| `TTL_STALE_MIN` | `15` | 작업 중 세션(헤드리스는 모든 상태)이 *끊김 의심*이 되기까지의 무신호 분 |
 | `DEVICE_ONLINE_MIN` | `10` | 이 분 이내 신호가 있으면 기기를 온라인으로 |
 | `ENDED_HIDE_HOURS` | `24` | 종료 세션이 현황에서 사라지기까지의 시간 |
 | `EVENT_RETENTION_DAYS` | `0` | 이벤트 로그 보존 일수 — `0`이면 무기한 보존 |

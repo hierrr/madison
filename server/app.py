@@ -199,21 +199,22 @@ async def history_events(request: Request, device: str = "", agent: str = "",
     return out
 
 
-def _is_unconfirmed(st: str, last_seen_hub, device_seen_at, now=None) -> bool:
-    """'신호 없음' 판정 — /api/state(state.assemble §4.1)와 같은 규칙: working은 TTL 초과, 대기 상태는 기기 오프라인."""
+def _is_unconfirmed(st: str, last_seen_hub, device_seen_at, now=None, frontend=None) -> bool:
+    """'신호 없음' 판정 — /api/state(state.assemble §4.1)와 같은 규칙(state.is_unconfirmed): working은 TTL 초과,
+    대기 상태는 기기 오프라인, 헤드리스(frontend=auto)는 종료 전까지 상태 무관 TTL 초과."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     seen = state._age_min(now, last_seen_hub) or 0
     dev_age = state._age_min(now, device_seen_at)
     dev_online = dev_age is not None and dev_age <= CFG.device_online_min
-    return ((st == "working" and seen > CFG.ttl_stale_min)
-            or (st in ("awaiting_input", "needs_approval") and not dev_online))
+    return state.is_unconfirmed(st, frontend, seen, dev_online, CFG.ttl_stale_min)
 
 
 def _overlay_unconfirmed(rows: list[dict]):
     """unconfirmed 오버레이 — 행마다 _is_unconfirmed."""
     now = datetime.datetime.now(datetime.timezone.utc)
     for r in rows:
-        r["unconfirmed"] = _is_unconfirmed(r["state"], r["last_seen_hub"], r.pop("device_seen_at", None), now)
+        r["unconfirmed"] = _is_unconfirmed(r["state"], r["last_seen_hub"], r.pop("device_seen_at", None), now,
+                                           frontend=r.get("frontend"))
     return rows
 
 
@@ -221,13 +222,13 @@ def end_reason_for(c, device_id: int, agent: str, session_id: str) -> str | None
     """수동 종료 처리의 사유 — 신호가 끊긴 세션이면 'lost'(신호 끊김), 살아 있는 세션을 사람이 닫으면 'manual'.
     나중에 봐도 왜 종료됐는지 알 수 있게 허브가 판정해 기록한다(2026-10-01 사용자 요청). 세션 없으면 None."""
     row = c.execute(
-        "SELECT s.state, s.last_seen_hub, d.last_seen_at AS device_seen_at FROM sessions s"
+        "SELECT s.state, s.frontend, s.last_seen_hub, d.last_seen_at AS device_seen_at FROM sessions s"
         " JOIN devices d ON d.id=s.device_id WHERE s.device_id=? AND s.agent=? AND s.session_id=?",
         (device_id, agent, session_id)).fetchone()
     if row is None:
         return None
-    return "lost" if _is_unconfirmed(row["state"], row["last_seen_hub"], row["device_seen_at"]) else "manual"
-    return rows
+    return "lost" if _is_unconfirmed(row["state"], row["last_seen_hub"], row["device_seen_at"],
+                                     frontend=row["frontend"]) else "manual"
 
 
 # 태스크·자동화 탭 페이지 행 — s.* 대신 표시 컬럼만 (last_summary·tokens_cum 등 큰 필드 제외)
@@ -253,13 +254,14 @@ def _session_conds(device: str = "", agent: str = "", fe: str = "",
     """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭.
     substantive=True면 프롬프트·턴 없는 no-op 세션을 제외한다.
     state는 세션 상태값 그대로, 'stale' = 현황의 '신호 없음' 오버레이(_overlay_unconfirmed)와 같은 판정(working은 TTL 초과,
-    대기 상태는 기기 오프라인 — 종료 훅을 못 받고 남은 좀비 세션용), 또는 'ended:<사유>' = 종료 사유별('-'는 사유 없음, 2026-10-01)."""
+    대기 상태는 기기 오프라인 — 종료 훅을 못 받고 남은 좀비 세션용, 헤드리스(auto)는 종료 전까지 상태 무관 TTL 초과 — 2026-10-14),
+    또는 'ended:<사유>' = 종료 사유별('-'는 사유 없음, 2026-10-01)."""
     conds, args = [], []
     if state == "stale":
         # 저장 형식이 'YYYY-MM-DDTHH:MM:SSZ'라 datetime()의 공백 구분 문자열과는 같은 날짜에서 비교가 어긋난다 — strftime으로 맞춘다
         fmt = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
         conds.append(
-            f"((s.state = 'working' AND s.last_seen_hub < {fmt})"
+            f"(((s.state = 'working' OR (s.frontend = 'auto' AND s.state != 'ended')) AND s.last_seen_hub < {fmt})"
             " OR (s.state IN ('awaiting_input', 'needs_approval')"
             f"     AND (d.last_seen_at IS NULL OR d.last_seen_at < {fmt})))")
         args += [f"-{int(CFG.ttl_stale_min)} minutes", f"-{int(CFG.device_online_min)} minutes"]

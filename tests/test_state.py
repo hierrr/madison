@@ -3,6 +3,7 @@ import sqlite3
 import unittest
 
 from server import db, state
+from server.config import CFG
 
 
 class StateCollectionModeTests(unittest.TestCase):
@@ -106,6 +107,64 @@ class StateCollectionModeTests(unittest.TestCase):
         session = state.assemble(self.conn)["sessions"][0]
         self.assertTrue(session["partial"])
         self.assertIsNone(session["collection_mode"])
+
+
+
+class UnconfirmedOverlayTests(unittest.TestCase):
+    """'신호 없음' 오버레이 (§4.1) — working은 TTL, 대기 상태는 기기 오프라인, 헤드리스는 종료 전까지 상태 무관 TTL."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        # 기기는 온라인(방금 신호) — 대기 상태의 기기 오프라인 규칙이 끼어들지 않게
+        self.conn.execute(
+            "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at) VALUES"
+            " (1,'device-a','x',datetime('now'),strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
+        stale = f"-{CFG.ttl_stale_min + 5} minutes"
+        for sid, fe, st, rel in [
+            ("cli-working-stale", "cli", "working", stale),
+            ("cli-await-stale", "cli", "awaiting_input", stale),
+            ("auto-await-stale", "auto", "awaiting_input", stale),
+            ("auto-await-fresh", "auto", "awaiting_input", "-1 minutes"),
+        ]:
+            self.conn.execute(
+                "INSERT INTO sessions (device_id, agent, session_id, frontend, state, turns, last_prompt,"
+                " last_seen_hub, state_since, started_at) VALUES (1, 'claude-code', ?, ?, ?, 1, 'p',"
+                " strftime('%Y-%m-%dT%H:%M:%SZ','now',?), strftime('%Y-%m-%dT%H:%M:%SZ','now',?),"
+                " strftime('%Y-%m-%dT%H:%M:%SZ','now',?))",
+                (sid, fe, st, rel, rel, rel))
+        # 종료된 헤드리스 세션은 TTL과 무관 — 24시간 안이라 현황에 아직 보이는 동안에도 '신호 없음'이 아니다
+        self.conn.execute(
+            "INSERT INTO sessions (device_id, agent, session_id, frontend, state, end_reason, turns, last_prompt,"
+            " last_seen_hub, state_since, started_at, ended_at) VALUES (1, 'claude-code', 'auto-ended-stale', 'auto',"
+            " 'ended', 'other', 1, 'p', strftime('%Y-%m-%dT%H:%M:%SZ','now',?), strftime('%Y-%m-%dT%H:%M:%SZ','now',?),"
+            " strftime('%Y-%m-%dT%H:%M:%SZ','now',?), strftime('%Y-%m-%dT%H:%M:%SZ','now',?))",
+            (stale, stale, stale, stale))
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_headless_sessions_go_stale_by_ttl_regardless_of_state(self):
+        # 2026-10-14 사례: session_end를 잃은 claude -p 세션이 awaiting_input에 남았는데, 기기가 온라인이라
+        # 대기 규칙으로는 영영 '신호 없음'이 되지 않아 대시보드의 종료 체크가 나오지 않았다
+        flags = {s["session_id"]: s["unconfirmed"] for s in state.assemble(self.conn)["sessions"]}
+        self.assertTrue(flags["auto-await-stale"])
+        self.assertFalse(flags["auto-await-fresh"])
+        self.assertFalse(flags["auto-ended-stale"])
+        # 대화형 규칙은 그대로 — working만 TTL, 대기 상태는 기기 온라인이면 정상
+        self.assertTrue(flags["cli-working-stale"])
+        self.assertFalse(flags["cli-await-stale"])
+
+    def test_rule_matrix(self):
+        ttl = CFG.ttl_stale_min
+        self.assertTrue(state.is_unconfirmed("awaiting_input", "auto", ttl + 1, True, ttl))
+        self.assertFalse(state.is_unconfirmed("awaiting_input", "auto", ttl, True, ttl))      # 경계: 초과만
+        self.assertTrue(state.is_unconfirmed("needs_approval", "auto", ttl + 1, True, ttl))
+        self.assertFalse(state.is_unconfirmed("ended", "auto", ttl + 1, True, ttl))
+        self.assertFalse(state.is_unconfirmed("awaiting_input", "cli", ttl + 1, True, ttl))
+        self.assertTrue(state.is_unconfirmed("awaiting_input", "cli", 1, False, ttl))         # 기기 오프라인
+        self.assertTrue(state.is_unconfirmed("working", None, ttl + 1, True, ttl))            # 프런트엔드 미기록(구형 수집)
 
 
 if __name__ == "__main__":

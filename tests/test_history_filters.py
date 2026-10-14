@@ -18,19 +18,22 @@ class StaleFilterTests(unittest.TestCase):
             " (1,'online','x',datetime('now'),strftime('%Y-%m-%dT%H:%M:%SZ','now')),"
             " (2,'offline','y',datetime('now'),strftime('%Y-%m-%dT%H:%M:%SZ','now','-1 day'))")
         rows = [
-            # (device, sid, state, last_seen 상대값)
-            (1, "fresh-working", "working", "-1 minutes"),
-            (1, "zombie-working", "working", f"-{CFG.ttl_stale_min + 5} minutes"),
-            (1, "await-online", "awaiting_input", "-3 hours"),      # 기기 온라인이면 대기 유휴는 정상
-            (2, "await-offline", "awaiting_input", "-3 hours"),     # 기기 오프라인 → 신호 없음
-            (1, "ended", "ended", "-2 hours"),
+            # (device, sid, state, last_seen 상대값, frontend)
+            (1, "fresh-working", "working", "-1 minutes", "cli"),
+            (1, "zombie-working", "working", f"-{CFG.ttl_stale_min + 5} minutes", "cli"),
+            (1, "await-online", "awaiting_input", "-3 hours", "cli"),      # 기기 온라인이면 대기 유휴는 정상
+            (2, "await-offline", "awaiting_input", "-3 hours", "cli"),     # 기기 오프라인 → 신호 없음
+            (1, "ended", "ended", "-2 hours", "cli"),
+            # 헤드리스는 기다릴 사람이 없어 대기 상태도 TTL로 판정 — 기기가 온라인이어도 (2026-10-14 좀비 사례)
+            (1, "auto-await-zombie", "awaiting_input", f"-{CFG.ttl_stale_min + 5} minutes", "auto"),
+            (1, "auto-await-fresh", "awaiting_input", "-1 minutes", "auto"),
         ]
-        for dev, sid, st, rel in rows:
+        for dev, sid, st, rel, fe in rows:
             self.conn.execute(
                 "INSERT INTO sessions (device_id, agent, session_id, state, turns, last_prompt, frontend,"
-                " last_seen_hub, started_at) VALUES (?, 'claude-code', ?, ?, 1, 'p', 'auto',"
+                " last_seen_hub, started_at) VALUES (?, 'claude-code', ?, ?, 1, 'p', ?,"
                 " strftime('%Y-%m-%dT%H:%M:%SZ','now',?), strftime('%Y-%m-%dT%H:%M:%SZ','now',?))",
-                (dev, sid, st, rel, rel))
+                (dev, sid, st, fe, rel, rel))
         # 종료 사유별 필터용: other(정상) / lost(체크로 정리) / 사유 없음(구형 수집)
         self.conn.execute("UPDATE sessions SET end_reason='other' WHERE session_id='ended'")
         for sid, reason in (("ended-lost", "lost"), ("ended-noreason", None)):
@@ -50,13 +53,13 @@ class StaleFilterTests(unittest.TestCase):
             "SELECT s.session_id FROM sessions s JOIN devices d ON d.id=s.device_id" + where, args))
 
     def test_stale_matches_overlay_rule(self):
-        # working은 TTL 초과만, 대기 상태는 기기 오프라인일 때만 — 현황의 '신호 없음'과 같은 집합
-        self.assertEqual(self.query(state="stale"), ["await-offline", "zombie-working"])
+        # working은 TTL 초과만, 대기 상태는 기기 오프라인일 때만, 헤드리스는 상태 무관 TTL 초과 — 현황의 '신호 없음'과 같은 집합
+        self.assertEqual(self.query(state="stale"), ["auto-await-zombie", "await-offline", "zombie-working"])
 
     def test_plain_state_filter_is_exact(self):
         self.assertEqual(self.query(state="working"), ["fresh-working", "zombie-working"])
         self.assertEqual(self.query(state="ended"), ["ended", "ended-lost", "ended-noreason"])
-        self.assertEqual(len(self.query()), 7)
+        self.assertEqual(len(self.query()), 9)
 
     def test_end_reason_filter(self):
         # 'ended:<사유>' — 사유 하나만, '-'는 사유 없음(NULL·빈 문자열)
@@ -76,7 +79,7 @@ class StaleFilterTests(unittest.TestCase):
     def test_overlay_returns_rows_with_flag(self):
         # 이력 API가 그대로 응답에 싣는다 — 반환이 빠지면 rows:null로 탭이 '불러오기 실패'(2026-10-01 실사고)
         rows = [dict(r) for r in self.conn.execute(
-            "SELECT s.session_id, s.state, s.last_seen_hub, d.last_seen_at AS device_seen_at"
+            "SELECT s.session_id, s.state, s.frontend, s.last_seen_hub, d.last_seen_at AS device_seen_at"
             " FROM sessions s JOIN devices d ON d.id=s.device_id ORDER BY s.session_id")]
         out = hub._overlay_unconfirmed(rows)
         self.assertIs(out, rows)
@@ -84,6 +87,7 @@ class StaleFilterTests(unittest.TestCase):
         self.assertTrue(flags["zombie-working"]); self.assertTrue(flags["await-offline"])
         self.assertFalse(flags["fresh-working"]); self.assertFalse(flags["await-online"])
         self.assertFalse(flags["ended"]); self.assertFalse(flags["ended-lost"])
+        self.assertTrue(flags["auto-await-zombie"]); self.assertFalse(flags["auto-await-fresh"])
         self.assertNotIn("device_seen_at", out[0])
 
     def test_manual_end_records_lost_only_for_silent_sessions(self):
@@ -92,6 +96,9 @@ class StaleFilterTests(unittest.TestCase):
         self.assertEqual(hub.end_reason_for(self.conn, 2, "claude-code", "await-offline"), "lost")
         self.assertEqual(hub.end_reason_for(self.conn, 1, "claude-code", "fresh-working"), "manual")
         self.assertEqual(hub.end_reason_for(self.conn, 1, "claude-code", "await-online"), "manual")
+        # 헤드리스 좀비는 기기가 온라인이어도 신호 끊김(lost)으로 기록 — 종전엔 manual로 남아 사유가 틀렸다
+        self.assertEqual(hub.end_reason_for(self.conn, 1, "claude-code", "auto-await-zombie"), "lost")
+        self.assertEqual(hub.end_reason_for(self.conn, 1, "claude-code", "auto-await-fresh"), "manual")
         self.assertIsNone(hub.end_reason_for(self.conn, 1, "claude-code", "nope"))
 
 
