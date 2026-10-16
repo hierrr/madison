@@ -1,5 +1,6 @@
 """이벤트 수신(폴드)과 현재 상태 조립 — IMPLEMENTATION.md §4·§5의 규칙 구현."""
 import json
+import re
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -35,6 +36,9 @@ def _parse_ts(ts: str) -> datetime | None:
 
 
 SYNTHETIC_MODEL = "<synthetic>"   # Claude Code가 API 응답 없이 로컬 생성한 메시지의 model 표식
+# Codex 데스크톱 앱이 사용자 몰래 돌리는 보조 프롬프트의 서명 — "다음 입력 제안"(fork 세션)과 "프로젝트 추천 생성"(startup 세션)
+APP_GENERATED_RE = re.compile(
+    r"app-generated request|hyperpersonalized suggestions for what this user can do with Codex", re.I)
 
 
 def _real_model(payload: dict) -> str:
@@ -136,9 +140,15 @@ def ingest(c, device_id: int, ev: dict) -> str:
         if branch:
             sets += ["branch=?"]; args += [branch]
 
-    # 프런트엔드(cli/app): 실려 오면 반영
-    if payload.get("frontend"):
-        sets += ["frontend=?"]; args += [str(payload["frontend"])[:20]]
+    # 프런트엔드(cli/app/auto/ide): 실려 오면 반영. 수집기가 출처를 못 가린 'unknown'은 이미 아는 값을 덮지 않는다.
+    frontend = str(payload.get("frontend") or "")[:20]
+    # Codex 앱이 백그라운드로 돌리는 자동 세션(다음 메시지 제안·프로젝트 추천 생성)은 사용자 세션이 아니라
+    # 헤드리스 실행이므로 auto로 분류한다. 수집기는 fork 세션에 originator가 없어 unknown으로 보낸다(2026-10-16 실측).
+    if event == "prompt" and agent == "codex-cli" and APP_GENERATED_RE.search(str(payload.get("prompt") or "")[:400]):
+        frontend = "auto"
+    known = row["frontend"] and row["frontend"] != "unknown"
+    if frontend and not (frontend == "unknown" and known):
+        sets += ["frontend=?"]; args += [frontend]
     if payload.get("collection_mode"):
         sets += ["collection_mode=?"]; args += [str(payload["collection_mode"])[:20]]
     # 세션 이름(/rename·앱 제목·자동 제목·Codex thread_name): 실려 오면 최신값. 빈 값은 무시 —

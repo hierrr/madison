@@ -56,6 +56,35 @@ class StateCollectionModeTests(unittest.TestCase):
         self.assertFalse(session["partial"])
         self.assertEqual(session["collection_mode"], "hooks")
 
+    def test_codex_app_generated_sessions_become_auto_and_unknown_never_overrides(self):
+        # Codex 앱의 백그라운드 보조 세션: 수집기는 frontend=unknown으로 보내지만 프롬프트 서명으로 auto로 분류하고,
+        # 이후 이벤트의 unknown이 그 값을 되돌리지 않는다
+        unk = {"frontend": "unknown", "model": "gpt-test", "collection_mode": "hooks"}
+        self.assertEqual(state.ingest(self.conn, 1, self.event("session_start", "a1", "2026-10-16T00:00:01Z", {**unk, "source": "fork"})), "inserted")
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions").fetchone()[0], "unknown")
+        prompt = "This is an app-generated request for a suggested next user message. The user did not write this message."
+        state.ingest(self.conn, 1, self.event("prompt", "a2", "2026-10-16T00:00:02Z", {**unk, "prompt": prompt}))
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions").fetchone()[0], "auto")
+        state.ingest(self.conn, 1, self.event("turn_done", "a3", "2026-10-16T00:00:03Z", {**unk, "summary": "x"}))
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions").fetchone()[0], "auto")
+
+        # 프로젝트 추천 생성 프롬프트도 같은 분류
+        ev = self.event("prompt", "b2", "2026-10-16T00:01:02Z", {**unk, "prompt": "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this local project: /x"})
+        ev["session_id"] = "session-2"
+        state.ingest(self.conn, 1, ev)
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions WHERE session_id='session-2'").fetchone()[0], "auto")
+
+        # 사람이 쓴 프롬프트는 그대로 unknown, 뒤에 실제 값(cli)이 오면 그 값으로 바뀐다
+        ev = self.event("prompt", "c2", "2026-10-16T00:02:02Z", {**unk, "prompt": "Fix the tests"}); ev["session_id"] = "session-3"
+        state.ingest(self.conn, 1, ev)
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions WHERE session_id='session-3'").fetchone()[0], "unknown")
+        ev = self.event("tool_start", "c3", "2026-10-16T00:02:03Z", {**unk, "frontend": "cli", "tool": "shell"}); ev["session_id"] = "session-3"
+        state.ingest(self.conn, 1, ev)
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions WHERE session_id='session-3'").fetchone()[0], "cli")
+        ev = self.event("heartbeat", "c4", "2026-10-16T00:02:04Z", unk); ev["session_id"] = "session-3"
+        state.ingest(self.conn, 1, ev)
+        self.assertEqual(self.conn.execute("SELECT frontend FROM sessions WHERE session_id='session-3'").fetchone()[0], "cli")
+
     def test_session_name_sticks_and_is_exposed(self):
         # 세션 이름은 어떤 이벤트에 실려 와도 최신값으로 반영되고, 안 실린 이벤트가 지우지 않는다
         base = {"frontend": "cli", "collection_mode": "hooks"}
