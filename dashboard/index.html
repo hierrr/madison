@@ -1344,15 +1344,40 @@
       return params[k] !== '' && params[k] != null;
     }).map(function (k) { return k + '=' + encodeURIComponent(params[k]); }).join('&');
   }
-  // 서버 facet의 (agent, frontend) 쌍 옵션 — 값은 'agent|frontend' ('-'는 프런트엔드 미기록)
+  // 에이전트 필터 — 상태 필터의 '종료 전체 + 사유 들여쓰기'와 같은 꼴(2026-10-16 사용자 지정):
+  // 에이전트마다 '<에이전트> 전체'(값 'agent') 아래 그 에이전트의 프런트엔드를 접두어 없이 들여쓴다(값 'agent|frontend', '-'는 미기록).
+  // 선택지는 서버 facet에 실제로 있는 (agent, frontend) 쌍만.
+  var AGENT_ORDER = ['claude-code', 'codex-cli', 'hermes'];
+  var FE_ORDER = ['cli', 'app', 'ide', 'auto'];
+  function agentSubLabel(agent, fe) {
+    if (!fe || fe === '-') return '(미기록)';
+    var full = agentLabel({ agent: agent, frontend: fe }), prov = agentProvider(agent);
+    // agentLabel이 접두어만 돌려주는 값(unknown 등)은 원값을 그대로 보인다
+    return full.indexOf(prov + ' ') === 0 ? full.slice(prov.length + 1) : String(fe).toUpperCase();
+  }
   function agentOptsFor(pairs, cur) {
-    return '<option value="">에이전트 전체</option>' + (pairs || []).map(function (p) {
-      var v = p.agent + '|' + (p.frontend || '-');
-      return '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' +
-        esc(agentLabel({ agent: p.agent, frontend: p.frontend })) + '</option>';
+    function opt(v, label) { return '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + label + '</option>'; }
+    var byAgent = {};
+    (pairs || []).forEach(function (p) { (byAgent[p.agent] = byAgent[p.agent] || []).push(p.frontend || '-'); });
+    var agents = Object.keys(byAgent).sort(function (a, b) {
+      var ia = AGENT_ORDER.indexOf(a), ib = AGENT_ORDER.indexOf(b);
+      if (ia < 0) ia = AGENT_ORDER.length; if (ib < 0) ib = AGENT_ORDER.length;
+      return ia - ib || a.localeCompare(b);
+    });
+    return opt('', '에이전트 전체') + agents.map(function (a) {
+      var fes = byAgent[a].sort(function (x, y) {
+        var ix = FE_ORDER.indexOf(x), iy = FE_ORDER.indexOf(y);
+        if (ix < 0) ix = x === '-' ? FE_ORDER.length + 1 : FE_ORDER.length;
+        if (iy < 0) iy = y === '-' ? FE_ORDER.length + 1 : FE_ORDER.length;
+        return ix - iy || x.localeCompare(y);
+      });
+      return opt(a, agentProvider(a) + ' 전체') + fes.map(function (fe) {
+        return opt(a + '|' + fe, '\u00a0\u00a0\u00a0\u00a0' + esc(agentSubLabel(a, fe)));
+      }).join('');
     }).join('');
   }
-  function agentPairVal(f) { return f.agent ? f.agent + '|' + (f.fe || '-') : ''; }
+  // 값 → 필터 객체: 'agent'만이면 에이전트 전체(fe ''), 'agent|fe'면 프런트엔드까지('-'는 미기록)
+  function agentPairVal(f) { return f.agent ? f.agent + (f.fe ? '|' + f.fe : '') : ''; }
   function setAgentPair(f, v) {
     var p = (v || '').split('|');
     f.agent = p[0] || ''; f.fe = p[1] || '';
