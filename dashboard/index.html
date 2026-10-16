@@ -27,6 +27,7 @@
     --jandi-1: #9be9a8; --jandi-2: #40c463; --jandi-3: #30a14e; --jandi-4: #216e39;
     --agent-claude: #C15F3C;   /* 에이전트 브랜드 색 */
     --agent-codex: #3366CC;
+    --agent-hermes: #FFBF00;  /* hermes 자체 UI 액센트 색 */
     --sans: system-ui, -apple-system, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -267,6 +268,7 @@
   .agent { font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--line-2); color: var(--ink-2); flex: none; }
   .agent.cc { color: var(--agent-claude); border-color: var(--agent-claude); }
   .agent.cx { color: var(--agent-codex); border-color: var(--agent-codex); }
+  .agent.hm { color: var(--agent-hermes); border-color: var(--agent-hermes); }
   /* 아이콘은 전부 Lucide(ISC, THIRD_PARTY_NOTICES.md) — 원본 SVG 파일을 assets/lucide/에 두고 CSS mask로 그린다.
      색은 currentColor(라이트·다크 공통), .dim은 --ink-3 보조색. 글리프(⎇ ◀ ▶ ✓ →)·인라인 path 사용 금지 (2026-10-01 통일).
      구분: message-square-code = 세션 이름(대화), folder-open = 프로젝트(디렉터리), git-branch = 브랜치 */
@@ -348,7 +350,7 @@
   .att .dot.crit { background: var(--crit); }
   .att .dot.warn { background: var(--warn); }
   .att .where { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); flex: none; }
-  /* 에이전트 아이콘 — 라벨 대신. 각 아이콘이 자체 배경을 가짐 */
+  /* 에이전트 아이콘 — 라벨 대신. 각 아이콘이 자체 배경을 가짐(hermes SVG는 배경 내장) */
   .att .aicon { width: 18px; height: 18px; flex: none; border-radius: 4px; object-fit: contain; }
   .att .what { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* 우측 레일(주의 필요·자동화·최근 이벤트)은 폭이 좁아 한 줄 말줄임이 대부분 잘린다 — 잘린 항목에 마우스를 올리면
@@ -827,12 +829,19 @@
 
   // 주의필요 행은 라벨이 길어 내용을 가리므로 아이콘으로 대체 (2026-09-10)
   function agentIconFile(a) {
-    return a === 'claude-code' ? 'claude.webp' : 'codex.webp';
+    return a === 'claude-code' ? 'claude.webp' : a === 'hermes' ? 'hermes.svg' : 'codex.webp';
   }
 
   // CLI/앱/자동 실행 라벨 — 모르는 구형 수집값을 임의로 CLI로 단정하지 않는다.
+  function provCls(a) {
+    return a === 'claude-code' ? 'cc' : a === 'hermes' ? 'hm' : 'cx';
+  }
+
+  function agentProvider(a) { return a === 'claude-code' ? 'CLAUDE' : a === 'hermes' ? 'HERMES' : 'CODEX'; }
   function agentLabel(s) {
-    var provider = s.agent === 'claude-code' ? 'CLAUDE' : 'CODEX';
+    var provider = agentProvider(s.agent);
+    // hermes의 frontend는 플랫폼명(telegram/discord/cron …)이라 그대로 보여준다.
+    if (provider === 'HERMES') return s.frontend ? provider + ' ' + String(s.frontend).toUpperCase() : provider;
     if (s.frontend === 'app') return provider + ' APP';
     if (s.frontend === 'cli') return provider + (provider === 'CLAUDE' ? ' CODE' : ' CLI');
     if (s.frontend === 'auto') return provider + ' AUTO';
@@ -849,10 +858,10 @@
     if (!s.unconfirmed && s.state !== 'ended') {
       subN = s.bg_agents || 0;
       bgN = s.bg_shells || 0;
-      // 종류 정보 없이 총수만 오는 구형 수집기 폴백
+      // 종류 정보 없이 총수만 오는 수집기(hermes 구버전 등) 폴백
       if (!subN && !bgN && s.bg_count > 0) bgN = s.bg_count;
     }
-    var agentCls = s.agent === 'claude-code' ? 'cc' : 'cx';
+    var agentCls = provCls(s.agent);
     var aLabel = agentLabel(s);
     var task = '';
     var workText = String(s.task_summary || s.last_prompt || '').slice(0, 160);
@@ -1269,7 +1278,7 @@
       return '<tr><td class="mono dim">#' + e2.id + '</td>' +
         '<td class="mono dim">' + fmtTs(e2.ts) + '</td>' +
         '<td class="mono">' + esc(e2.device) + '</td>' +
-        '<td><span class="agent ' + (e2.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(e2) + '</span></td>' +
+        '<td><span class="agent ' + provCls(e2.agent) + '">' + agentLabel(e2) + '</span></td>' +
         '<td><span class="ev ' + (EVENT_CLS[e2.event] || '') + '">' + esc(e2.event) + '</span></td>' +
         '<td class="mono">' + esc(e2.project || '') + '</td>' +
         '<td class="mono dim">' + (e2.sid_num != null ? '#' + e2.sid_num : '') + '</td>' +
@@ -1629,7 +1638,7 @@
         ' data-agent="' + esc(s.agent) + '" data-sid="' + esc(s.session_id) + '">' +
         '<td class="mono dim">#' + (s.row_id != null ? s.row_id : '') + '</td>' +
         '<td class="mono">' + esc(s.device) + '</td>' +
-        '<td><span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' + agentLabel(s) + '</span></td>' +
+        '<td><span class="agent ' + provCls(s.agent) + '">' + agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
         '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') +
@@ -1726,7 +1735,7 @@
       var work = s.task_summary || s.last_prompt || '';  // 응답문(last_summary)은 작업 칸에 싣지 않음
       return '<tr><td class="mono dim">#' + (s.row_id != null ? s.row_id : '') + '</td>' +
         '<td class="mono">' + esc(s.device) + '</td>' +
-        '<td><span class="agent ' + (s.agent === 'claude-code' ? 'cc' : 'cx') + '">' +
+        '<td><span class="agent ' + provCls(s.agent) + '">' +
         agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(s.branch) + '</span>' : '') + '</td>' +
         '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
