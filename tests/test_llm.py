@@ -40,6 +40,42 @@ class CommandTests(unittest.TestCase):
         self.assertIn("--json", cmd)                                  # turn.completed 토큰 이벤트
 
 
+class ConfTests(unittest.TestCase):
+    """사이트별 실효 설정 — .env 기본 모델(claude 모델명)은 codex로 새지 않는다."""
+
+    def setUp(self):
+        import sqlite3
+        from unittest.mock import patch
+        from server import db
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        db.migrate(self.conn)
+        self.db_patch = patch.object(db, "_conn", self.conn)
+        self.db_patch.start()
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.conn.close()
+
+    def store(self, **kv):
+        for k, v in kv.items():
+            self.conn.execute("INSERT INTO settings (key, value) VALUES (?,?)", (f"llm.summary.{k}", v))
+
+    def test_claude_without_model_uses_env_default(self):
+        self.assertEqual(llm.conf("summary")["model"], llm.CFG.task_summary_model)
+
+    def test_codex_without_model_leaves_it_to_cli(self):
+        self.store(provider="codex")
+        cf = llm.conf("summary")
+        self.assertEqual((cf["provider"], cf["model"]), ("codex", ""))
+        self.assertNotIn("--model", llm.command(cf))
+
+    def test_codex_with_model_keeps_it(self):
+        self.store(provider="codex", model="gpt-6-sol", effort="high")
+        cf = llm.conf("summary")
+        self.assertEqual((cf["model"], cf["effort"]), ("gpt-6-sol", "high"))
+
+
 class WorkerUsageTests(unittest.TestCase):
     def test_claude_usage_prefers_model_usage_map(self):
         env = {"modelUsage": {"model-a": {"inputTokens": 10, "outputTokens": 73,

@@ -1527,6 +1527,7 @@
                   'report.provider', 'report.model', 'report.effort', 'claude_bin', 'codex_bin'];
   var SET_MODELS = { claude: null, codex: null };   // /api/llm-models 결과 캐시
   var SET_DEFAULTS = null;
+  var SET_PICK = {};   // 사이트별·프로바이더별 마지막 모델/에포트 — 프로바이더를 되돌리면 복원
   function setElId(k) { return 'set-' + k.replace('.', '-').replace('_', '-'); }
   function setEl(site, f) { return document.getElementById('set-' + site + '-' + f); }
 
@@ -1549,23 +1550,29 @@
     sel.innerHTML = html;
     sel.value = want || '';
     if (info && info.error) document.getElementById('setMsg').textContent = prov + ': ' + info.error;
+    setEl(site, 'provider').dataset.prev = prov;
     fillEffortSel(site);
   }
 
   function fillEffortSel(site) {
-    // 선택한 모델이 지원하는 에포트만 노출 (모델 미선택이면 기본 모델 기준)
+    // 선택한 모델이 지원하는 에포트만 노출 (모델이 "기본"이면 실제로 쓰일 기본 모델 기준).
+    // 저장된 값(dataset.want)은 목록에 없어도 유지, 모델을 바꿔 이월된 값은 새 모델이 지원할 때만 유지
     var prov = setEl(site, 'provider').value || 'claude';
     var sel = setEl(site, 'effort');
-    var want = sel.dataset.want !== undefined ? sel.dataset.want : sel.value;
+    var stored = sel.dataset.want !== undefined;
+    var want = stored ? sel.dataset.want : sel.value;
     delete sel.dataset.want;
-    var mid = setEl(site, 'model').value;
+    var mid = setEl(site, 'model').value ||
+      (prov === 'claude' && SET_DEFAULTS ? SET_DEFAULTS[site].model : '');
     var list = (SET_MODELS[prov] && SET_MODELS[prov].models) || [];
     var m = null;
     list.forEach(function (x) { if (x.id === mid || (!mid && x.is_default)) m = m || x; });
-    var efforts = (m && m.efforts.length) ? m.efforts : ['low', 'medium', 'high', 'xhigh'];
-    var html = '<option value="">기본</option>';
+    var efforts = m ? m.efforts : ['low', 'medium', 'high', 'xhigh'];   // 목록 외 모델은 일반 단계
+    if (!stored && efforts.indexOf(want) < 0) want = '';
+    var html = '<option value="">기본' + (m && !m.efforts.length ? ' (에포트 미지원 모델)' : '') + '</option>';
     efforts.forEach(function (e2) { html += '<option>' + esc(e2) + '</option>'; });
-    if (want && efforts.indexOf(want) < 0) html += '<option>' + esc(want) + '</option>';
+    if (want && efforts.indexOf(want) < 0)
+      html += '<option value="' + esc(want) + '">' + esc(want) + ' (목록 외)</option>';
     sel.innerHTML = html;
     sel.value = want || '';
   }
@@ -1596,6 +1603,7 @@
     Promise.all([getJSON('/api/settings'), loadModelLists(false)]).then(function (res) {
       var s = res[0];
       SET_DEFAULTS = s.defaults;
+      SET_PICK = {};
       SET_KEYS.forEach(function (k) {
         var el = document.getElementById(setElId(k));
         if (!el) return;
@@ -1618,7 +1626,17 @@
   document.addEventListener('change', function (e) {
     var el = e.target;
     if (!el.dataset || !el.dataset.site) return;
-    if (el.id.indexOf('provider') > -1) fillModelSel(el.dataset.site);
+    if (el.id.indexOf('provider') > -1) {
+      // 이전 프로바이더의 모델/에포트는 새 프로바이더로 이월하지 않는다 — 기억해 두고,
+      // 새 쪽은 거기서 전에 고른 값(없으면 기본)으로 시작
+      var site = el.dataset.site, msel = setEl(site, 'model'), esel = setEl(site, 'effort');
+      var pick = SET_PICK[site] || (SET_PICK[site] = {});
+      pick[el.dataset.prev] = { model: msel.value, effort: esel.value };
+      var back = pick[el.value] || { model: '', effort: '' };
+      msel.dataset.want = back.model;
+      esel.dataset.want = back.effort;
+      fillModelSel(site);
+    }
     else if (el.id.indexOf('model') > -1) fillEffortSel(el.dataset.site);
   });
   document.getElementById('setModelRefresh').addEventListener('click', function () {
