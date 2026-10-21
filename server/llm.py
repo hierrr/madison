@@ -32,10 +32,11 @@ FIELDS = ("provider", "model", "effort")
 CLAUDE_HYGIENE = ("--safe-mode", "--tools", "", "--no-session-persistence", "--disable-slash-commands")
 
 
-def defaults(site: str) -> dict:
+def defaults(site: str, provider: str = "claude") -> dict:
+    # .env 기본 모델은 claude 모델명 — codex에 넘기면 실패하므로 codex는 빈 값(CLI 기본)
     model = {"summary": CFG.task_summary_model, "digest": CFG.digest_model,
-             "report": CFG.report_model}.get(site, CFG.report_model)
-    return {"provider": "claude", "model": model, "effort": ""}
+             "report": CFG.report_model}.get(site, CFG.report_model) if provider == "claude" else ""
+    return {"provider": provider, "model": model, "effort": ""}
 
 
 def settings_all(c) -> dict:
@@ -46,7 +47,7 @@ def conf(site: str) -> dict:
     """사이트별 실효 설정: settings 테이블 → 없으면 .env/기본값."""
     with db.tx() as c:
         stored = settings_all(c)
-    out = defaults(site)
+    out = defaults(site, (stored.get(f"llm.{site}.provider") or "").strip() or "claude")
     for f in FIELDS:
         v = (stored.get(f"llm.{site}.{f}") or "").strip()
         if v:
