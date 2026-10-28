@@ -1,4 +1,5 @@
-"""자동화·태스크 탭 세션 이력 필터 — _session_conds의 상태 필터, 특히 'stale'(신호 없음) 판정."""
+"""자동화·태스크 탭 세션 이력 필터 — _session_conds의 상태 필터(특히 'stale' 신호 없음 판정)와 검색(q)."""
+import json
 import sqlite3
 import unittest
 
@@ -100,6 +101,93 @@ class StaleFilterTests(unittest.TestCase):
         self.assertEqual(hub.end_reason_for(self.conn, 1, "claude-code", "auto-await-zombie"), "lost")
         self.assertEqual(hub.end_reason_for(self.conn, 1, "claude-code", "auto-await-fresh"), "manual")
         self.assertIsNone(hub.end_reason_for(self.conn, 1, "claude-code", "nope"))
+
+
+class SearchTests(unittest.TestCase):
+    """태스크 탭 검색(q) — 세션 행 컬럼 + 이벤트 원장의 지시·응답 요약, 단어마다 AND."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        db.migrate(self.conn)
+        self.conn.execute("INSERT INTO devices (id,name,token_hash,created_at) VALUES (1,'dev-a','x',datetime('now'))")
+        sessions = [
+            # (sid, task_summary, session_name) — 마지막 프롬프트·요약은 무관한 내용
+            ("toggle", "어드민 화면 설명", "acme-archive"),
+            ("named", "다른 작업", "평일 야간 배치 스케줄"),
+            ("other", "리포트 버그 수정", None),
+            ("percent", "할인율 100% 표기", None),
+        ]
+        for sid, ts, name in sessions:
+            self.conn.execute(
+                "INSERT INTO sessions (device_id, agent, session_id, state, turns, last_prompt, task_summary,"
+                " session_name, frontend, last_seen_hub, started_at) VALUES (1, 'claude-code', ?, 'ended', 3, 'p', ?, ?,"
+                " 'cli', '2026-10-22T00:00:00Z', '2026-10-20T00:00:00Z')", (sid, ts, name))
+        events = [
+            ("toggle", "prompt", {"prompt": "배포 토글 시 메신저 채널에 알림", "frontend": "cli"}),
+            ("toggle", "turn_done", {"summary": "acme_toggle_job에 알림을 넣었습니다", "frontend": "cli"}),
+            # 단어가 서로 다른 턴에 흩어진 세션
+            ("other", "prompt", {"prompt": "배포 결과 확인", "frontend": "cli"}),
+            ("other", "turn_done", {"summary": "토글은 건드리지 않았습니다", "frontend": "cli"}),
+            # 지시·요약이 아닌 이벤트의 payload는 검색 대상이 아니다
+            ("named", "tool_start", {"tool": "메신저", "frontend": "cli"}),
+        ]
+        for i, (sid, ev, p) in enumerate(events):
+            self.conn.execute(
+                "INSERT INTO events (device_id, agent, session_id, event_id, event, ts_device, ts_hub, payload)"
+                " VALUES (1, 'claude-code', ?, ?, ?, ?, ?, ?)",
+                (sid, f"e{i}", ev, f"2026-10-22T00:0{i}:00Z", f"2026-10-22T00:0{i}:00Z",
+                 json.dumps(p, ensure_ascii=False)))
+
+    def tearDown(self):
+        self.conn.close()
+
+    def query(self, q):
+        conds, args = hub._session_conds(q=q)
+        return sorted(r[0] for r in self.conn.execute(
+            "SELECT s.session_id FROM sessions s JOIN devices d ON d.id=s.device_id WHERE " + " AND ".join(conds), args))
+
+    def test_matches_mid_session_prompt_and_summary(self):
+        # 세션 행은 무관한 마지막 요약만 들고 있어도 원장의 지시·응답 요약으로 찾힌다
+        self.assertEqual(self.query("메신저"), ["toggle"])
+        self.assertEqual(self.query("ACME_TOGGLE"), ["toggle"])   # ASCII는 대소문자 무시
+
+    def test_matches_session_columns(self):
+        self.assertEqual(self.query("평일"), ["named"])
+        self.assertEqual(self.query("리포트"), ["other"])
+
+    def test_terms_are_anded_across_turns(self):
+        self.assertEqual(self.query("배포 토글"), ["other", "toggle"])
+        self.assertEqual(self.query("배포 메신저"), ["toggle"])
+        self.assertEqual(self.query("배포 없는말"), [])
+
+    def test_payload_keys_and_other_events_do_not_match(self):
+        # 'cli'는 모든 payload의 frontend 값, '메신저'은 tool_start payload에만 — 둘 다 오탐하면 안 된다
+        self.assertEqual(self.query("cli"), [])
+        self.assertNotIn("named", self.query("메신저"))
+
+    def test_like_wildcards_are_literal(self):
+        self.assertEqual(self.query("100%"), ["percent"])
+        self.assertEqual(self.query("%"), ["percent"])
+        self.assertEqual(self.query("acme_t"), ["toggle"])
+        self.assertEqual(self.query("acme_x"), [])
+
+    def test_snippet_prefers_turn_with_all_terms(self):
+        m = hub._match_snippet(self.conn, "dev-a", "claude-code", "toggle", ["토글", "메신저"])
+        self.assertEqual(m["field"], "prompt")
+        self.assertEqual(m["text"], "배포 토글 시 메신저 채널에 알림")
+        # 단어가 흩어진 세션은 첫 단어가 든 턴
+        m = hub._match_snippet(self.conn, "dev-a", "claude-code", "other", ["토글", "배포"])
+        self.assertEqual((m["field"], m["text"]), ("summary", "토글은 건드리지 않았습니다"))
+        # 세션 컬럼으로만 맞은 세션은 발췌 없음
+        self.assertIsNone(hub._match_snippet(self.conn, "dev-a", "claude-code", "named", ["평일"]))
+
+    def test_excerpt_window(self):
+        text = "가" * 100 + "토글" + "나" * 200
+        out = hub._excerpt(text, "토글")
+        self.assertTrue(out.startswith("…" + "가" * 40 + "토글"))
+        self.assertTrue(out.endswith("…"))
+        self.assertEqual(hub._excerpt("줄\n바꿈  토글", "토글"), "줄 바꿈 토글")
 
 
 if __name__ == "__main__":

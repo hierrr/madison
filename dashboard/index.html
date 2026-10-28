@@ -165,6 +165,11 @@
   .subev { display: flex; flex-direction: column; gap: 3px; padding: 4px 2px; font-size: 12px; }
   .subev .mono { font-size: 11px; }
   .hsel { font: inherit; font-size: 12.5px; background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  /* 태스크·자동화·핸드오프 탭 검색 — 맞은 단어 강조, 칸 아래에 근거 발췌(지시·응답 요약, 핸드오프 문서) */
+  .hsearch { width: 200px; max-width: 100%; }
+  .ht mark { background: var(--warn-bg); color: inherit; border-radius: 2px; padding: 0 1px; }
+  .hmatch { margin-top: 4px; font-size: 12px; color: var(--ink-2); }
+  .hmatch .mono { font-size: 11px; color: var(--ink-3); margin-right: 4px; }
   .htitle { margin: 8px 4px 2px; font-size: 12px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
 
   /* ── KPI ── */
@@ -1333,7 +1338,7 @@
     tasks: null, queue: null, events: null, auto: null,   // 탭별 서버 페이지 응답 {rows,total,page,pages,facets}
     devF: { online: true, quiet: true, revoked: false },
     devSort: { key: 'seen', dir: 'asc' },
-    taskF: { device: '', agent: '', fe: '', project: '', state: '', days: '0' }
+    taskF: { device: '', agent: '', fe: '', project: '', state: '', days: '0', q: '' }
   };
 
   // ── 공용 페이지네이션 (페이지당 20개, 서버 페이징) ──
@@ -1411,14 +1416,14 @@
     var f = HIST.taskF;
     getJSON('/api/history/sessions?' + qsBuild({ page: PG.tasks, limit: 20, auto: 0,
       device: f.device, agent: f.agent, fe: f.fe, project: f.project, state: f.state,
-      days: f.days === '0' ? '' : f.days }))
+      days: f.days === '0' ? '' : f.days, q: f.q.trim() }))
       .then(function (res) { HIST.tasks = res; PG.tasks = res.page; renderTasks(); })
       .catch(function () { document.getElementById('tasksTable').textContent = '불러오기 실패'; });
   }
   function loadAuto() {
     getJSON('/api/history/sessions?' + qsBuild({ page: PG.auto, limit: 20, auto: 1,
       device: AF.device, agent: AF.agent, fe: AF.fe, project: AF.project, state: AF.state,
-      days: AF.days === '0' ? '' : AF.days }))
+      days: AF.days === '0' ? '' : AF.days, q: AF.q.trim() }))
       .then(function (res) { HIST.auto = res; PG.auto = res.page; renderAuto(); })
       .catch(function () { document.getElementById('autoTable').textContent = '불러오기 실패'; });
   }
@@ -1431,7 +1436,7 @@
   function loadQueue() {
     getJSON('/api/handoffs?' + qsBuild({ page: PG.queue, limit: 20,
       src: QF.from, dst: QF.to, repo: QF.project, status: QF.status,
-      days: QF.days === '0' ? '' : QF.days }))
+      days: QF.days === '0' ? '' : QF.days, q: QF.q.trim() }))
       .then(function (res) { HIST.queue = res; PG.queue = res.page; renderQueue(); })
       .catch(function () { document.getElementById('queueTable').textContent = '불러오기 실패'; });
   }
@@ -1472,7 +1477,7 @@
     }
   }
 
-  var QF = { from: '', to: '', project: '', status: '', days: '0' };
+  var QF = { from: '', to: '', project: '', status: '', days: '0', q: '' };
   function renderQueue() {
     var res = HIST.queue || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
     var fc = res.facets || {};
@@ -1481,7 +1486,7 @@
       return '<tr><td class="mono dim">#' + h.id + '</td>' +
         '<td class="mono">' + esc(h.from_name || '?') + ' <i class="ico ico-arrow-right dim"></i>' + esc(h.to_name || '?') + '</td>' +
         '<td class="mono">' + esc(h.repo) + (h.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(h.branch) + '</span>' : '') + '</td>' +
-        '<td class="wrapcell">' + esc(h.summary || '') +
+        '<td class="wrapcell">' + markTerms(h.summary || '', QF.q) + matchLine(h.match, QF.q) +
           (h.has_doc ? '<details class="hfdoc" data-hfdoc="' + h.id + '"><summary>문서 보기</summary><pre class="dim">불러오는 중…</pre></details>' : '') + '</td>' +
         '<td><span class="hfstate ' + hfCls(h.status) + '">' + esc(label) + '</span></td>' +
         '<td class="mono dim">' + fmtTs(h.created_at) + (h.delivered_at ? ' → ' + fmtTs(h.delivered_at) : '') + '</td></tr>';
@@ -1497,6 +1502,7 @@
         return '<option value="' + v + '"' + (QF.status === v ? ' selected' : '') + '>' + HF_LABEL[v] + '</option>';
       }).join('') + '</select>' +
       daysSel('data-qf', QF.days) +
+      searchBox('data-qf', QF.q, '요약·문서 검색', '핸드오프 요약·문서 본문·브랜치에서 찾는다') +
       hcountHtml(res) +
       '</div>' +
       table(['ID', '경로', '프로젝트', '태스크', '상태', '생성 → 수신'], html) +
@@ -1670,7 +1676,7 @@
       .finally(function () { btn.disabled = false; });
   });
 
-  var AF = { device: '', agent: '', fe: '', project: '', state: '', days: '0' };   // 자동화 탭 필터
+  var AF = { device: '', agent: '', fe: '', project: '', state: '', days: '0', q: '' };   // 자동화 탭 필터
   function renderAuto() {
     var res = HIST.auto || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
     var fc = res.facets || {};
@@ -1683,7 +1689,7 @@
         '<td class="mono">' + esc(s.device) + '</td>' +
         '<td><span class="agent ' + provCls(s.agent) + '">' + agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + '</td>' +
-        '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
+        '<td class="wrapcell">' + markTerms(String(work).slice(0, 160), AF.q) + matchLine(s.match, AF.q) + '</td>' +
         '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') +
           (s.state === 'ended' && s.end_reason ? ' <span class="dim">· ' + reasonLabel(s.end_reason) + '</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
@@ -1697,6 +1703,7 @@
       '<select class="hsel" data-af="project">' + optsFor(fc.projects || [], AF.project, '프로젝트 전체') + '</select>' +
       stateSel('data-af', AF.state, fc.reasons) +
       daysSel('data-af', AF.days) +
+      searchBox('data-af', AF.q, '지시·요약 검색', SESSION_SEARCH_TITLE) +
       hcountHtml(res) +
       '</div>' +
       table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '기간'], html) +
@@ -1770,18 +1777,42 @@
       (rows.join('') || '<tr><td class="dim" colspan="7">표시할 기기 없음</td></tr>') + '</tbody></table>';
   }
 
+  // 검색어 강조 — 원문을 단어 경계로 쪼갠 뒤 조각마다 이스케이프(이스케이프된 문자열에 치환하면 엔티티가 깨진다)
+  function markTerms(text, q) {
+    var terms = String(q || '').trim().split(/\s+/).filter(Boolean).map(function (t) {
+      return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    });
+    if (!terms.length) return esc(text);
+    return String(text).split(new RegExp('(' + terms.join('|') + ')', 'gi')).map(function (part, i) {
+      return i % 2 ? '<mark>' + esc(part) + '</mark>' : esc(part);
+    }).join('');
+  }
+  // 검색 근거 — 목록 칸에 안 보이는 곳(세션 중간 턴의 지시·응답 요약, 핸드오프 문서)에서 맞았으면 그 발췌를 칸 아래에
+  var MATCH_LABEL = { prompt: '지시', summary: '응답', doc: '문서' };
+  function matchLine(m, q) {
+    if (!m) return '';
+    return '<div class="hmatch"><span class="mono">' + (MATCH_LABEL[m.field] || m.field) + (m.ts ? ' · ' + fmtTs(m.ts) : '') + '</span>' +
+      markTerms(m.text, q) + '</div>';
+  }
+  // 태스크·자동화·핸드오프 탭 공용 검색창 — attr은 탭의 필터 속성(data-taskf 등), 조회는 각 탭의 change 위임이 맡는다
+  function searchBox(attr, cur, placeholder, title) {
+    return '<input type="search" class="hsel hsearch" ' + attr + '="q" value="' + esc(cur) + '"' +
+      ' placeholder="' + placeholder + ' (Enter)" title="' + title + ' — 띄어 쓴 단어는 모두 포함(AND)">';
+  }
+  var SESSION_SEARCH_TITLE = '세션 요약·이름과 모든 턴의 지시·응답 요약에서 찾는다';
   function renderTasks() {
     var res = HIST.tasks || { rows: [], total: 0, page: 1, pages: 1, facets: {} };
     var fc = res.facets || {};
     var f = HIST.taskF;
     var html = res.rows.map(function (s) {
       var work = s.task_summary || s.last_prompt || '';  // 응답문(last_summary)은 작업 칸에 싣지 않음
+      var hit = matchLine(s.match, f.q);
       return '<tr><td class="mono dim">#' + (s.row_id != null ? s.row_id : '') + '</td>' +
         '<td class="mono">' + esc(s.device) + '</td>' +
         '<td><span class="agent ' + provCls(s.agent) + '">' +
         agentLabel(s) + '</span></td>' +
         '<td class="mono">' + nameOr(s.project) + (s.branch ? ' <span class="dim"><i class="ico ico-git-branch"></i>' + esc(s.branch) + '</span>' : '') + '</td>' +
-        '<td class="wrapcell">' + esc(String(work).slice(0, 160)) + '</td>' +
+        '<td class="wrapcell">' + markTerms(String(work).slice(0, 160), f.q) + hit + '</td>' +
         '<td>' + sessDot(s) + esc(STATE_LABEL[s.state] || s.state) + (s.unconfirmed ? ' <span class="dim">· 신호 없음</span>' : '') + (s.end_reason ? ' <span class="dim">· ' + reasonLabel(s.end_reason) + '</span>' : '') + '</td>' +
         '<td class="mono">' + s.turns + '</td>' +
         '<td class="mono dim">' + esc(String(s.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '')) +
@@ -1796,6 +1827,7 @@
       '<select class="hsel" data-taskf="project">' + optsFor(fc.projects || [], f.project, '프로젝트 전체') + '</select>' +
       stateSel('data-taskf', f.state, fc.reasons) +
       daysSel('data-taskf', f.days) +
+      searchBox('data-taskf', f.q, '지시·요약 검색', SESSION_SEARCH_TITLE) +
       hcountHtml(res) +
       '</div>' +
       table(['ID', '기기', '에이전트', '프로젝트', '작업', '상태', '턴', '모델', '기간', ''], html) +
@@ -1835,6 +1867,14 @@
       else AF[asel.dataset.af] = asel.value;
       PG.auto = 1; loadAuto();
     }
+  });
+  // 검색창은 Enter·포커스 이탈의 change로 조회한다(입력마다 다시 그리면 포커스가 날아감) — 지우기(×)만 즉시 전체로 복귀
+  document.addEventListener('input', function (e) {
+    var el = e.target;
+    if (el.value || !el.classList || !el.classList.contains('hsearch')) return;
+    if (el.dataset.taskf && HIST.taskF.q) { HIST.taskF.q = ''; PG.tasks = 1; loadTasks(); }
+    else if (el.dataset.af && AF.q) { AF.q = ''; PG.auto = 1; loadAuto(); }
+    else if (el.dataset.qf && QF.q) { QF.q = ''; PG.queue = 1; loadQueue(); }
   });
 
   // 기기 폐기
