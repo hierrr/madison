@@ -1301,6 +1301,7 @@
   }
 
   function setView(v) {
+    if (v !== VIEW) { resetTab(VIEW); window.scrollTo(0, 0); }
     VIEW = v;
     document.querySelectorAll('.view').forEach(function (el) {
       el.classList.toggle('hidden', el.id !== 'view-' + v);
@@ -2400,6 +2401,37 @@
   document.getElementById('rptNext').addEventListener('click', function () { rptShift(1); });
   document.getElementById('rptToday').addEventListener('click', function () { RPT.date = ymd(new Date()); rptReload(); });
   document.getElementById('rptRefresh').addEventListener('click', refreshReport);
+
+  // 탭을 떠나면 그 탭을 처음 화면으로 — 필터·검색·페이지·정렬, 리포트 범위·날짜, 스크롤까지. 다른 탭에 다녀왔는데
+  // 예전 조건이 남아 목록이 비어 보이는 일 방지(2026-10-28 사용자 요청: 모든 탭 공통). 들어갈 때가 아니라 떠날 때 비우므로,
+  // 기기 탭 '태스크' 버튼처럼 이동하면서 조건을 싣는 경로는 그대로 동작한다. 펼친 행·문서, 사용량 '더 보기'는 들어갈 때 다시 그려져 저절로 접히고,
+  // 설정은 들어갈 때 저장값을 다시 불러온다. 리포트 날짜의 '오늘'은 떠나는 시점 기준이라 자정 넘겨 열어 둔 페이지도 맞다.
+  var FILTER_INIT = JSON.stringify({ FILTERS: FILTERS, devF: HIST.devF, devSort: HIST.devSort, taskF: HIST.taskF,
+                                     QF: QF, AF: AF, EF: EF, UF: UF, rptRange: RPT.range });
+  function resetTab(v) {
+    var init = JSON.parse(FILTER_INIT);
+    document.querySelectorAll('#view-' + v + ' .htwrap').forEach(function (el) { el.scrollLeft = 0; });   // 넓은 표의 가로 스크롤
+    if (v === 'main') {
+      FILTERS = init.FILTERS;
+      document.querySelectorAll('#filters .fchip').forEach(function (c) { c.setAttribute('aria-pressed', String(!!FILTERS[c.dataset.f])); });
+      applyFilter();
+    } else if (v === 'devices') { HIST.devF = init.devF; HIST.devSort = init.devSort; }
+    else if (v === 'tasks') { HIST.taskF = init.taskF; PG.tasks = 1; }
+    else if (v === 'handoff') { QF = init.QF; PG.queue = 1; }
+    else if (v === 'auto') { AF = init.AF; PG.auto = 1; }
+    else if (v === 'events') { EF = init.EF; PG.events = 1; }
+    else if (v === 'report') {
+      RPT.range = init.rptRange; RPT.date = ymd(new Date());
+      Array.prototype.forEach.call(document.getElementById('rptRange').children, function (c) { c.classList.toggle('on', c.dataset.r === RPT.range); });
+    }
+    else if (v === 'usage') {
+      // 사용량 컨트롤은 정적 HTML이라 표시도 되돌린다(기기 칩은 다음 로드 때 UF로 다시 그려짐)
+      UF = init.UF;
+      Array.prototype.forEach.call(document.getElementById('uRange').children, function (c) { c.classList.toggle('on', c.dataset.days === UF.days); });
+      Array.prototype.forEach.call(document.getElementById('uAgent').children, function (c) { c.classList.toggle('on', c.dataset.a === UF.agent); });
+      document.getElementById('uHuman').checked = UF.human;
+    }
+  }
 
   if (location.hash && document.getElementById('view-' + location.hash.slice(1))) {
     setView(location.hash.slice(1));
