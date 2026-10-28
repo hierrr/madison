@@ -56,7 +56,10 @@ push a piece of work from one machine to another without walking over to it.
   (macOS) and every new session there is briefed until you `/pickup` — in Claude
   Code or Codex, whichever you prefer.
 - **History** — devices, sessions, handoffs, and the raw event log, each
-  filterable, behind tabs.
+  filterable, behind tabs. The tasks and automation tabs are also searchable across
+  every turn's prompt and reply summary, not just a session's latest one, so work
+  done midway through a long session still leads you back to it; the handoffs tab
+  searches summaries and handoff documents.
 - **Daily/weekly/monthly reports** — the hub condenses each period's work into
   a PM/owner-oriented report markdown (grouped by service, nested bullets) you
   can paste into Notion — the longer the period, the more it synthesizes

@@ -41,10 +41,11 @@ class HandoffLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "client": ("127.0.0.1", 12345), "server": ("localhost", 8787), "scheme": "http",
         }, receive)
 
-    async def create(self, *, repo="acme", recipient=2):
+    async def create(self, *, repo="acme", recipient=2, summary="조사 이어서 진행", doc="먼저 이 맥락을 읽을 것.",
+                     branch="main"):
         created = await hub.create_handoff(self.request({
-            "to": f"device-{recipient}", "repo": repo, "branch": "main",
-            "summary": "조사 이어서 진행", "doc": "먼저 이 맥락을 읽을 것.",
+            "to": f"device-{recipient}", "repo": repo, "branch": branch,
+            "summary": summary, "doc": doc,
             "patches": [{"repo": repo, "base": "abc123", "diff": "예시 패치"}],
         }, device=1))
         return created["id"]
@@ -120,6 +121,40 @@ class HandoffLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as raised:
             await self.change(hid, "unknown")
         self.assertEqual(raised.exception.status_code, 400)
+
+
+class HandoffSearchTests(unittest.IsolatedAsyncioTestCase):
+    """핸드오프 탭 검색(q) — 요약·문서·브랜치에서 단어마다 AND, 요약에 안 보이는 단어는 문서 발췌로."""
+    # 메모리 DB·요청 준비는 상태 전이 테스트와 같다 (상속하면 그쪽 테스트까지 다시 돈다)
+    setUp = HandoffLifecycleTests.setUp
+    tearDown = HandoffLifecycleTests.tearDown
+    request = HandoffLifecycleTests.request
+    create = HandoffLifecycleTests.create
+
+    async def asyncSetUp(self):
+        self.a = await self.create(summary="로그인 버그 조사", doc="세션 쿠키 만료를 확인할 것")
+        self.b = await self.create(summary="배포 스크립트 정리", doc="머리말\n로그인 화면은 건드리지 않음", branch="fix/cookie")
+        self.c = await self.create(summary="문서 갱신", doc="진행률 100% 완료")
+
+    async def search(self, q):
+        res = await hub.list_handoffs(self.request(), page=1, q=q)
+        return {h["id"]: h["match"] for h in res["rows"]}
+
+    async def test_summary_doc_and_branch(self):
+        hits = await self.search("로그인")
+        self.assertEqual(list(hits), [self.b, self.a])          # 최신순
+        self.assertIsNone(hits[self.a])                          # 요약에 보이면 발췌 없음
+        self.assertEqual(hits[self.b], {"field": "doc", "text": "머리말 로그인 화면은 건드리지 않음"})
+        self.assertEqual(await self.search("COOKIE"), {self.b: None})   # 브랜치, ASCII 대소문자 무시
+
+    async def test_terms_are_anded_and_snippet_shows_hidden_term(self):
+        # a는 '로그인'이 요약에, '쿠키'가 문서에 — 발췌는 요약에 안 보이는 단어 쪽. b는 '쿠키'가 없다(브랜치는 cookie)
+        self.assertEqual(await self.search("로그인 쿠키"), {self.a: {"field": "doc", "text": "세션 쿠키 만료를 확인할 것"}})
+
+    async def test_patches_excluded_and_wildcards_literal(self):
+        self.assertEqual(await self.search("예시"), {})        # 패치(diff) 본문은 검색 대상이 아니다
+        self.assertEqual(list(await self.search("100%")), [self.c])
+        self.assertEqual(list(await self.search("%")), [self.c])
 
 
 if __name__ == "__main__":

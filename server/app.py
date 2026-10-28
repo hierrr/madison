@@ -247,16 +247,41 @@ _SESSION_PAGE_COLS = (
 # 프로젝트가 늘어도 그대로 적용된다. 원장(이벤트 히스토리)에는 그대로 남는다.
 _SUBSTANTIVE_SQL = "(s.turns > 0 OR COALESCE(s.last_prompt, '') != '')"
 
+# 검색 — 세션 행은 마지막 프롬프트·요약만 들고 있어, 세션 중간에 한 작업은 이벤트 원장의 지시(prompt)·응답 요약(summary)까지
+# 봐야 찾힌다(2026-10-28). payload 전체가 아니라 두 필드만 — 'cli'·'model' 같은 키·값 오탐 방지.
+# hermes는 prompt·turn_done 양쪽에 두 필드를 다 싣기도 해서 이벤트 종류와 필드를 교차로 본다.
+_SEARCH_SESSION_COLS = ("s.task_summary", "s.last_prompt", "s.session_name")
+_SEARCH_EVENT_SQL = (
+    "EXISTS (SELECT 1 FROM events e WHERE e.device_id = s.device_id AND e.session_id = s.session_id"
+    " AND e.agent = s.agent AND e.event IN ('prompt', 'turn_done')"
+    " AND (json_extract(e.payload, '$.prompt') LIKE ? ESCAPE '\\'"
+    "      OR json_extract(e.payload, '$.summary') LIKE ? ESCAPE '\\'))")
+
+
+def _search_terms(q: str) -> list[str]:
+    """검색어 → 공백으로 나눈 단어(최대 5개). 단어마다 AND — 같은 세션 안이면 서로 다른 턴에 있어도 맞는다."""
+    return q.split()[:5]
+
+
+def _like_pat(term: str) -> str:
+    return "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
 
 def _session_conds(device: str = "", agent: str = "", fe: str = "",
                    project: str = "", days: int = 0, auto: int = -1,
-                   substantive: bool = True, state: str = "") -> tuple[list[str], list]:
+                   substantive: bool = True, state: str = "", q: str = "") -> tuple[list[str], list]:
     """세션 이력 공용 WHERE 조각. fe '-'는 프런트엔드 미기록, project '(unknown)'은 빈 값 매칭.
     substantive=True면 프롬프트·턴 없는 no-op 세션을 제외한다.
     state는 세션 상태값 그대로, 'stale' = 현황의 '신호 없음' 오버레이(_overlay_unconfirmed)와 같은 판정(working은 TTL 초과,
     대기 상태는 기기 오프라인 — 종료 훅을 못 받고 남은 좀비 세션용, 헤드리스(auto)는 종료 전까지 상태 무관 TTL 초과 — 2026-10-14),
-    또는 'ended:<사유>' = 종료 사유별('-'는 사유 없음, 2026-10-01)."""
+    또는 'ended:<사유>' = 종료 사유별('-'는 사유 없음, 2026-10-01).
+    q는 검색어 — 단어마다 세션 요약·마지막 프롬프트·세션 이름 또는 이벤트 원장의 지시·응답 요약 중 한 곳에 있으면 매칭(대소문자 무시는 ASCII만)."""
     conds, args = [], []
+    for term in _search_terms(q):
+        pat = _like_pat(term)
+        conds.append("(" + " OR ".join(f"{col} LIKE ? ESCAPE '\\'" for col in _SEARCH_SESSION_COLS)
+                     + " OR " + _SEARCH_EVENT_SQL + ")")
+        args += [pat] * (len(_SEARCH_SESSION_COLS) + 2)
     if state == "stale":
         # 저장 형식이 'YYYY-MM-DDTHH:MM:SSZ'라 datetime()의 공백 구분 문자열과는 같은 날짜에서 비교가 어긋난다 — strftime으로 맞춘다
         fmt = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now', ?)"
@@ -297,13 +322,42 @@ def _session_conds(device: str = "", agent: str = "", fe: str = "",
     return conds, args
 
 
+def _excerpt(text: str, term: str, before: int = 40, width: int = 140) -> str:
+    """text에서 term 주변 발췌 — 줄바꿈은 공백으로, 앞뒤가 잘리면 말줄임표."""
+    text = " ".join(text.split())
+    start = max(text.lower().find(term.lower()) - before, 0)
+    return ("…" if start else "") + text[start:start + width] + ("…" if start + width < len(text) else "")
+
+
+def _match_snippet(c, device: str, agent: str, session_id: str, terms: list[str]) -> dict | None:
+    """검색 결과 행의 근거 — 그 세션에서 검색어가 처음 나온 지시(prompt) 또는 응답 요약(summary) 발췌.
+    모든 단어가 함께 든 턴을 먼저 찾고, 없으면(단어가 여러 턴에 흩어짐) 첫 단어가 든 턴.
+    세션 행 컬럼(요약·세션 이름)으로만 맞았으면 None — 작업 칸에 이미 보인다."""
+    text_sql = ("COALESCE(json_extract(e.payload, '$.prompt'), '') || char(10)"
+                " || COALESCE(json_extract(e.payload, '$.summary'), '')")
+    for group in (terms, terms[:1]):
+        r = c.execute(
+            "SELECT e.ts_hub, json_extract(e.payload, '$.prompt') AS prompt, json_extract(e.payload, '$.summary') AS summary"
+            " FROM events e JOIN devices d ON d.id = e.device_id"
+            " WHERE d.name = ? AND e.agent = ? AND e.session_id = ? AND e.event IN ('prompt', 'turn_done')"
+            + "".join(f" AND {text_sql} LIKE ? ESCAPE '\\'" for _ in group) +
+            " ORDER BY e.id LIMIT 1",
+            [device, agent, session_id] + [_like_pat(t) for t in group]).fetchone()
+        if r:
+            field = "prompt" if terms[0].lower() in str(r["prompt"] or "").lower() else "summary"
+            return {"field": field, "ts": r["ts_hub"], "text": _excerpt(str(r[field] or ""), terms[0])}
+    return None
+
+
 @app.get("/api/history/sessions")
 async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
                            page: int = 0, device: str = "", agent: str = "",
-                           fe: str = "", project: str = "", auto: int = -1, state: str = ""):
+                           fe: str = "", project: str = "", auto: int = -1, state: str = "",
+                           q: str = ""):
     """종료 포함 전체 세션 이력 — 태스크·자동화 탭용. 관리자 전용(기기 쪽 소비자 없음).
     page=0(기본)은 기존 전체 리스트 응답. page>=1이면 필터·페이지 단위 {rows,total,page,pages,facets}.
-    state: working|awaiting_input|needs_approval|ended|stale(신호 없음)|ended:<사유> — 자동화·태스크 탭 상태 필터(2026-10-01)."""
+    state: working|awaiting_input|needs_approval|ended|stale(신호 없음)|ended:<사유> — 자동화·태스크 탭 상태 필터(2026-10-01).
+    q: 검색어(_session_conds) — 있으면 행마다 맞은 지시·응답 발췌(match)를 붙인다(2026-10-28)."""
     _require(request, ("admin",))
     base_from = " FROM sessions s JOIN devices d ON d.id=s.device_id"
     if page < 1:
@@ -319,7 +373,7 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
         return _overlay_unconfirmed(rows)
 
     per = limit if 1 <= limit <= 200 else 20
-    conds, cargs = _session_conds(device, agent, fe, project, days, auto, state=state)
+    conds, cargs = _session_conds(device, agent, fe, project, days, auto, state=state, q=q)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
     with db.tx() as c:
         total = c.execute("SELECT COUNT(*)" + base_from + where, cargs).fetchone()[0]
@@ -329,8 +383,12 @@ async def history_sessions(request: Request, limit: int = 2000, days: int = 0,
             "SELECT " + _SESSION_PAGE_COLS + base_from + where +
             " ORDER BY s.last_seen_hub DESC LIMIT ? OFFSET ?",
             cargs + [per, (page - 1) * per]).fetchall()]
+        terms = _search_terms(q)
+        if terms:
+            for r in rows:
+                r["match"] = _match_snippet(c, r["device"], r["agent"], r["session_id"], terms)
         # 같은 필터에서 감춘 no-op 세션 수 — 조용히 버리지 않고 탭에 "N건 제외"로 알린다
-        nconds, nargs = _session_conds(device, agent, fe, project, days, auto, substantive=False, state=state)
+        nconds, nargs = _session_conds(device, agent, fe, project, days, auto, substantive=False, state=state, q=q)
         nconds.append("NOT " + _SUBSTANTIVE_SQL)
         hidden = c.execute("SELECT COUNT(*)" + base_from +
                            " WHERE " + " AND ".join(nconds), nargs).fetchone()[0]
@@ -444,9 +502,31 @@ async def create_handoff(request: Request):
     return {"id": cur.lastrowid, "hf": f"HF-{cur.lastrowid:03d}"}
 
 
+# 핸드오프 탭 검색 — 요약·문서 본문·브랜치에서, 단어마다 AND(태스크·자동화 탭과 같은 규칙, 2026-10-28).
+# patches(diff)는 코드라 단어마다 잡음이 많아 제외. 문서는 목록에 안 실리므로 요약에 안 보이는 단어는 발췌로 보여 준다.
+_SEARCH_HANDOFF_COLS = ("h.summary", "h.doc", "h.branch")
+
+
+def _handoff_search_conds(terms: list[str]) -> list[str]:
+    """단어마다 조건 하나 — 인자는 단어당 _SEARCH_HANDOFF_COLS 개수만큼 _like_pat(단어)."""
+    return ["(" + " OR ".join(f"{col} LIKE ? ESCAPE '\\'" for col in _SEARCH_HANDOFF_COLS) + ")" for _ in terms]
+
+
+def _handoff_match(c, handoff_id: int, summary: str | None, terms: list[str]) -> dict | None:
+    """요약에 안 보이는 첫 단어가 문서에 있으면 그 주변 발췌. 모두 요약에 보이면(또는 브랜치로만 맞았으면) None."""
+    shown = (summary or "").lower()
+    term = next((t for t in terms if t.lower() not in shown), None)
+    if term is None:
+        return None
+    doc = (c.execute("SELECT doc FROM handoffs WHERE id=?", (handoff_id,)).fetchone() or {"doc": None})["doc"] or ""
+    if term.lower() not in doc.lower():
+        return None
+    return {"field": "doc", "text": _excerpt(doc, term)}
+
+
 @app.get("/api/handoffs")
 async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin: str = "", limit: int = 50,
-                        page: int = 0, src: str = "", dst: str = "", status: str = "", days: int = 0):
+                        page: int = 0, src: str = "", dst: str = "", status: str = "", days: int = 0, q: str = ""):
     actor = _require(request, ("device", "admin"))
     with db.tx() as c:
         if mine and actor["device"]:
@@ -485,17 +565,23 @@ async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin
                 conds.append("h.status = ?"); cargs.append(status)
             if days > 0:
                 conds.append("h.created_at >= datetime('now', ?)"); cargs.append(f"-{int(days)} days")
+            terms = _search_terms(q)
+            conds += _handoff_search_conds(terms)
+            cargs += [_like_pat(t) for t in terms for _ in _SEARCH_HANDOFF_COLS]
             where = (" WHERE " + " AND ".join(conds)) if conds else ""
             per = limit if 1 <= limit <= 200 else 20
             total = c.execute("SELECT COUNT(*)" + hf_from + where, cargs).fetchone()[0]
             pages = max(1, -(-total // per))
             page = min(max(page, 1), pages)
-            rows = c.execute(
+            rows = [dict(r) for r in c.execute(
                 "SELECT h.id, h.repo, h.branch, h.summary, h.status, h.created_at, h.delivered_at,"
                 " fd.name AS from_name, td.name AS to_name,"
                 " (h.doc IS NOT NULL AND h.doc != '') AS has_doc"
                 + hf_from + where + " ORDER BY h.id DESC LIMIT ? OFFSET ?",
-                cargs + [per, (page - 1) * per]).fetchall()
+                cargs + [per, (page - 1) * per]).fetchall()]
+            if terms:
+                for r in rows:
+                    r["match"] = _handoff_match(c, r["id"], r["summary"], terms)
             facets = {
                 "froms": [r[0] for r in c.execute(
                     "SELECT DISTINCT COALESCE(fd.name,'?')" + hf_from + " ORDER BY 1")],
@@ -504,7 +590,7 @@ async def list_handoffs(request: Request, mine: str = "", repo: str = "", origin
                 "projects": [r[0] for r in c.execute(
                     "SELECT DISTINCT h.repo FROM handoffs h ORDER BY 1")],
             }
-            return {"rows": [{**dict(r), "hf": f"HF-{r['id']:03d}"} for r in rows],
+            return {"rows": [{**r, "hf": f"HF-{r['id']:03d}"} for r in rows],
                     "total": total, "page": page, "pages": pages, "facets": facets}
         else:
             rows = c.execute(
