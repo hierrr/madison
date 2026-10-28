@@ -45,6 +45,13 @@ class GatherTests(unittest.TestCase):
         self.assertEqual(v["sessions"][0]["device"], "workstation")
         self.assertEqual([s["key"] for s in v["sessions"]], ["S1", "S2"])   # 프롬프트의 세션 표기
         self.assertEqual(v["sessions"][0]["session_id"], "s1")
+        self.assertFalse(v["repo"])
+
+    def test_marks_projects_with_git_origin_as_repo(self):
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "브랜치 구성"}, project="acme-site")
+        _ev(self.c, "2026-08-27T01:05:00Z", "turn_done", {"summary": "main·dev 구성"}, project="acme-site")
+        self.c.execute("UPDATE events SET origin='https://example.com/acme/acme-site.git' WHERE event='prompt'")
+        self.assertTrue(report.gather(self.c, "day", "2026-08-27")["acme-site"]["repo"])
 
     def test_long_response_keeps_head_and_tail(self):
         long = "머리" + "x" * 3000 + "꼬리"
@@ -250,7 +257,12 @@ class PromptTests(unittest.TestCase):
         self.assertIn("서비스: Acme (약한 기본값", report.build_day_prompt("2026-08-27", work, weak))
         strong = _reg(["Acme"], {"scratch": {"service": "Acme", "strength": "strong"}})
         self.assertIn("=== 서비스: Acme | 프로젝트: scratch", report.build_day_prompt("2026-08-27", work, strong))
-        self.assertIn("서비스: scratch (매핑 없음", report.build_day_prompt("2026-08-27", work, _reg(["Acme"])))
+        self.assertIn("서비스: scratch (매핑 없음 —", report.build_day_prompt("2026-08-27", work, _reg(["Acme"])))
+        # 매핑 없는 자체 저장소는 저장소 운영 작업도 그 프로젝트 소속임을 블록 머리에서 밝힌다
+        repo = {"acme-site": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1, "repo": True}}
+        p = report.build_day_prompt("2026-08-27", repo, _reg(["Acme", "GitHub"]))
+        self.assertIn("서비스: acme-site (매핑 없음 · 자체 저장소", p)
+        self.assertIn("한 저장소 안의 작업은 그 저장소의 서비스", p)
 
     def test_period_prompt_uses_dailies(self):
         dailies = [("2026-08-24", "- Acme\n    - A"), ("2026-08-25", "- Acme\n    - B")]
@@ -370,5 +382,6 @@ class MetaPhraseTests(unittest.TestCase):
         p = report.build_period_prompt("week", "2026-08-24", [("2026-08-24", "- Acme\n    - A")], _reg(["Acme"]))
         self.assertNotIn("proposals에", p)
         self.assertIn("목록에 없는 이름은 최상위로 쓰지 않는다", p)
+        self.assertIn("서비스 배치도 업무일지의 것을 그대로 따른다", p)
         d = report.build_day_prompt("2026-08-24", {"proj": {"sessions": [_session(1)], "turns": 1, "n_sessions": 1}}, _reg(["Acme"]))
         self.assertIn("저장소·디렉터리 이름은", d)

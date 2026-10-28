@@ -148,15 +148,16 @@ def get_row(c, range_: str, day: str):
     return c.execute("SELECT * FROM reports WHERE range=? AND day=?", (range_, day)).fetchone()
 
 
-def recent_corrections(c, projects, days=30) -> list:
-    """오늘 작업한 프로젝트들에 대한 최근 사람의 재라벨 기록 — 프롬프트에 사례로 넣는다."""
+def recent_corrections(c, projects) -> list:
+    """오늘 작업한 프로젝트들에 대한 사람의 재라벨 기록(최근 20건) — 프롬프트에 사례로 넣는다.
+    기간으로 자르지 않는다 — 사람의 결정은 만료되지 않는다. 30일 창을 두었을 때는 한 달 지난 교정이 프롬프트에서
+    빠져, 드문드문 다시 나오는 같은 유형의 작업이 교정 전 배치로 돌아갈 수 있었다."""
     projects = [p for p in projects if p]
     if not projects:
         return []
     q = (f"SELECT day, project, before_service, after_service, reason FROM corrections"
-         f" WHERE created_at >= datetime('now', ?) AND project IN ({','.join('?' * len(projects))})"
-         f" ORDER BY id DESC LIMIT 20")
-    return [dict(r) for r in c.execute(q, (f"-{days} days", *projects))]
+         f" WHERE project IN ({','.join('?' * len(projects))}) ORDER BY id DESC LIMIT 20")
+    return [dict(r) for r in c.execute(q, tuple(projects))]
 
 
 def period_corrections(c, days) -> list:
@@ -272,9 +273,14 @@ def accept_proposals(c, proposals, day, reg) -> list:
     return accepted
 
 
-def learn_mappings(c, assignments, work, reg) -> list:
-    """매핑이 없는 프로젝트의 배치가 한 서비스로 모이면 project_map에 **약한** 매핑으로 학습한다.
-    다음 생성부터 그 서비스가 기본값이 되고(약함이라 내용이 다르면 여전히 옮김), 사람이 .env나 UI를 만질 일이 없다."""
+def learn_mappings(c, assignments, work, reg, born=()) -> list:
+    """매핑이 없는 프로젝트의 배치가 **이번 생성에서 새로 등록된 서비스**(born) 하나로 모이면 project_map에 약한
+    매핑으로 학습한다 — 그 프로젝트의 작업에서 태어난 서비스라 다음 생성부터 기본값이 되는 것이 맞다.
+    기존 서비스로는 학습하지 않는다: 하루 한두 세션의 배치가 기본값으로 굳으면 블록 머리의 '약한 기본값'이 다음 날
+    같은 오배치를 다시 끌어당겨, 사람이 찾아내 교정할 때까지 반복된다(별도 도구 저장소 → 그 도구가 다루는 제품,
+    새 저장소의 초기 구성 → 코드 호스팅 운영 서비스, 메신저 대화 → 연동을 시험하던 제품 — 기존 서비스로 학습된
+    매핑은 대부분 이렇게 틀렸다). 그런 프로젝트는 매핑 없이 두어 매일 내용으로 판단하게 한다."""
+    born = set(born)
     by_project: dict = {}
     keymap = {s["key"]: p for p, v in work.items() for s in v["sessions"]}
     for a in assignments or []:
@@ -288,8 +294,8 @@ def learn_mappings(c, assignments, work, reg) -> list:
         if reg.strength(p) != "none" or len(svcs) != 1:
             continue
         svc = next(iter(svcs))
-        if svc == p or svc not in names:
-            continue                                                  # 프로젝트명 그대로 쓴 경우는 배우지 않음
+        if svc not in born or svc not in names:
+            continue
         registry.set_project(c, p, names[svc], "weak", source="model")
         learned.append((p, svc))
     return learned
@@ -393,7 +399,7 @@ def _finish_day(day: str, started: str, md, res, fallback, extras) -> str | None
     with db.tx() as c:
         store_assignments(c, "day", day, extras["assignments"], extras["work"])
         accepted = accept_proposals(c, extras["proposals"], day, extras["reg"])
-        learned = learn_mappings(c, extras["assignments"], extras["work"], extras["reg"])
+        learned = learn_mappings(c, extras["assignments"], extras["work"], extras["reg"], born=accepted)
         if extras["problems"]:
             c.execute("UPDATE reports SET fail_reason=? WHERE range='day' AND day=?",
                       ("검토 필요: " + "; ".join(extras["problems"])[:280], day))

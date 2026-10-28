@@ -20,7 +20,7 @@ from .registry import Registry
 EMPTY_MD = "이 기간에 기록된 작업이 없습니다."
 
 # 프롬프트 판 — 문구를 바꾸면 올린다. reports.prompt_version에 기록되어 "어느 판으로 만든 리포트인지" 남는다.
-PROMPT_VERSION = "2026-09-01.2"
+PROMPT_VERSION = "2026-10-28.1"
 
 # 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
 NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
@@ -260,8 +260,9 @@ def _weekday(day):
 # ── 일일 원재료: 프로젝트 → 세션 → 턴 ─────────────────
 
 def gather(c, range_, day):
-    """프로젝트별 작업 원재료 — {project: {sessions, turns, n_sessions}}.
+    """프로젝트별 작업 원재료 — {project: {sessions, turns, n_sessions, repo}}.
     sessions = [{key, device, session_id, start, end, turns: [{prompts, notes, response}]}] (세션·턴 모두 시간순).
+    repo = git remote(origin)가 잡힌 자체 저장소인가 — 매핑 없는 저장소의 블록 머리 문구를 가른다.
     key(S1, S2 …)는 프롬프트의 세션 표기 — 모델의 배치(assignments)가 이 키로 돌아온다.
     한 턴 = 지시(들) → 응답. 같은 세션에서 응답이 붙기 전까지의 지시는 한 턴에 모은다(알림이 쌓이거나
     실행 중 지시를 이어 보낸 경우). 지시도 응답도 없는 턴(알림만 받고 빈 응답)은 버린다.
@@ -275,7 +276,7 @@ def gather(c, range_, day):
                  f" AND s.agent=e.agent AND s.session_id=e.session_id"
                  f" AND s.project IN ({','.join('?' * len(excl))}))" if excl else "")
     rows = c.execute(
-        f"SELECT e.project, e.event, e.session_id, e.device_id, e.payload, d.name AS device,"
+        f"SELECT e.project, e.event, e.session_id, e.device_id, e.payload, e.origin, d.name AS device,"
         f" strftime('%m/%d %H:%M', e.ts_hub, 'localtime') AS t"
         f" FROM events e LEFT JOIN devices d ON d.id=e.device_id"
         f" WHERE e.event IN ('prompt','turn_done')"
@@ -285,7 +286,8 @@ def gather(c, range_, day):
         skip + excl + _params(range_, day)).fetchall()
     proj = {}
     for r in rows:
-        p = proj.setdefault(r["project"], {"sess": {}, "turns": 0})
+        p = proj.setdefault(r["project"], {"sess": {}, "turns": 0, "repo": False})
+        p["repo"] = p["repo"] or bool(r["origin"])
         s = p["sess"].setdefault(
             (r["device_id"], r["session_id"]),
             {"device": r["device"] or "?", "session_id": r["session_id"],
@@ -328,7 +330,7 @@ def gather(c, range_, day):
                 n += 1
                 sessions.append({**s, "key": f"S{n}", "turns": turns})
         if sessions:
-            out[name] = {"sessions": sessions, "turns": p["turns"], "n_sessions": len(sessions)}
+            out[name] = {"sessions": sessions, "turns": p["turns"], "n_sessions": len(sessions), "repo": p["repo"]}
     return out
 
 
@@ -367,6 +369,12 @@ def _render_block(p, v, reg: Registry):
     svc, strength = reg.service(p), reg.strength(p)
     if strength == "weak":
         head = (f"=== 서비스: {svc} (약한 기본값 — 이 디렉터리는 잡동사니라 내용이 다른 서비스면 그 서비스로 배치)"
+                f" | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ===")
+    elif strength == "none" and v.get("repo"):
+        # 새 저장소의 첫 작업(초기 구성·권한·배포 준비)이 '알려진 서비스'인 코드 호스팅 운영 서비스로 흘러가던
+        # 오배치 방지 — 자체 저장소는 그 자체가 프로젝트다
+        head = (f"=== 서비스: {svc} (매핑 없음 · 자체 저장소 — 프로젝트명 그대로. 저장소 구성·권한·배포 같은 운영 작업도"
+                f" 이 프로젝트 소속, 작업 대상이 목록의 다른 서비스 제품 자체일 때만 그 이름으로)"
                 f" | 프로젝트: {p} (세션 {v['n_sessions']}, 턴 {v['turns']}) ===")
     elif strength == "none":
         head = (f"=== 서비스: {svc} (매핑 없음 — 프로젝트명 그대로; 알려진 서비스에 해당하면 그 이름으로)"
@@ -443,10 +451,15 @@ def _services_note(reg: Registry, allow_proposals=True):
         lines.append(f"- {s['name']} (제안 중, 미확정)" + (f" — {s.get('description')}" if s.get("description") else ""))
     tail = ("목록에 없는 **새 서비스가 분명히 필요하면** proposals에 이름·설명·근거를 넣고 본문에서 그 이름을 최상위로 쓴다\n"
             "(그 이름이 서비스 목록에 등록된다 — 이름은 노션 업무일지 표기처럼 짧고 안정적으로). 저장소·디렉터리 이름은\n"
-            "서비스가 아니다 — 제안하지 말고, 그 저장소의 작업은 내용에 맞는 기존 서비스 아래에 둔다.\n"
+            "제안하지 않는다 — 매핑 없는 프로젝트는 블록 머리의 프로젝트명이 이미 최상위 기본값이다.\n"
+            "**한 저장소 안의 작업은 그 저장소의 서비스(매핑이 없으면 프로젝트명) 소속이다** — 저장소 초기 구성·브랜치 규칙·\n"
+            "권한·배포 연결·이력 재작성·공개 정보 점검처럼 저장소 운영 성격이어도 코드 호스팅·인프라 같은 운영 서비스로\n"
+            "옮기지 않는다(그런 서비스는 여러 저장소·기기에 걸친 작업용). 다른 서비스로 옮기는 것은 작업 대상이 그 서비스의\n"
+            "제품·인프라 자체일 때뿐이다.\n"
             if allow_proposals else
             "목록에 없는 이름은 최상위로 쓰지 않는다 — 업무일지에 이미 적힌 최상위 표기만 그대로 쓴다. 제안·부연·표기 설명을\n"
-            "본문에 넣지 않는다.\n")
+            "본문에 넣지 않는다. 각 항목의 서비스 배치도 업무일지의 것을 그대로 따른다 — 서비스 목록의 설명·단서를 근거로\n"
+            "다른 서비스로 옮기지 않는다.\n")
     return ("서비스 목록 — 최상위 불릿은 이 표기 중 하나여야 한다. 항목의 **작업 대상**이 로그 블록의 서비스와 다르면\n"
             "(예: 어느 서비스 저장소를 열어둔 채 다른 서비스의 결함을 처리) 대상 서비스 아래에 둔다. 단서가 적힌 서비스는\n"
             "그 단서로 식별하고, 같은 세션에서 앞 지시가 밝힌 대상이 뒤 작업에도 이어지는지 흐름으로 판단한다.\n"

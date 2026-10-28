@@ -170,23 +170,33 @@ class ProposalFilterTests(unittest.TestCase):
         sid = registry.upsert_service(c, "Junk", status="proposed"); registry.decide(c, sid, "rejected")
         self.assertEqual(reporting.accept_proposals(c, [{"name": "Junk", "kind": "tool", "description": "", "cues": [], "evidence": ""}], "2026-08-27", reg2), [])
 
-    def test_learn_weak_mapping_from_consistent_assignments(self):
+    def test_learn_weak_mapping_only_into_service_born_this_run(self):
         from server import registry
         c = _mem_db()
         acme = registry.upsert_service(c, "Acme")
         registry.upsert_service(c, "GitHub")
+        registry.upsert_service(c, "Billing")                     # 이번 생성에서 제안으로 등록된 서비스
         work = {"scratch": {"sessions": [{"key": "S1"}, {"key": "S2"}]}, "tools": {"sessions": [{"key": "S3"}, {"key": "S4"}]},
-                "web": {"sessions": [{"key": "S5"}]}}
+                "web": {"sessions": [{"key": "S5"}]}, "acme-site": {"sessions": [{"key": "S6"}]}}
         registry.set_project(c, "web", acme, "strong")
         reg = registry.snapshot(c)
         learned = reporting.learn_mappings(c, [
-            {"session": "S1", "service": "GitHub"}, {"session": "S2", "service": "GitHub"},   # 일관 → 학습
-            {"session": "S3", "service": "Acme"}, {"session": "S4", "service": "GitHub"},    # 갈림 → 학습 안 함
-            {"session": "S5", "service": "Acme"}], work, reg)                               # 이미 매핑됨
-        self.assertEqual(learned, [("scratch", "GitHub")])
+            {"session": "S1", "service": "Billing"}, {"session": "S2", "service": "Billing"},  # 일관 + 새 서비스 → 학습
+            {"session": "S3", "service": "Billing"}, {"session": "S4", "service": "Acme"},     # 갈림 → 학습 안 함
+            {"session": "S5", "service": "Acme"},                                              # 이미 매핑됨
+            {"session": "S6", "service": "GitHub"}], work, reg, born=["Billing"])              # 기존 서비스 → 학습 안 함
+        self.assertEqual(learned, [("scratch", "Billing")])
         reg2 = registry.snapshot(c)
-        self.assertEqual((reg2.service("scratch"), reg2.strength("scratch")), ("GitHub", "weak"))
+        self.assertEqual((reg2.service("scratch"), reg2.strength("scratch")), ("Billing", "weak"))
         self.assertEqual(reg2.strength("tools"), "none")
+        self.assertEqual(reg2.strength("acme-site"), "none")      # 하루 배치가 기존 서비스 기본값으로 굳지 않는다
+
+    def test_corrections_do_not_expire(self):
+        c = _mem_db()
+        c.execute("INSERT INTO corrections (day, session_key, device, project, before_service, after_service, reason, created_at)"
+                  " VALUES ('2026-06-01','S1','w','acme-site','GitHub','acme-site','저장소 작업은 그 프로젝트', datetime('now','-120 days'))")
+        cor = reporting.recent_corrections(c, ["acme-site"])
+        self.assertEqual([(x["before_service"], x["after_service"]) for x in cor], [("GitHub", "acme-site")])
 
 
 class ValidatedExtraCheckTests(unittest.TestCase):

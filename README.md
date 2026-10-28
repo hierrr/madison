@@ -303,13 +303,18 @@ settings UI for it:
   proposal with evidence and the hub registers it (guards: repository/directory names, excluded names
   and names a person previously rejected are refused; at most 3 per day).
 - **Project → service map** with a *strength*: `strong` for product repositories, `weak` for scratch
-  directories whose work is filed under whatever service it is really about. Unmapped projects whose
-  sessions consistently land on one service are learned as weak mappings automatically.
+  directories whose work is filed under whatever service it is really about. An unmapped repository (one
+  with a git remote) is its own project: its work, including repository chores such as initial setup,
+  branch rules, permissions or deployment wiring, stays under the project name instead of a hosting/ops
+  service, which is meant for work spanning several repositories or machines. An unmapped project is
+  learned as a weak mapping only when its sessions land on a service registered for it in the same run —
+  one day's placement under an existing service never hardens into the default.
 - A deterministic validator checks the markdown (allowed top-level names, indentation, no headers, no
   truncation/meta phrases, no excluded names); violations trigger one repair call and anything left is
   shown as *검토 필요* on the report.
 - Per-session assignments (service, task, why) and human corrections are stored; corrections made via
-  the API (`POST /api/report/relabel`) are fed to later runs as precedents and outrank the writer's cues.
+  the API (`POST /api/report/relabel`) are fed to later runs as precedents, outrank the writer's cues and
+  do not expire. Weekly and monthly summaries keep the placement of the daily reports.
 
 `REPORT_SERVICE_MAP` / `REPORT_KNOWN_SERVICES` / `REPORT_WEAK_PROJECTS` in `.env` seed an empty registry
 once. Adjust the registry through the admin API when needed (`/api/services`, `/api/project-map`,
