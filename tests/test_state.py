@@ -196,5 +196,108 @@ class UnconfirmedOverlayTests(unittest.TestCase):
         self.assertTrue(state.is_unconfirmed("working", None, ttl + 1, True, ttl))            # 프런트엔드 미기록(구형 수집)
 
 
+class InjectedPromptTests(unittest.TestCase):
+    """기계가 주입한 메시지는 사람 지시가 아니다 — is_injected 판정과 ingest의 last_prompt 보호."""
+
+    def test_prefix_truth_table(self):
+        for tag in state.INJECTED_PREFIXES:
+            with self.subTest(tag=tag):
+                self.assertTrue(state.is_injected(f"{tag}>본문"))
+                self.assertTrue(state.is_injected(f"{tag} from=\"peer-a\">본문"))
+                self.assertTrue(state.is_injected(f"  \n\t{tag}>앞 공백"))
+        for text in ("<task-notification><summary>x</summary></task-notification>",
+                     "<system-reminder>x</system-reminder>",
+                     "<command-name>/clear</command-name>",
+                     "<local-command-stdout>x</local-command-stdout>",
+                     '<cross-session-message from="s" from-name="peer-a">x</cross-session-message>',
+                     '<agent-message from="impl-a">x</agent-message>'):
+            with self.subTest(text=text[:30]):
+                self.assertTrue(state.is_injected(text))
+
+    def test_not_injected(self):
+        for text in (None, "", "   ", "배포 스크립트 고쳐줘",
+                     "<send_user_message_question_reply>예</send_user_message_question_reply>",  # 사람이 답한 입력
+                     "이 태그 <task-notification 는 문장 중간이라 사람 글", "리마인더 <system-reminder>",
+                     "<div>html</div>", "<tasks>", 123, ["<task-notification"]):
+            with self.subTest(text=text):
+                self.assertFalse(state.is_injected(text))
+
+
+class InjectedIngestTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        self.conn.execute(
+            "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at)"
+            " VALUES (1,'device-a','x',datetime('now'),datetime('now'))")
+        self.n = 0
+
+    def tearDown(self):
+        self.conn.close()
+
+    def prompt(self, text, session="s1"):
+        self.n += 1
+        return state.ingest(self.conn, 1, {
+            "agent": "claude-code", "session_id": session, "event_id": f"p{self.n}", "event": "prompt",
+            "ts": f"2026-10-30T00:00:{self.n:02d}Z", "project": "demo", "branch": "main",
+            "detail": {"prompt": text}})
+
+    def sess(self, session="s1"):
+        return self.conn.execute("SELECT * FROM sessions WHERE session_id=?", (session,)).fetchone()
+
+    def test_normal_prompt_updates_last_prompt_and_clears_summary(self):
+        self.prompt("첫 지시")
+        self.conn.execute("UPDATE sessions SET task_summary='옛 요약', summary_source='llm'")
+        self.prompt("둘째 지시")
+        r = self.sess()
+        self.assertEqual(r["last_prompt"], "둘째 지시")
+        self.assertIsNone(r["task_summary"])
+
+    def test_injected_prompt_keeps_last_prompt_and_summary(self):
+        self.prompt("배포 스크립트 고쳐줘")
+        self.conn.execute("UPDATE sessions SET task_summary='배포 스크립트 수정', summary_source='llm'")
+        for text in ('<task-notification><summary>Monitor event: "x"</summary></task-notification>',
+                     "<system-reminder>x</system-reminder>",
+                     '<cross-session-message from="s2" from-name="peer-a">확인 부탁</cross-session-message>',
+                     '  <agent-message from="impl-a">완료</agent-message>'):
+            with self.subTest(text=text[:30]):
+                self.assertEqual(self.prompt(text), "inserted")
+                r = self.sess()
+                self.assertEqual(r["last_prompt"], "배포 스크립트 고쳐줘")
+                self.assertEqual(r["task_summary"], "배포 스크립트 수정")
+                self.assertEqual(r["summary_source"], "llm")
+
+    def test_injected_prompt_is_still_stored_as_event(self):
+        # 리포트가 알림을 notes로 쓰므로 이벤트 원문은 보존된다
+        self.prompt("지시")
+        self.prompt("<task-notification><summary>x</summary></task-notification>")
+        n = self.conn.execute("SELECT COUNT(*) FROM events WHERE event='prompt'").fetchone()[0]
+        self.assertEqual(n, 2)
+
+    def test_human_prompt_after_injected_replaces_last_prompt(self):
+        self.prompt("첫 지시")
+        self.prompt("<task-notification><summary>x</summary></task-notification>")
+        self.conn.execute("UPDATE sessions SET task_summary='요약'")
+        self.prompt("알림 보고 이어서 해줘")
+        r = self.sess()
+        self.assertEqual(r["last_prompt"], "알림 보고 이어서 해줘")
+        self.assertIsNone(r["task_summary"])
+
+    def test_question_reply_is_a_human_prompt(self):
+        self.prompt("첫 지시")
+        reply = "<send_user_message_question_reply>예</send_user_message_question_reply>"
+        self.prompt(reply)
+        self.assertEqual(self.sess()["last_prompt"], reply)
+
+    def test_injected_first_prompt_leaves_last_prompt_empty(self):
+        self.prompt("<system-reminder>x</system-reminder>")
+        self.assertFalse(self.sess()["last_prompt"])
+
+    def test_normal_prompt_is_cut_to_600(self):
+        self.prompt("가" * 700)
+        self.assertEqual(self.sess()["last_prompt"], "가" * 600)
+
+
 if __name__ == "__main__":
     unittest.main()

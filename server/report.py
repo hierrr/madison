@@ -14,6 +14,7 @@ import datetime
 import json
 import re
 
+from . import state
 from .config import CFG
 from .registry import Registry
 
@@ -22,14 +23,12 @@ EMPTY_MD = "이 기간에 기록된 작업이 없습니다."
 # 프롬프트 판 — 문구를 바꾸면 올린다. reports.prompt_version에 기록되어 "어느 판으로 만든 리포트인지" 남는다.
 PROMPT_VERSION = "2026-10-28.1"
 
-# 실제 작업이 아닌 프롬프트(에이전트 알림·시스템 주입 등)는 리포트에서 제외
-NOISE = ("<task-notification", "<system-reminder", "<command", "<local-command")
-
 # 내용 없는 응답 — 알림만 받고 할 일이 없던 턴의 정형 문구. 걸러내지 않으면 자리만 차지한다
 # (2026-08-27 일일: 45턴 중 13턴).
 _EMPTY_RESPONSES = ("no response requested",)
 
-# task-notification은 버리되 <summary>의 제목과 <event> 본문 발췌만 배경 맥락으로 살린다 —
+# 주입 메시지(state.is_injected)는 지시에서 빼되 두 종류는 배경 맥락(notes)으로 살린다: task-notification은
+# <summary>의 제목과 <event> 본문 발췌, cross-session-message·agent-message는 보낸 쪽 이름과 본문 발췌.
 # 이어지는 응답의 대상('무슨 데이터'·'어느 기능')이 그날의 지시·응답에서 빠져 있을 때 이름을
 # 되찾아 준다(2026-08-23 일일 리포트에 대상 없는 '데이터 재수집'만 남은 사례). 제목이 내부
 # 라벨뿐인 알림은 본문의 원시 단서(스크립트·경로·인자)가 유일한 식별 재료다(2026-09-01:
@@ -58,6 +57,25 @@ def _note(text):
     q = _NOTE_LABEL.search(s)
     e = _NOTE_EVENT.search(text)
     return (q.group(1) if q else s).strip(), (" ".join(e.group(1).split()).strip() if e else "")
+
+
+# 다른 세션·에이전트가 보낸 메시지는 사용자 지시가 아니다 — 지시에서 빼고 알림(notes)으로만 남긴다.
+# 제목은 보낸 쪽 이름(from-name, 없으면 from), 본문은 태그 안쪽.
+_MSG_ATTR = {k: re.compile(r'(?<![\w-])' + k + r'="([^"]*)"') for k in ("from-name", "from")}
+_MSG_BODY = re.compile(r"^<[\w-]+[^>]*>(.*?)(?:</[\w-]+>)?\s*$", re.S)
+
+
+def _message_note(text):
+    """다른 세션·에이전트 메시지 원문 → (보낸 쪽, 본문)."""
+    head = text.split(">", 1)[0]
+    title = ""
+    for k in ("from-name", "from"):
+        m = _MSG_ATTR[k].search(head)
+        if m and m.group(1).strip():
+            title = " ".join(m.group(1).split())
+            break
+    b = _MSG_BODY.match(text.strip())
+    return title, " ".join((b.group(1) if b else "").split())
 
 
 def _real_response(text):
@@ -302,12 +320,18 @@ def gather(c, range_, day):
             if cur is None:
                 cur = {"prompts": [], "notes": [], "response": None}
                 s["turns"].append(cur)
-            if t.startswith("<task-notification"):
-                title, detail = _note(t)
+            if state.is_injected(t):
+                # 알림 두 종류만 배경 맥락(notes)으로 살리고 나머지 주입 메시지는 버린다
+                if t.lstrip().startswith(state.NOTIFICATION_PREFIXES):
+                    title, detail = _note(t)
+                elif t.lstrip().startswith(state.MESSAGE_PREFIXES):
+                    title, detail = _message_note(t.lstrip())
+                else:
+                    continue
                 head = clip(title, NOTE_TITLE_CLIP)
                 if head and not any(x.startswith(head) for x in cur["notes"]):
                     cur["notes"].append(head + (" — " + clip(detail, NOTE_DETAIL_CLIP) if detail else ""))
-            elif not t.startswith(NOISE):
+            else:
                 cur["prompts"].append(clip(t, PROMPT_CLIP))
         else:
             p["turns"] += 1
