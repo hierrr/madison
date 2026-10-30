@@ -261,6 +261,8 @@ def migrate(c: sqlite3.Connection):
             for ddl in _HOURLY_DDL:   # executescript는 먼저 커밋해 버리므로 문장별로 같은 트랜잭션에서 실행
                 c.execute(ddl)
             tokens.backfill_hourly(c)
+        # 워커 사용량의 옛 project(워커 cwd 이름)를 HUB_PROJECT로 — 채우기 뒤에 두어 첫 기동 경로와 순서가 꼬이지 않고 멱등
+        tokens.merge_worker_projects(c)
         c.commit()
     except BaseException:
         c.rollback()

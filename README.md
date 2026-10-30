@@ -108,7 +108,9 @@ push a piece of work from one machine to another without walking over to it.
   ledger alone; the 1- and 7-day views read the hourly ledger as a true rolling
   window over recent hours only, so they are unaffected, and longer ranges read the
   daily one. Whether a session counts as automation is decided once, on the
-  session itself, and the ledgers just record it.
+  session itself, and the ledgers just record it. The hub's own LLM calls
+  (summaries, reports) are recorded as automation under the project `madison`,
+  not under the name of their scratch working directory.
   The tab charts limit windows over
   time (step lines), one token stack per agent (hourly for 1 and 7 days, daily
   beyond; cache, input, output and thinking in a single stack), and breakdowns

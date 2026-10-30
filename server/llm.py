@@ -222,7 +222,7 @@ def _account_tokens(agent: str, usage_map: dict, c=None, started_at: str | None 
             with tokens.savepoint(conn, "madison_worker_tokens"):
                 for model, v in usage_map.items():
                     if any(v.values()):
-                        tokens.add_ledger(conn, hour, device_id, agent, CFG.llm_cwd.name, model,
+                        tokens.add_ledger(conn, hour, device_id, agent, tokens.ledger_project(CFG.llm_cwd.name, "auto"), model,
                                           "auto", "events", v)
     except Exception:
         log.exception("worker 토큰 기록 실패")
@@ -269,7 +269,7 @@ def _parse_claude_envelope(stdout: str) -> tuple[dict | None, str]:
 
 def run(site: str, prompt: str, *, schema: dict | None = None, timeout: int | None = None,
         ref: str = "") -> Result:
-    """전용 cwd(비-git → 새어도 project='llm-cwd'로 자명) + 독립 프로세스 그룹
+    """전용 cwd(비-git → 이름이 새도 워커 디렉터리 이름(llm-cwd)이라 자명하고, 원장에서는 madison 자동화로 합쳐진다) + 독립 프로세스 그룹
     (허브 kickstart 재시작이 진행 중인 호출을 죽여 잔해를 남기지 않도록)."""
     cf = conf(site)
     timeout = timeout or CFG.llm_timeout(site)
