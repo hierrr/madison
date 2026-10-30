@@ -268,7 +268,7 @@ def gather(c, range_, day):
     실행 중 지시를 이어 보낸 경우). 지시도 응답도 없는 턴(알림만 받고 빈 응답)은 버린다.
     지시·응답이 하나도 없는 프로젝트, REPORT_EXCLUDE_PROJECTS 프로젝트, 자동화 세션은 제외."""
     pred = _pred(range_)
-    skip = ("", "summarizer", "llm-cwd") + CFG.report_exclude_projects
+    skip = ("",) + CFG.report_exclude_projects
     # 제외 프로젝트의 세션이 다른 디렉터리(상위·형제 cwd)에서 낸 이벤트는 다른 project로 라벨돼
     # 이벤트 단위 필터를 빠져나간다 — 세션의 소속 프로젝트로도 한 번 더 거른다
     excl = CFG.report_exclude_projects
@@ -338,7 +338,7 @@ def active_projects(c, days=120, min_events=20):
     """최근 로그에 실제로 나타난 프로젝트(빈도순). 잡다한 임시 디렉터리명이 끼지 않게 최소 이벤트 수로 거른다."""
     return [r["project"] for r in c.execute(
         f"SELECT project, COUNT(*) n FROM events e"
-        f" WHERE COALESCE(project,'') NOT IN ('','summarizer','llm-cwd')"
+        f" WHERE COALESCE(project,'') != ''"
         f"   AND ts_hub >= datetime('now',?) AND {NOT_AUTO}"
         f" GROUP BY project HAVING n >= ? ORDER BY n DESC", (f"-{days} days", min_events))
         if r["project"] not in CFG.report_exclude_projects]
@@ -731,7 +731,9 @@ def fallback_period_md(dailies):
     return "\n".join(out).strip() or EMPTY_MD
 
 
-# 자동화(frontend='auto') 세션의 이벤트 제외 — 분 단위로 도는 상시 감시 잡이 수치를 압도해
+# 자동화(frontend='auto') 세션의 이벤트 제외 — 리포트의 '자동화인가'는 이 세션 판정 하나다(프로젝트 이름으로
+# 워커 디렉터리를 따로 거르지 않는다: 워커는 이벤트를 안 보내고, 새더라도 claude -p / codex exec 감지로 auto가 된다).
+# 분 단위로 도는 상시 감시 잡이 수치를 압도해
 # 사람 작업 메트릭이 무의미해지는 것을 방지. 리포트 본문(gather)에서도 제외한다(2026-08-18 사용자 결정
 # — 반복 자동화는 업무일지에 쓸 내용이 아님).
 NOT_AUTO = (" NOT EXISTS (SELECT 1 FROM sessions s WHERE s.device_id=e.device_id"
@@ -771,7 +773,7 @@ def metrics(c, range_, day, reg: Registry | None = None):
         f" WHERE {pred} AND {NOT_AUTO} AND {SUBSTANTIVE})", pr).fetchone()["n"]
     projects = c.execute(
         f"SELECT COUNT(DISTINCT project) n FROM events e"
-        f" WHERE COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO} AND {SUBSTANTIVE}",
+        f" WHERE COALESCE(project,'') != '' AND {pred} AND {NOT_AUTO} AND {SUBSTANTIVE}",
         pr).fetchone()["n"]
     # 활동 시간 ≈ 이벤트가 있는 30분 슬롯 수 × 0.5h (연속 몰입시간 근사)
     slots = c.execute(
@@ -780,7 +782,7 @@ def metrics(c, range_, day, reg: Registry | None = None):
         f" WHERE {pred} AND {NOT_AUTO} AND {SUBSTANTIVE})", pr).fetchone()["n"]
     per_project = [dict(r) for r in c.execute(
         f"SELECT project, COUNT(*) turns FROM events e WHERE event='turn_done'"
-        f" AND COALESCE(project,'') NOT IN ('','summarizer','llm-cwd') AND {pred} AND {NOT_AUTO}"
+        f" AND COALESCE(project,'') != '' AND {pred} AND {NOT_AUTO}"
         f" GROUP BY project ORDER BY turns DESC", pr)]
     per_service: dict = {}
     for r in per_project:

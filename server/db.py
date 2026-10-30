@@ -3,12 +3,13 @@ import contextlib
 import sqlite3
 import threading
 
+from . import tokens
 from .config import CFG
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
 
-SCHEMA = """
+_BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
   id INTEGER PRIMARY KEY,
   name TEXT UNIQUE NOT NULL,
@@ -174,6 +175,30 @@ CREATE TABLE IF NOT EXISTS token_daily (
 CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day);
 """
 
+# 시간 원장 — token_daily와 같은 열, day 대신 hour. 1·7일 롤링 창(tokens.window)이 읽는다.
+# 일 원장과 같은 쓰기 경로(tokens.add_ledger)가 함께 가산하며, 일 원장처럼 영구 보존한다(정리 잡 없음).
+# migrate가 이 테이블을 새로 만들 때만 일회성 채우기를 하므로 DDL을 따로 둔다(생성+채우기를 한 트랜잭션에).
+# hour 단독 인덱스는 없다 — PK가 hour로 시작하므로 범위 조회는 PK 인덱스가 맡는다.
+_HOURLY_DDL = (
+"""CREATE TABLE IF NOT EXISTS token_hourly (
+  hour TEXT NOT NULL,             -- ts_device 기준 허브 로컬 시각 'YYYY-MM-DDTHH'
+  device_id INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  project TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  frontend TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'events',
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  thinking INTEGER NOT NULL DEFAULT 0,
+  turns INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (hour, device_id, agent, project, model, frontend, source)
+)""",
+)
+SCHEMA = _BASE_SCHEMA + ";\n".join(_HOURLY_DDL) + ";\n"
+
 # 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)
 MIGRATIONS = (
     "ALTER TABLE sessions ADD COLUMN task_summary TEXT",
@@ -205,29 +230,57 @@ MIGRATIONS = (
     "ALTER TABLE sessions ADD COLUMN bg_agents INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN bg_shells INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN session_name TEXT",   # 세션 이름 표시 (2026-10-01)
+    # PK(hour, …)와 중복인 token_hourly(hour) 인덱스 제거 — 이미 만들어진 DB용
+    "DROP INDEX IF EXISTS idx_token_hourly_hour",
 )
 
 
+def _table_exists(c: sqlite3.Connection, name: str) -> bool:
+    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
 def migrate(c: sqlite3.Connection):
-    """스키마 생성 + 열 추가 마이그레이션. 테스트의 :memory: 커넥션에도 그대로 쓴다."""
-    c.executescript(SCHEMA)
+    """스키마 생성 + 열 추가 마이그레이션. 테스트의 :memory: 커넥션에도 그대로 쓴다.
+    token_hourly가 **새로 만들어질 때만** 일회성 채우기(tokens.backfill_hourly)를 한다. 순서가 중요하다:
+    일반 스키마(executescript — 실행 전에 암묵 COMMIT) 다음에 BEGIN IMMEDIATE를 먼저 잡고, 같은 트랜잭션 안에서
+    존재 검사 → 테이블 생성 → 채우기 → COMMIT. 검사가 쓰기 락 밖에 있으면 두 프로세스(허브와 genworker 서브프로세스)가
+    동시에 기동할 때 둘 다 '없음'을 보고 각자 채워 이중 계상된다 — 락을 잡은 뒤 검사하면 늦게 온 쪽은 앞선 쪽의
+    커밋을 기다렸다가 테이블이 있는 것을 보고 건너뛴다. 채우기가 실패하면(SQLite DDL도 롤백된다) 롤백하고 예외를
+    그대로 올려 기동을 실패시킨다: 조용한 부분 데이터보다 낫고, 테이블이 없는 채로 남으니 다음 기동에서 다시 시도된다.
+    (세션·워커 호출 한 건 단위의 손상은 backfill_hourly가 건너뛰므로 기동을 막지 않는다.)"""
+    c.executescript(_BASE_SCHEMA)
     for ddl in MIGRATIONS:
         try:
             c.execute(ddl)
         except sqlite3.OperationalError:
             pass
     c.commit()
+    c.execute("BEGIN IMMEDIATE")   # 쓰기 락 — busy_timeout 동안 다른 migrate의 커밋을 기다린다
+    try:
+        if not _table_exists(c, "token_hourly"):
+            for ddl in _HOURLY_DDL:   # executescript는 먼저 커밋해 버리므로 문장별로 같은 트랜잭션에서 실행
+                c.execute(ddl)
+            tokens.backfill_hourly(c)
+        c.commit()
+    except BaseException:
+        c.rollback()
+        raise
 
 
 def conn() -> sqlite3.Connection:
     global _conn
     if _conn is None:
         CFG.db_path.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(str(CFG.db_path), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA busy_timeout=5000")
-        migrate(_conn)
+        c = sqlite3.connect(str(CFG.db_path), check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL")
+        c.execute("PRAGMA busy_timeout=5000")
+        try:
+            migrate(c)
+        except BaseException:
+            c.close()   # 마이그레이션이 실패한 커넥션은 공개하지 않는다 — 기동 실패가 조용히 묻히지 않게
+            raise
+        _conn = c
     return _conn
 
 
@@ -235,12 +288,14 @@ def conn() -> sqlite3.Connection:
 def tx():
     """with db.tx() as c: ... — 락 잡고 커밋까지. 재진입 가능(RLock) — 같은 스레드의 중첩 tx는 바깥에서 커밋."""
     _lock.acquire()
+    c = None
     try:
         c = conn()
         yield c
         c.commit()
     except BaseException:
-        conn().rollback()
+        if c is not None:   # conn() 자체가 실패했으면 되돌릴 것이 없다 — 다시 부르면 같은 실패를 반복한다
+            c.rollback()
         raise
     finally:
         _lock.release()

@@ -11,6 +11,8 @@ $ThrottleDir = Join-Path $MadDir "throttle"
 function Bye { exit 0 }
 if (-not $EventName) { Bye }
 if ($AgentName -notin @("claude-code", "codex-cli")) { Bye }
+# 허브 요약 워커 등 내부 실행은 보고하지 않는다 (재귀 차단) — report.sh와 같은 위치·같은 조건
+if ($env:MADISON_SUPPRESS -eq "1") { Bye }
 if (-not (Test-Path $EnvFile)) { Bye }
 
 # env 파싱 (KEY=VALUE)

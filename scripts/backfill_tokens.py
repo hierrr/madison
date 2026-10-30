@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """과거 전사본 → token_daily 백필 (허브 로컬, 재실행 가능).
 
+일 원장(token_daily)에만 쓴다. 시간 원장(token_hourly)에는 쓰지 않는다 — 시간 원장은 1·7일 롤링 창
+전용인데 백필분은 라이브 수집 시작일 이전(전사본이 보존된 과거)이라 그 창에 잡힐 일이 없고, 전사본 줄에서
+복원한 시각도 세션 판정 없이 추정한 값이라 시간 단위 정확도를 약속할 수 없다. 그래서 라이브 쓰기 경로
+tokens.add_ledger(일·시간 동시 가산)를 거치지 않고 아래 전용 UPSERT(교체, 멱등)를 쓴다.
+
 허브 기기에 남아 있는 Claude Code 전사본(~/.claude/projects, 약 30일 보존)과 Codex 롤아웃
 (~/.codex/sessions, 장기 보존)을 스캔해 일별 토큰 집계를 source='backfill'로 넣는다.
 
@@ -9,6 +14,10 @@
 - 멱등: 시작 시 해당 기기의 backfill 행을 지우고 다시 넣는다.
 - 이중 계상 방지: 라이브 수집(source='events')의 에이전트별 최초 day 이후는 넣지 않는다.
   --until로 더 이른 경계를 줄 수 있다(경계 미포함).
+- 자동화 판정(resolve_frontend 하나): 허브 sessions에 그 세션이 있으면 그 세션의 frontend 판정, 없으면
+  워커 프로젝트 이름 규칙(tokens.auto_frontend(project, 수집기 값)). 세션 id를 얻는 경로: Claude는 줄의
+  sessionId, Codex는 session_meta.payload.id(허브 session_id와 같은 값을 실데이터에서 확인). --from-json은
+  수집기가 날짜·프로젝트·모델·frontend로 이미 집계해 세션 id가 없어 이름 규칙(+수집기 값)만 쓴다 — 세션 조인 불가.
 - 프로젝트 귀속은 cwd의 basename(최선 노력) — Claude는 라인별 cwd, Codex는 session_meta.cwd.
 - 턴 수는 복원하지 않는다(turns=0) — 합계 턴은 라이브 수집분에서만.
 """
@@ -63,9 +72,9 @@ def _lines(path: Path):
 
 
 def scan_claude(root: Path, until: str) -> dict:
-    """{(day, project, model, session_id): {kind: n}} — 라인별 usage 합산.
+    """{(day, project, model, session_id, 수집기 frontend): {kind: n}} — 라인별 usage 합산.
     session_id는 허브 sessions 테이블의 frontend(자동화 여부)와 조인하기 위한 키 —
-    remap_claude()가 frontend로 바꾼다."""
+    remap_frontend()가 frontend로 바꾼다. Claude 전사본에는 frontend 정보가 없어 수집기 값은 항상 ''."""
     agg = defaultdict(lambda: {k: 0 for k in tokens.KINDS})
     for path in sorted(root.glob("*/*.jsonl")):
         for ev in _lines(path):
@@ -80,27 +89,40 @@ def scan_claude(root: Path, until: str) -> dict:
             u = msg.get("usage")
             if not isinstance(u, dict):
                 continue
-            day = tokens._day_local(str(ev.get("timestamp") or ""), "")
+            day = tokens.local_hour(str(ev.get("timestamp") or ""))[:10]
             if day >= until:
                 continue
             project = proj_of(str(ev.get("cwd") or ""))
-            acc = agg[(day, project, model[:60], str(ev.get("sessionId") or ""))]
+            acc = agg[(day, project, model[:60], str(ev.get("sessionId") or ""), "")]
             for k, v in tokens.claude_counts(u).items():   # 분류 규칙의 정본은 tokens.py
                 acc[k] += v
     return agg
 
 
-def remap_claude(c, device_id: int, agg: dict) -> dict:
-    """세션 키 → frontend 키. 허브 sessions에 그 세션이 있으면 그 frontend(자동화 세션이면
-    'auto'), 없으면 워커 프로젝트 규칙(auto_frontend)만 적용."""
+def resolve_frontend(c, device_id: int, agent: str, session_id: str, project: str, collected: str,
+                     cache: dict | None = None) -> str:
+    """백필이 쓰는 frontend(자동화 여부) 판정의 유일한 경로 — 모든 입력 경로(Claude 전사본·Codex 롤아웃·
+    --from-json)가 이 함수를 거친다. 허브 sessions에 그 세션이 있고 판정이 있으면 그 판정(auto 포함)을 그대로
+    따른다. 세션 기록이 없거나(session_id가 없는 경로 포함) 판정이 비어 있으면('' / 'unknown') 이름 규칙
+    tokens.auto_frontend(project, 수집기 값)."""
+    if session_id:
+        cache = cache if cache is not None else {}
+        key = (device_id, agent, session_id)
+        if key not in cache:
+            row = c.execute("SELECT frontend FROM sessions WHERE device_id=? AND agent=? AND session_id=?",
+                            key).fetchone()
+            cache[key] = (row["frontend"] or "") if row else ""
+        if cache[key] not in ("", "unknown"):
+            return cache[key]
+    return tokens.auto_frontend(project, collected)
+
+
+def remap_frontend(c, device_id: int, agent: str, agg: dict) -> dict:
+    """스캐너 집계 {(day, project, model, session_id, 수집기 frontend): n} → {(day, project, model, frontend): n}."""
     out = defaultdict(lambda: {k: 0 for k in tokens.KINDS})
     cache: dict = {}
-    for (day, project, model, sid), v in agg.items():
-        if sid not in cache:
-            row = c.execute("SELECT frontend FROM sessions WHERE device_id=? AND agent='claude-code'"
-                            " AND session_id=?", (device_id, sid)).fetchone() if sid else None
-            cache[sid] = (row["frontend"] or "") if row else ""
-        fe = tokens.auto_frontend(project, cache[sid])
+    for (day, project, model, sid, collected), v in agg.items():
+        fe = resolve_frontend(c, device_id, agent, sid, project, collected, cache)
         acc = out[(day, project, model, fe)]
         for k in tokens.KINDS:
             acc[k] += v[k]
@@ -108,10 +130,11 @@ def remap_claude(c, device_id: int, agg: dict) -> dict:
 
 
 def scan_codex(root: Path, until: str) -> dict:
-    """{(day, project, model, frontend): {kind: n}} — token_count 누적 카운터의 연속 델타."""
+    """{(day, project, model, session_id, 수집기 frontend): {kind: n}} — token_count 누적 카운터의 연속 델타.
+    session_id는 session_meta.payload.id(허브 session_id와 같은 값) — remap_frontend()가 세션 판정을 조인한다."""
     agg = defaultdict(lambda: {k: 0 for k in tokens.KINDS})
     for path in sorted(root.rglob("*.jsonl")):
-        project, frontend, model = "", "", "unknown"
+        project, frontend, model, sid = "", "", "unknown", ""
         prev = {k: 0 for k in tokens.KINDS}
         for ev in _lines(path):
             if not isinstance(ev, dict):
@@ -121,6 +144,7 @@ def scan_codex(root: Path, until: str) -> dict:
                 continue
             if ev.get("type") == "session_meta":
                 project = proj_of(str(pl.get("cwd") or ""))
+                sid = str(pl.get("id") or "")
                 frontend = FRONTEND_OF.get(str(pl.get("originator") or ""), "")
                 continue
             if ev.get("type") == "turn_context" and pl.get("model"):
@@ -137,10 +161,10 @@ def scan_codex(root: Path, until: str) -> dict:
             prev = cur
             if not any(delta.values()):
                 continue
-            day = tokens._day_local(str(ev.get("timestamp") or ""), "")
+            day = tokens.local_hour(str(ev.get("timestamp") or ""))[:10]
             if day >= until:
                 continue
-            acc = agg[(day, project, model, tokens.auto_frontend(project, frontend))]
+            acc = agg[(day, project, model, sid, frontend)]
             for k in tokens.KINDS:
                 acc[k] += delta[k]
     return agg
@@ -189,8 +213,10 @@ def main():
             by_agent: dict = {}
             for r in payload.get("rows", []):
                 proj = str(r.get("project") or "")
+                # 집계 JSON에는 세션 id가 없다 — 세션 조인 불가, resolve_frontend의 이름 규칙 경로만 탄다
                 key = (str(r.get("day") or ""), proj, str(r.get("model") or "")[:60],
-                       tokens.auto_frontend(proj, str(r.get("frontend") or "")))
+                       resolve_frontend(c, device_id, str(r.get("agent") or ""), "", proj,
+                                        str(r.get("frontend") or "")))
                 acc = by_agent.setdefault(str(r.get("agent") or ""), {}).setdefault(
                     key, {k: 0 for k in tokens.KINDS})
                 for k in tokens.KINDS:   # auto 재분류로 키가 합쳐질 수 있어 가산
@@ -206,8 +232,7 @@ def main():
                                       ("codex-cli", scan_codex, args.codex_dir)):
                 until = cutoff_for(c, device_id, agent, args.until)
                 agg = scan(root, until) if root.is_dir() else {}
-                if agent == "claude-code":
-                    agg = remap_claude(c, device_id, agg)   # 세션 키 → frontend (허브 sessions 조인)
+                agg = remap_frontend(c, device_id, agent, agg)   # 세션 키 → frontend (허브 sessions 조인)
                 plans.append((agent, until, agg))
                 print(f"\n== {agent} (until {until}, {len(agg)}개 집계 키, {root})")
                 print(report_table(agg) if agg else "  (없음)")
