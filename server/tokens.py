@@ -70,28 +70,86 @@ KINDS = ("in", "out", "cr", "cw", "th")
 COLS = {"in": "input", "out": "output", "cr": "cache_read", "cw": "cache_write", "th": "thinking"}
 HOUR_FMT = "%Y-%m-%dT%H"
 _CODEX_KEY = "_session"   # Codex 카운터는 세션 전역 — 모델 전환 시 이중 계상 방지용 고정 기준점
-# 허브 내부 LLM 워커의 전용 cwd 이름 — **세션 기록이 허브에 없는** 전사본 백필(scripts/backfill_tokens.py,
-# collector/collect_tokens_local.py 사본)에서만 이 이름으로 자동화를 추정한다
-# (llm-cwd: 현행 LLM_CWD 기본값, summarizer: 과거 워커 디렉터리 — 백필 데이터에 남아 있음).
-# 실시간 경로(state.ingest)에는 쓰지 않는다: 워커는 MADISON_SUPPRESS=1이라 이벤트를 보내지 않고(report.sh·report.ps1 모두 조기 종료),
-# 새더라도 claude -p / codex exec 부모 감지로 payload가 auto가 된다. 디렉터리 이름만으로 세션을 auto로
-# 만들면 같은 이름의 사용자 프로젝트가 태스크 탭에서 숨고 auto TTL까지 받는다.
+# 허브 내부 LLM 워커의 전용 cwd 이름(llm-cwd: 현행 LLM_CWD 기본값, summarizer: 과거 워커 디렉터리 — 백필 데이터에 남아 있음).
+# 쓰임은 셋뿐이다: (1) 원장 project 개명 — auto로 판정된 행의 이름을 HUB_PROJECT로(ledger_project; 실시간 fold·워커 계상·
+# 시간 원장 채우기가 지난다), (2) **세션 기록이 허브에 없는** 전사본 백필(scripts/backfill_tokens.py, collector/
+# collect_tokens_local.py 사본)에서 이 이름으로 자동화를 추정(auto_frontend), (3) 기동 시 옛 행 병합(merge_worker_projects).
+# 자동화 '판정'(세션 frontend)에는 쓰지 않는다 — state.ingest가 정하는 판정은 payload(claude -p / codex exec 부모 감지)와
+# 앱 자동 생성 프롬프트 규칙뿐이다(워커는 MADISON_SUPPRESS=1이라 이벤트를 보내지 않는다 — report.sh·report.ps1 모두 조기 종료).
+# 디렉터리 이름만으로 세션을 auto로 만들면 같은 이름의 사용자 프로젝트가 태스크 탭에서 숨고 auto TTL까지 받는다.
+# 그래서 이름 개명도 판정이 auto일 때만 하고, 사람 세션이 낸 같은 이름은 그대로 둔다.
 AUTO_PROJECTS = ("summarizer", "llm-cwd")
+
+# 허브 워커(태스크 요약·리포트 등 llm.run) 사용량의 원장 project. 워커 cwd 이름(llm-cwd)으로 적으면 사용량 화면에
+# 정체 모를 프로젝트가 따로 뜨는데, 이 사용량은 MADISON 자체 자동화이므로 madison 프로젝트의 auto 행으로 보여야 한다.
+# cwd는 CLI가 git 컨텍스트를 못 보게 하는 비-git 격리용일 뿐 프로젝트 정체성이 아니다.
+HUB_PROJECT = "madison"
+
+
+def worker_dirs() -> tuple[str, ...]:
+    """워커 디렉터리 이름 전부 — 과거(summarizer)·현행 기본값(llm-cwd)·LLM_CWD로 바꾼 이름. 이름 판정의 유일한 출처."""
+    return tuple(dict.fromkeys(AUTO_PROJECTS + (CFG.llm_cwd.name,)))
 
 
 def auto_frontend(project: str, frontend: str) -> str:
     """백필 전용: 허브 세션 기록이 없는 전사본의 워커 프로젝트는 frontend 미상이어도 'auto'로 —
     '자동화 제외' 필터가 걸리게. 실시간 경로의 '자동화인가'는 세션 판정(sessions.frontend)이 단일 기준이다
     (state.ingest가 payload·앱 자동 생성 프롬프트 규칙으로 정해 저장, fold가 ledger_key로 읽는다)."""
-    return "auto" if project in AUTO_PROJECTS else frontend
+    return "auto" if project in worker_dirs() else frontend
+
+
+def ledger_project(project: str, frontend: str) -> str:
+    """원장에 적을 project — 자동화(auto)로 판정된 워커 디렉터리 이름은 HUB_PROJECT로. 사람 세션(cli·app 등)이
+    낸 것이면 디렉터리 이름이 llm-cwd여도 사람 작업이라 그대로 둔다. 전사본 백필이 쓰고, merge_worker_projects가
+    같은 규칙을 SQL로 적용한다."""
+    return HUB_PROJECT if frontend == "auto" and project in worker_dirs() else project
+
+
+_LEDGER_KEY = {"token_daily": "day", "token_hourly": "hour"}
+
+
+def merge_worker_projects(c) -> int:
+    """일·시간 원장의 (워커 디렉터리 이름, frontend='auto') 행을 HUB_PROJECT 행으로 합친다 — 같은 키가 이미 있으면
+    열을 더하고 옛 행은 지운다. 멱등(합칠 행이 없으면 변화 없음). 호출부(db.migrate)의 트랜잭션 안에서 부른다.
+    frontend가 auto가 아닌 행은 사람 작업이라 건드리지 않는다. 합친(지운) 행 수를 돌려준다."""
+    names = tuple(n for n in worker_dirs() if n != HUB_PROJECT)
+    if not names:
+        return 0
+    marks = ",".join("?" * len(names))
+    n = 0
+    per_table = {}
+    for table, key in _LEDGER_KEY.items():
+        if not c.execute(f"SELECT 1 FROM {table} WHERE frontend='auto' AND project IN ({marks}) LIMIT 1",
+                         names).fetchone():
+            continue
+        c.execute(
+            f"INSERT INTO {table} ({key}, device_id, agent, project, model, frontend, source,"
+            f" input, output, cache_read, cache_write, thinking, turns)"
+            f" SELECT {key}, device_id, agent, ?, model, frontend, source,"
+            f" input, output, cache_read, cache_write, thinking, turns FROM {table}"
+            f" WHERE frontend='auto' AND project IN ({marks})"
+            f" ON CONFLICT({key}, device_id, agent, project, model, frontend, source) DO UPDATE SET"
+            f" input=input+excluded.input, output=output+excluded.output,"
+            f" cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write,"
+            f" thinking=thinking+excluded.thinking, turns=turns+excluded.turns",
+            (HUB_PROJECT,) + names)
+        per_table[table] = c.execute(
+            f"DELETE FROM {table} WHERE frontend='auto' AND project IN ({marks})", names).rowcount
+        n += per_table[table]
+    if n:
+        log.info("원장 워커 project 병합: 일 원장 %d행·시간 원장 %d행 → %s", per_table.get("token_daily", 0),
+                 per_table.get("token_hourly", 0), HUB_PROJECT)
+    return n
 
 
 def ledger_key(event_project, session) -> tuple[str, str]:
     """토큰 한 덩어리의 (project, frontend) — 실시간 fold와 일회성 채우기(backfill_hourly)가 함께 쓰는 경로.
     frontend는 이벤트 payload가 아니라 세션에 저장된 판정(sessions.frontend), project는 이벤트 값 우선·
-    없으면 세션 값. session은 sessions 행(없으면 None). 프로젝트 이름 규칙은 넣지 않는다."""
+    없으면 세션 값. session은 sessions 행(없으면 None). 이름 규칙은 세션 판정이 auto일 때의 개명(ledger_project)뿐 —
+    원장 project를 정하는 함수는 ledger_project 하나다(워커 계상·백필·기동 시 병합과 공유)."""
     project = str(event_project or (session["project"] if session else "") or "")
-    return project, str((session["frontend"] if session else "") or "")
+    frontend = str((session["frontend"] if session else "") or "")
+    return ledger_project(project, frontend), frontend
 
 
 # 토큰 '규모' = input + cache_read + cache_write + output (thinking은 output의 부분집합이라 더하지 않는다).
@@ -253,7 +311,7 @@ def backfill_hourly(c):
          frontend는 세션의 현재 판정(sessions.frontend), project는 이벤트 project 또는 세션 project(ledger_key).
          과거 이벤트 시점의 판정과 갈릴 수 있는 경계 사례는 일 원장과의 날짜별 합 비교로 확인한다.
       2) llm_runs.usage — 허브 워커(훅 억제라 이벤트 없음): started_at 시(실시간 _account_tokens와 같은 기준),
-         frontend 'auto', project는 워커 cwd 이름, 기기는 허브 기기. 기기를 못 찾으면 건너뛴다.
+         frontend 'auto', project는 ledger_project(워커 cwd 이름, 'auto') = HUB_PROJECT, 기기는 허브 기기. 기기를 못 찾으면 건너뛴다.
     격리: 세션 하나(재료 1)·llm_runs 한 행(재료 2)의 처리는 각각 SAVEPOINT다. 손상된 한 단위가 실패하면 그 단위만
     롤백하고 건너뛴 뒤 건수를 경고로 남긴다 — 기동을 막지 않는다. 전체 트랜잭션 실패(락·디스크)는 그대로 올린다.
     경계: EVENT_RETENTION_DAYS>0으로 오래된 이벤트가 지워졌다면 세션의 남은 첫 이벤트가 전체 누적을 첫 델타로
@@ -297,7 +355,8 @@ def backfill_hourly(c):
                 hour = local_hour(r["started_at"])
                 rows = [(m, d) for m, d in um.items() if any(d.values())]
                 for m, d in rows:
-                    _upsert(c, "token_hourly", "hour", hour, hub, ag, CFG.llm_cwd.name, m, "auto", "events", d, 0)
+                    _upsert(c, "token_hourly", "hour", hour, hub, ag, ledger_project(CFG.llm_cwd.name, "auto"),
+                            m, "auto", "events", d, 0)
             n_run += len(rows)
         except Exception as e:
             skipped_runs += 1
@@ -533,7 +592,7 @@ def _by_session(c, reg, *, days: int, agent: str, device: str, service: str,
     out = []
     for r in c.execute(
             "SELECT d.name device, s.agent, s.session_id, s.project, s.model, s.tokens_cum,"
-            " s.started_at, s.last_seen_hub FROM sessions s JOIN devices d ON d.id=s.device_id"
+            " s.started_at, s.last_seen_hub, s.frontend FROM sessions s JOIN devices d ON d.id=s.device_id"
             f" WHERE {' AND '.join(where)}", args):
         try:
             cum = json.loads(r["tokens_cum"])
@@ -547,8 +606,10 @@ def _by_session(c, reg, *, days: int, agent: str, device: str, service: str,
                     tot[k] += counts[k]
         if not any(tot.values()):
             continue
+        # 원장(by_project)과 같은 이름 — 세션 판정이 auto인 워커 디렉터리 이름은 HUB_PROJECT로
+        proj = ledger_project(r["project"] or "", r["frontend"] or "")
         out.append({"device": r["device"], "agent": r["agent"], "session_id": r["session_id"],
-                    "project": r["project"] or "", "service": reg.service(r["project"] or ""),
+                    "project": proj, "service": reg.service(proj),
                     "model": r["model"] or "", "started_at": r["started_at"],
                     "last_seen": r["last_seen_hub"], **{COLS[k]: tot[k] for k in KINDS}})
     out.sort(key=scale_key)

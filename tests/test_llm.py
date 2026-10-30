@@ -162,7 +162,7 @@ class WorkerAccountingTests(unittest.TestCase):
                             c=self.conn)
         r = self.conn.execute("SELECT * FROM token_daily").fetchone()
         self.assertEqual((r["agent"], r["model"], r["frontend"], r["source"], r["project"]),
-                         ("claude-code", "model-a", "auto", "events", llm.CFG.llm_cwd.name))
+                         ("claude-code", "model-a", "auto", "events", "madison"))
         self.assertEqual((r["input"], r["output"], r["cache_read"], r["cache_write"], r["thinking"]),
                          (5, 2, 30, 4, 1))
 
@@ -177,7 +177,34 @@ class WorkerAccountingTests(unittest.TestCase):
         cols = ("device_id", "agent", "project", "model", "frontend", "source",
                 "input", "output", "cache_read", "cache_write", "thinking", "turns")
         self.assertEqual({k: h[k] for k in cols}, {k: d[k] for k in cols})
-        self.assertEqual((h["agent"], h["frontend"], h["project"]), ("codex-cli", "auto", llm.CFG.llm_cwd.name))
+        self.assertEqual((h["agent"], h["frontend"], h["project"]), ("codex-cli", "auto", "madison"))
+
+    def test_hub_project_constant_is_madison(self):
+        from server import tokens
+        self.assertEqual(tokens.HUB_PROJECT, "madison")
+
+    def test_worker_tokens_are_booked_under_hub_project_in_both_ledgers(self):
+        # 워커 cwd 이름(llm-cwd)이 아니라 허브 프로젝트 이름 — 두 원장 모두
+        llm._account_tokens("claude-code", {"model-a": {"in": 5, "out": 2, "cr": 0, "cw": 0, "th": 0},
+                                            "model-b": {"in": 1, "out": 1, "cr": 0, "cw": 0, "th": 0}},
+                            c=self.conn)
+        for table in ("token_daily", "token_hourly"):
+            with self.subTest(table=table):
+                rows = self.conn.execute(f"SELECT project, frontend FROM {table}").fetchall()
+                self.assertEqual(len(rows), 2)
+                self.assertEqual({(r["project"], r["frontend"]) for r in rows}, {("madison", "auto")})
+
+    def test_hub_project_does_not_follow_llm_cwd_name(self):
+        from pathlib import Path
+        from unittest import mock
+        for name in ("custom-worker-dir", "madison", "llm-cwd"):
+            with self.subTest(llm_cwd=name), mock.patch.object(llm.CFG, "llm_cwd", Path("/x") / name):
+                self.conn.execute("DELETE FROM token_daily")
+                self.conn.execute("DELETE FROM token_hourly")
+                llm._account_tokens("codex-cli", {"gpt-a": {"in": 3, "out": 1, "cr": 0, "cw": 0, "th": 0}},
+                                    c=self.conn)
+                self.assertEqual(self.conn.execute("SELECT project FROM token_daily").fetchone()["project"], "madison")
+                self.assertEqual(self.conn.execute("SELECT project FROM token_hourly").fetchone()["project"], "madison")
 
     def test_usage_lands_in_the_runs_started_at_hour_in_both_ledgers(self):
         """실시간 계상도 일회성 채우기(llm_runs.started_at)와 같은 시각 기준 — 호출이 늦게 끝나도 시작 시각의 시·일."""

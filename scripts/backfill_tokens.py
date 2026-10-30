@@ -15,9 +15,10 @@ tokens.add_ledger(일·시간 동시 가산)를 거치지 않고 아래 전용 U
 - 이중 계상 방지: 라이브 수집(source='events')의 에이전트별 최초 day 이후는 넣지 않는다.
   --until로 더 이른 경계를 줄 수 있다(경계 미포함).
 - 자동화 판정(resolve_frontend 하나): 허브 sessions에 그 세션이 있으면 그 세션의 frontend 판정, 없으면
-  워커 프로젝트 이름 규칙(tokens.auto_frontend(project, 수집기 값)). 세션 id를 얻는 경로: Claude는 줄의
-  sessionId, Codex는 session_meta.payload.id(허브 session_id와 같은 값을 실데이터에서 확인). --from-json은
-  수집기가 날짜·프로젝트·모델·frontend로 이미 집계해 세션 id가 없어 이름 규칙(+수집기 값)만 쓴다 — 세션 조인 불가.
+  워커 프로젝트 이름 규칙(tokens.auto_frontend(project, 수집기 값)). auto로 판정된 워커 디렉터리 이름은 원장에
+  tokens.HUB_PROJECT로 적는다(tokens.ledger_project — 라이브 워커 계상·migrate 병합과 같은 규칙).
+  세션 id를 얻는 경로: Claude는 줄의 sessionId, Codex는 session_meta.payload.id(허브 session_id와 같은 값을
+  실데이터에서 확인). --from-json은 수집기가 날짜·프로젝트·모델·frontend로 이미 집계해 세션 id가 없어 이름 규칙(+수집기 값)만 쓴다 — 세션 조인 불가.
 - 프로젝트 귀속은 cwd의 basename(최선 노력) — Claude는 라인별 cwd, Codex는 session_meta.cwd.
 - 턴 수는 복원하지 않는다(turns=0) — 합계 턴은 라이브 수집분에서만.
 """
@@ -123,7 +124,7 @@ def remap_frontend(c, device_id: int, agent: str, agg: dict) -> dict:
     cache: dict = {}
     for (day, project, model, sid, collected), v in agg.items():
         fe = resolve_frontend(c, device_id, agent, sid, project, collected, cache)
-        acc = out[(day, project, model, fe)]
+        acc = out[(day, tokens.ledger_project(project, fe), model, fe)]   # 워커 이름 → HUB_PROJECT (auto일 때만)
         for k in tokens.KINDS:
             acc[k] += v[k]
     return out
@@ -214,9 +215,9 @@ def main():
             for r in payload.get("rows", []):
                 proj = str(r.get("project") or "")
                 # 집계 JSON에는 세션 id가 없다 — 세션 조인 불가, resolve_frontend의 이름 규칙 경로만 탄다
-                key = (str(r.get("day") or ""), proj, str(r.get("model") or "")[:60],
-                       resolve_frontend(c, device_id, str(r.get("agent") or ""), "", proj,
-                                        str(r.get("frontend") or "")))
+                fe = resolve_frontend(c, device_id, str(r.get("agent") or ""), "", proj,
+                                      str(r.get("frontend") or ""))
+                key = (str(r.get("day") or ""), tokens.ledger_project(proj, fe), str(r.get("model") or "")[:60], fe)
                 acc = by_agent.setdefault(str(r.get("agent") or ""), {}).setdefault(
                     key, {k: 0 for k in tokens.KINDS})
                 for k in tokens.KINDS:   # auto 재분류로 키가 합쳐질 수 있어 가산

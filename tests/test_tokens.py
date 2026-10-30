@@ -296,7 +296,7 @@ class WindowTests(unittest.TestCase):
     def worker_run(self, ts, provider="claude"):
         """허브 워커 호출 한 건 — 쓰기 경로 그대로(항상 auto·워커 cwd 프로젝트·허브 기기)."""
         agent = "codex-cli" if provider == "codex" else "claude-code"
-        tokens.add_ledger(self.conn, ts.strftime("%Y-%m-%dT%H"), 2, agent, tokens.CFG.llm_cwd.name,
+        tokens.add_ledger(self.conn, ts.strftime("%Y-%m-%dT%H"), 2, agent, tokens.HUB_PROJECT,
                           "haiku", "auto", "events", cum(7, 3))
 
     def test_hourly_buckets_sessions_and_workers(self):
@@ -330,7 +330,8 @@ class WindowTests(unittest.TestCase):
         self.assertEqual((by_model["model-a"]["input"], by_model["haiku"]["input"]), (250, 7))
         by_proj = {r["project"]: r for r in w["by_project"]}
         self.assertEqual(by_proj["acme-web"]["input"], 250)
-        self.assertEqual(by_proj[tokens.CFG.llm_cwd.name]["input"], 7)
+        self.assertEqual(by_proj["madison"]["input"], 7)
+        self.assertNotIn("llm-cwd", by_proj)
         self.assertEqual(w["by_agent"], [{"agent": "claude-code", "input": 257, "output": 83,
                                           "cache_read": 0, "cache_write": 0, "thinking": 0, "turns": 2}])
 
@@ -496,6 +497,16 @@ class AutomationVerdictTests(unittest.TestCase):
         self.assertEqual(self.frontends(), {"mine": "cli", "mine2": "app"})
         self.assertEqual(self.totals(human=True), (30, 30))
 
+    def test_worker_named_project_of_auto_session_is_hub_project_in_both_ledgers(self):
+        """auto 세션이 낸 워커 디렉터리 이름 이벤트는 두 원장 모두 HUB_PROJECT(madison), 사람 세션은 이름을 유지한다
+        (원장 project 결정은 ledger_project 하나 — 실시간 fold도 같은 함수를 지난다)."""
+        self.send("leak", "turn_done", project="llm-cwd", frontend="auto", tokens_cum=cum(10, 5))
+        self.send("mine", "turn_done", project="llm-cwd", frontend="app", tokens_cum=cum(20, 5))
+        for table in ("token_daily", "token_hourly"):
+            got = {(r["project"], r["frontend"]): r["input"] for r in self.conn.execute(
+                f"SELECT project, frontend, SUM(input) input FROM {table} GROUP BY project, frontend")}
+            self.assertEqual(got, {(tokens.HUB_PROJECT, "auto"): 10, ("llm-cwd", "app"): 20}, table)
+
     def test_payload_auto_session_is_auto_in_both(self):
         self.send("hl", "turn_done", frontend="auto", tokens_cum=cum(10, 5))
         self.assertEqual(self.totals(human=True), (0, 0))
@@ -643,7 +654,7 @@ class HourlyBackfillTests(unittest.TestCase):
         self.conn.execute("INSERT INTO llm_runs (site, provider, model, started_at, usage) VALUES ('summary',?,'haiku',?,?)",
                           (provider, ts, json.dumps(usage)))
         tokens.add_ledger(self.conn, tokens.local_hour(ts), 2, "codex-cli" if provider == "codex" else "claude-code",
-                          tokens.CFG.llm_cwd.name, "haiku", "auto", "events", cum(*usage["haiku"].values()))
+                          tokens.HUB_PROJECT, "haiku", "auto", "events", cum(*usage["haiku"].values()))
 
     def seed(self):
         # Claude: 모델 둘·여러 시간·날짜 경계 넘김, 델타 0 턴, session_end 캐치업
@@ -686,6 +697,21 @@ class HourlyBackfillTests(unittest.TestCase):
         db.migrate(self.conn)
         self.assertEqual(self.hourly(), filled)
         self.assertEqual(self.daily_of("token_daily", "day"), self.daily_of("token_hourly", "hour"))
+
+    def test_fill_books_replayed_workers_under_hub_project_whatever_the_cwd_name(self):
+        self.seed()
+        for name in ("llm-cwd", "custom-worker-dir"):
+            with self.subTest(llm_cwd=name), mock.patch.object(tokens.CFG, "llm_cwd", Path("/x") / name):
+                self.conn.execute("DROP TABLE token_hourly")
+                db.migrate(self.conn)
+                workers = self.conn.execute(
+                    "SELECT DISTINCT project FROM token_hourly WHERE model='haiku'").fetchall()
+                self.assertEqual([r["project"] for r in workers], ["madison"])
+                self.assertEqual(self.conn.execute(
+                    "SELECT COUNT(*) FROM token_hourly WHERE project IN ('llm-cwd', 'custom-worker-dir')"
+                    ).fetchone()[0], 0)
+                # 일 원장(실시간 가산)과 시간 원장(재생)의 합이 워커 행까지 일치
+                self.assertEqual(self.daily_of("token_hourly", "hour"), self.daily_of("token_daily", "day"))
 
     def test_fill_failure_rolls_back_table_creation_and_retries_next_time(self):
         self.seed()
@@ -994,6 +1020,225 @@ class BackfillScriptFrontendTests(unittest.TestCase):
             out = self.mod.remap_frontend(self.conn, 1, "codex-cli", agg)
             (okey,) = out
             self.assertEqual(okey[3], "cli")                                  # 허브 세션 판정이 이긴다
+
+
+class HubProjectMergeTests(unittest.TestCase):
+    """db.migrate가 옛 워커 프로젝트명(llm-cwd·summarizer·현행 LLM_CWD 이름)의 auto 행을 HUB_PROJECT로 합친다."""
+
+    COLS = ("device_id", "agent", "project", "model", "frontend", "source")
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        for did, name in ((1, "acme-mini"), (2, "acme-hub")):
+            self.conn.execute(
+                "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at)"
+                " VALUES (?,?,'x',datetime('now'),datetime('now'))", (did, name))
+
+    def tearDown(self):
+        self.conn.close()
+
+    def put(self, table, stamp, project, *, frontend="auto", device=1, agent="claude-code", model="haiku",
+            source="events", n=(10, 5, 100, 20, 3), turns=2):
+        key = "day" if table == "token_daily" else "hour"
+        self.conn.execute(
+            f"INSERT INTO {table} ({key}, device_id, agent, project, model, frontend, source,"
+            " input, output, cache_read, cache_write, thinking, turns) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (stamp, device, agent, project, model, frontend, source, *n, turns))
+
+    def dump(self, table):
+        key = "day" if table == "token_daily" else "hour"
+        return [tuple(r) for r in self.conn.execute(f"SELECT * FROM {table} ORDER BY {key}, 2,3,4,5,6,7")]
+
+    def row(self, table, stamp, project, **kw):
+        key = "day" if table == "token_daily" else "hour"
+        where = {"device_id": 1, "agent": "claude-code", "model": "haiku", "frontend": "auto",
+                 "source": "events", **kw}
+        sql = f"SELECT * FROM {table} WHERE {key}=? AND project=? AND " + " AND ".join(f"{k}=?" for k in where)
+        return self.conn.execute(sql, (stamp, project, *where.values())).fetchall()
+
+    @staticmethod
+    def sums(rows):
+        return tuple(sum(r[k] for r in rows) for k in ("input", "output", "cache_read", "cache_write", "thinking", "turns"))
+
+    def tables(self):
+        return (("token_daily", "2026-10-29"), ("token_hourly", "2026-10-29T10"))
+
+    def test_same_key_rows_are_summed_into_one_hub_project_row(self):
+        for table, stamp in self.tables():
+            with self.subTest(table=table):
+                self.put(table, stamp, "llm-cwd", n=(10, 5, 100, 20, 3), turns=2)
+                self.put(table, stamp, "summarizer", n=(1, 1, 1, 1, 1), turns=1)
+                self.put(table, stamp, "madison", n=(100, 50, 10, 2, 1), turns=4)   # 이미 새 이름으로 쌓인 행
+        db.migrate(self.conn)
+        for table, stamp in self.tables():
+            with self.subTest(table=table):
+                rows = self.conn.execute(f"SELECT * FROM {table}").fetchall()
+                self.assertEqual(len(rows), 1)
+                r = rows[0]
+                self.assertEqual(r["project"], "madison")
+                self.assertEqual((r["input"], r["output"], r["cache_read"], r["cache_write"], r["thinking"], r["turns"]),
+                                 (111, 56, 111, 23, 5, 7))
+
+    def test_non_colliding_rows_are_just_renamed(self):
+        for table, stamp in self.tables():
+            self.put(table, stamp, "llm-cwd", agent="claude-code")
+            self.put(table, stamp, "llm-cwd", agent="codex-cli", model="gpt-a", n=(7, 3, 0, 0, 1), turns=0)
+            self.put(table, stamp, "llm-cwd", device=2)
+            self.put(table, stamp, "llm-cwd", source="backfill", n=(9, 9, 9, 9, 9), turns=0)   # source는 PK의 일부 — 합치지 않는다
+        before = {t: self.sums(self.conn.execute(f"SELECT * FROM {t}").fetchall()) for t, _ in self.tables()}
+        db.migrate(self.conn)
+        for table, stamp in self.tables():
+            with self.subTest(table=table):
+                rows = self.conn.execute(f"SELECT * FROM {table}").fetchall()
+                self.assertEqual(len(rows), 4)
+                self.assertEqual({r["project"] for r in rows}, {"madison"})
+                self.assertEqual({(r["agent"], r["device_id"], r["source"]) for r in rows},
+                                 {("claude-code", 1, "events"), ("codex-cli", 1, "events"),
+                                  ("claude-code", 2, "events"), ("claude-code", 1, "backfill")})
+                self.assertEqual(self.sums(rows), before[table])           # 어떤 토큰도 사라지거나 늘지 않는다
+
+    def test_current_llm_cwd_name_is_merged_too(self):
+        with mock.patch.object(db.CFG, "llm_cwd", Path("/x/custom-worker-dir")):
+            for table, stamp in self.tables():
+                self.put(table, stamp, "custom-worker-dir")
+            db.migrate(self.conn)
+        for table, stamp in self.tables():
+            self.assertEqual(len(self.row(table, stamp, "madison")), 1)
+            self.assertEqual(self.row(table, stamp, "custom-worker-dir"), [])
+
+    def test_human_rows_with_worker_like_names_are_untouched(self):
+        for table, stamp in self.tables():
+            self.put(table, stamp, "llm-cwd", frontend="cli", n=(4, 4, 4, 4, 4), turns=3)     # 사람이 그 이름의 디렉터리에서 한 작업
+            self.put(table, stamp, "summarizer", frontend="app")
+            self.put(table, stamp, "acme-web", frontend="auto")                                # 다른 프로젝트의 auto
+            self.put(table, stamp, "madison", frontend="cli", n=(1, 1, 1, 1, 1), turns=1)
+        snapshot = {t: self.dump(t) for t, _ in self.tables()}
+        db.migrate(self.conn)
+        for table, _ in self.tables():
+            with self.subTest(table=table):
+                self.assertEqual(self.dump(table), snapshot[table])
+
+    def test_mixed_table_merges_only_auto_rows(self):
+        for table, stamp in self.tables():
+            self.put(table, stamp, "llm-cwd", frontend="auto")
+            self.put(table, stamp, "llm-cwd", frontend="cli")
+        db.migrate(self.conn)
+        for table, stamp in self.tables():
+            with self.subTest(table=table):
+                self.assertEqual(len(self.row(table, stamp, "madison", frontend="auto")), 1)
+                self.assertEqual(len(self.row(table, stamp, "llm-cwd", frontend="cli")), 1)
+                self.assertEqual(self.row(table, stamp, "llm-cwd", frontend="auto"), [])
+
+    def test_migrate_is_idempotent(self):
+        for table, stamp in self.tables():
+            self.put(table, stamp, "llm-cwd")
+            self.put(table, stamp, "summarizer", model="gpt-a")
+            self.put(table, stamp, "madison")
+            self.put(table, stamp, "llm-cwd", frontend="cli")
+        db.migrate(self.conn)
+        once = {t: self.dump(t) for t, _ in self.tables()}
+        db.migrate(self.conn)
+        db.migrate(self.conn)
+        for table, _ in self.tables():
+            with self.subTest(table=table):
+                self.assertEqual(self.dump(table), once[table])
+
+    def test_summary_and_window_report_madison_not_llm_cwd(self):
+        today = datetime.now().astimezone().replace(minute=30, second=0, microsecond=0) - timedelta(hours=1)
+        self.put("token_daily", today.strftime("%Y-%m-%d"), "llm-cwd", n=(7, 3, 0, 0, 0), turns=0)
+        self.put("token_daily", today.strftime("%Y-%m-%d"), "llm-cwd", frontend="cli", n=(50, 5, 0, 0, 0), turns=1)
+        self.put("token_hourly", today.strftime("%Y-%m-%dT%H"), "llm-cwd", n=(7, 3, 0, 0, 0), turns=0)
+        db.migrate(self.conn)
+        reg = registry.Registry()
+        s = tokens.summary(self.conn, reg, days=30)
+        by = {r["project"]: r for r in s["by_project"]}
+        self.assertEqual(by["madison"]["input"], 7)
+        self.assertEqual(by["llm-cwd"]["input"], 50)           # 사람 행의 이름은 그대로
+        w = tokens.window(self.conn, reg, hours_back=24)
+        self.assertEqual([r["project"] for r in w["by_project"]], ["madison"])
+        self.assertEqual(w["by_project"][0]["input"], 7)
+
+    def test_live_worker_accounting_shows_up_as_madison_in_breakdowns(self):
+        envfile = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
+        envfile.write("MADISON_URL=http://x\nMADISON_DEVICE=acme-hub\n")
+        envfile.close()
+        self.addCleanup(Path(envfile.name).unlink)
+        patcher = mock.patch.object(tokens, "DEVICE_ENV", Path(envfile.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tokens._hub_dev.update(id=None, at=0.0)
+        self.addCleanup(tokens._hub_dev.update, id=None, at=0.0)
+        from server import llm
+        llm._account_tokens("claude-code", {"haiku": cum(7, 3)}, c=self.conn)
+        reg = registry.Registry()
+        w = tokens.window(self.conn, reg, hours_back=24)
+        self.assertEqual({r["project"] for r in w["by_project"]}, {"madison"})
+        s = tokens.summary(self.conn, reg, days=30)
+        self.assertEqual({r["project"] for r in s["by_project"]}, {"madison"})
+        self.assertEqual(s["by_device"][0]["device"], "acme-hub")
+
+
+class BackfillScriptHubProjectTests(unittest.TestCase):
+    """전사본 백필: 허브 세션 기록이 없을 때만 워커 이름 규칙(frontend auto + project HUB_PROJECT)."""
+
+    def setUp(self):
+        self.mod = _load_backfill_script()
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        for sid, fe, proj in (("human-llm", "cli", "llm-cwd"), ("auto-sess", "auto", "acme-web"),
+                              ("human-sum", "app", "summarizer")):
+            self.conn.execute(
+                "INSERT INTO sessions (device_id, agent, session_id, frontend, project) VALUES (1,'claude-code',?,?,?)",
+                (sid, fe, proj))
+
+    def tearDown(self):
+        self.conn.close()
+
+    @staticmethod
+    def n(i):
+        return {"in": i, "out": 1, "cr": 0, "cw": 0, "th": 0}
+
+    def remap(self, agg, device=1):
+        return self.mod.remap_frontend(self.conn, device, "claude-code", agg)
+
+    def test_no_session_record_maps_worker_names_to_hub_project_as_auto(self):
+        for name in ("llm-cwd", "summarizer"):
+            with self.subTest(project=name):
+                out = self.remap({("2026-09-01", name, "haiku", "no-such-session", ""): self.n(5)})
+                self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto")])
+
+    def test_current_llm_cwd_name_without_session_maps_too(self):
+        with mock.patch.object(tokens.CFG, "llm_cwd", Path("/x/custom-worker-dir")):
+            out = self.remap({("2026-09-01", "custom-worker-dir", "haiku", "", ""): self.n(5)})
+        self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto")])
+
+    def test_rows_collapsing_to_the_same_key_are_summed(self):
+        out = self.remap({("2026-09-01", "llm-cwd", "haiku", "a", ""): self.n(5),
+                          ("2026-09-01", "summarizer", "haiku", "b", ""): self.n(7)})
+        (key,) = out
+        self.assertEqual(key, ("2026-09-01", "madison", "haiku", "auto"))
+        self.assertEqual(out[key]["in"], 12)
+
+    def test_human_session_keeps_name_and_verdict_even_with_worker_like_name(self):
+        out = self.remap({("2026-09-01", "llm-cwd", "model-a", "human-llm", ""): self.n(5),
+                          ("2026-09-01", "summarizer", "model-a", "human-sum", "auto"): self.n(6)})
+        self.assertEqual(set(out), {("2026-09-01", "llm-cwd", "model-a", "cli"),
+                                    ("2026-09-01", "summarizer", "model-a", "app")})
+
+    def test_auto_session_keeps_its_project_name(self):
+        out = self.remap({("2026-09-01", "acme-web", "model-a", "auto-sess", ""): self.n(5)})
+        self.assertEqual(list(out), [("2026-09-01", "acme-web", "model-a", "auto")])
+
+    def test_ordinary_project_without_session_is_untouched(self):
+        out = self.remap({("2026-09-01", "acme-web", "model-a", "no-such-session", "app"): self.n(5)})
+        self.assertEqual(list(out), [("2026-09-01", "acme-web", "model-a", "app")])
+
+    def test_other_devices_session_is_not_a_record(self):
+        out = self.remap({("2026-09-01", "llm-cwd", "haiku", "human-llm", ""): self.n(5)}, device=2)
+        self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto")])
 
 
 class TxTests(unittest.TestCase):
