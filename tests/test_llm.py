@@ -128,7 +128,7 @@ class WorkerUsageTests(unittest.TestCase):
 
 
 class WorkerAccountingTests(unittest.TestCase):
-    """_account_tokens → token_daily 배선 검증 (인메모리 DB + DEVICE_ENV 대체)."""
+    """_account_tokens → token_daily·token_hourly 배선 검증 (인메모리 DB + DEVICE_ENV 대체)."""
 
     def setUp(self):
         import sqlite3
@@ -166,10 +166,65 @@ class WorkerAccountingTests(unittest.TestCase):
         self.assertEqual((r["input"], r["output"], r["cache_read"], r["cache_write"], r["thinking"]),
                          (5, 2, 30, 4, 1))
 
+    def test_usage_lands_in_current_local_hour_of_both_ledgers(self):
+        import time
+        llm._account_tokens("codex-cli", {"gpt-a": {"in": 5, "out": 2, "cr": 30, "cw": 4, "th": 1}}, c=self.conn)
+        h = self.conn.execute("SELECT * FROM token_hourly").fetchone()
+        d = self.conn.execute("SELECT * FROM token_daily").fetchone()
+        self.assertEqual(len(h["hour"]), 13)                       # 'YYYY-MM-DDTHH' 허브 로컬
+        self.assertEqual(h["hour"][:10], time.strftime("%Y-%m-%d")[:10])
+        self.assertEqual(d["day"], h["hour"][:10])
+        cols = ("device_id", "agent", "project", "model", "frontend", "source",
+                "input", "output", "cache_read", "cache_write", "thinking", "turns")
+        self.assertEqual({k: h[k] for k in cols}, {k: d[k] for k in cols})
+        self.assertEqual((h["agent"], h["frontend"], h["project"]), ("codex-cli", "auto", llm.CFG.llm_cwd.name))
+
+    def test_usage_lands_in_the_runs_started_at_hour_in_both_ledgers(self):
+        """실시간 계상도 일회성 채우기(llm_runs.started_at)와 같은 시각 기준 — 호출이 늦게 끝나도 시작 시각의 시·일."""
+        from server import tokens
+        started = "2026-09-02T14:59:30Z"
+        llm._account_tokens("claude-code", {"model-a": {"in": 5, "out": 2, "cr": 0, "cw": 0, "th": 0}},
+                            c=self.conn, started_at=started)
+        want = tokens.local_hour(started)
+        self.assertEqual(self.conn.execute("SELECT hour FROM token_hourly").fetchone()["hour"], want)
+        self.assertEqual(self.conn.execute("SELECT day FROM token_daily").fetchone()["day"], want[:10])
+
+    def test_record_passes_started_at_to_the_ledgers(self):
+        """_record가 llm_runs.started_at을 계상 시각으로 넘긴다 — 같은 값이 llm_runs와 원장 키가 된다."""
+        from unittest import mock
+        from contextlib import contextmanager
+        from server import tokens
+
+        @contextmanager
+        def fake_tx():
+            yield self.conn
+        from datetime import datetime, timedelta, timezone
+        # 30일 보존 정리(_record가 오래된 llm_runs를 지움)에 걸리지 않게 최근 시각
+        started = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        res = llm.Result(ok=True, provider="claude", model="haiku")
+        with mock.patch.object(llm.db, "tx", fake_tx):
+            llm._record("summary", {"provider": "claude", "model": "haiku", "effort": ""}, "p", res, started, "",
+                        False, {"haiku": {"in": 3, "out": 1, "cr": 0, "cw": 0, "th": 0}})
+        self.assertEqual(self.conn.execute("SELECT hour FROM token_hourly").fetchone()["hour"],
+                         tokens.local_hour(started))
+        self.assertEqual(self.conn.execute("SELECT started_at FROM llm_runs").fetchone()["started_at"], started)
+
+    def test_failure_midway_leaves_no_partial_rows_and_keeps_the_surrounding_transaction(self):
+        """모델 둘 중 두 번째가 실패(정수 범위 초과)하면 첫 모델의 가산도 되돌린다 — 호출 결과·바깥 쓰기는 영향 없다."""
+        self.conn.execute("INSERT INTO settings (key, value) VALUES ('k', 'v')")   # 바깥 트랜잭션의 쓰기
+        with self.assertLogs("madison.llm", "ERROR"):
+            llm._account_tokens("claude-code", {"model-a": {"in": 5, "out": 2, "cr": 0, "cw": 0, "th": 0},
+                                                "model-b": {"in": 2 ** 63, "out": 0, "cr": 0, "cw": 0, "th": 0}},
+                                c=self.conn)
+        self.assertIsNone(self.conn.execute("SELECT * FROM token_daily").fetchone())
+        self.assertIsNone(self.conn.execute("SELECT * FROM token_hourly").fetchone())
+        self.assertEqual(self.conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()["value"], "v")
+
     def test_empty_or_zero_usage_writes_nothing(self):
         llm._account_tokens("claude-code", {}, c=self.conn)
         llm._account_tokens("claude-code", {"m": {"in": 0, "out": 0, "cr": 0, "cw": 0, "th": 0}}, c=self.conn)
         self.assertIsNone(self.conn.execute("SELECT * FROM token_daily").fetchone())
+        self.assertIsNone(self.conn.execute("SELECT * FROM token_hourly").fetchone())
 
 
 class EnvelopeTests(unittest.TestCase):

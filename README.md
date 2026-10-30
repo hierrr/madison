@@ -97,12 +97,21 @@ push a piece of work from one machine to another without walking over to it.
 - **Usage tab — token accounting & limit history** — collectors attach cumulative
   per-session token counts (input / output / cache read / cache write / thinking,
   per model, parsed from the agents' local transcripts) to turn events; the hub
-  folds them into a per-day × device × project × model ledger kept forever, and
-  records every rate-limit percentage change. The tab charts limit windows over
-  time (step lines), daily token stacks (I/O and cache on separate scales), and
-  breakdowns by service / project / model / device / agent / session, filterable
-  by period, agent, device, and automation. A one-time script backfills history
-  from transcripts still on disk.
+  folds them into a per-hour and a per-day ledger (× device × project × model) kept
+  forever, and records every rate-limit percentage change. Both ledgers come from
+  the same write path. Only what the one-time hourly fill cannot restore (worker
+  calls older than the 30-day retention, transcript backfill) exists in the daily
+  ledger alone; the 1- and 7-day views read the hourly ledger as a true rolling
+  window over recent hours only, so they are unaffected, and longer ranges read the
+  daily one. Whether a session counts as automation is decided once, on the
+  session itself, and the ledgers just record it.
+  The tab charts limit windows over
+  time (step lines), one token stack per agent (hourly for 1 and 7 days, daily
+  beyond; cache, input, output and thinking in a single stack), and breakdowns
+  by service / project / model /
+  device / agent / session, filterable by period, agent, device, and
+  automation. A one-time script backfills history from transcripts still on
+  disk (daily ledger only).
 - **Configurable hub LLM** — a settings tab picks the provider (Claude Code or
   Codex), model, and reasoning effort separately for task summaries, session
   digests, and report generation, with model lists pulled live from the CLIs

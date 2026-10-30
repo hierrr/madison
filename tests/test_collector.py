@@ -459,6 +459,29 @@ class CollectorTests(unittest.TestCase):
             parsed = tomllib.loads(config.read_text())
             self.assertEqual(parsed["notify"], ["/Apps/SkyComputerUseClient", "turn-ended"])
 
+    def test_suppressed_hub_worker_sends_nothing(self):
+        """허브 워커(MADISON_SUPPRESS=1)는 이벤트를 보내지 않는다 — 토큰 원장이 워커를 llm_runs로만 계상하는 전제."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            capture = root / "capture.json"
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
+                        "MADISON_TEST_CAPTURE": str(capture), "MADISON_SUPPRESS": "1"})
+            subprocess.run(["bash", str(REPORT), "prompt", "claude-code"],
+                           input=json.dumps({"session_id": "s1", "prompt": "hi"}), text=True,
+                           env=env, cwd=REPO, check=True)
+            self.assertFalse(capture.exists())
+
+    def test_windows_collector_has_the_same_suppress_early_exit(self):
+        """report.ps1도 report.sh처럼 env 파일을 읽기 전에 MADISON_SUPPRESS=1이면 조용히 종료한다(실행 검증은 Windows 필요)."""
+        ps1 = (REPO / "collector" / "report.ps1").read_text(encoding="utf-8")
+        guard = ps1.index('if ($env:MADISON_SUPPRESS -eq "1") { Bye }')
+        self.assertLess(guard, ps1.index("Test-Path $EnvFile"))
+        sh = REPORT.read_text(encoding="utf-8")
+        self.assertIn('[ "${MADISON_SUPPRESS:-0}" = "1" ] && exit 0', sh)
+
 
 if __name__ == "__main__":
     unittest.main()

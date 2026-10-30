@@ -4,7 +4,7 @@ import re
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import usage
+from . import tokens, usage
 from .config import CFG
 
 log = logging.getLogger("madison.state")
@@ -140,7 +140,11 @@ def ingest(c, device_id: int, ev: dict) -> str:
         if branch:
             sets += ["branch=?"]; args += [branch]
 
-    # 프런트엔드(cli/app/auto/ide): 실려 오면 반영. 수집기가 출처를 못 가린 'unknown'은 이미 아는 값을 덮지 않는다.
+    # 프런트엔드(cli/app/auto/ide): 세션 판정(sessions.frontend)이 '자동화인가'의 단일 기준이다 — 태스크·리포트·이력·
+    # _by_session은 물론 시간·일 원장(fold)도 아래 UPDATE 이후 저장된 이 값을 쓴다. 판정 규칙은 둘뿐:
+    # payload 값(수집기가 claude -p·codex exec 부모 프로세스를 감지해 auto로 보낸다), 그리고 Codex 앱 자동 생성 prompt.
+    # 허브 워커는 MADISON_SUPPRESS=1이라 이벤트 자체를 안 보내므로(report.sh·report.ps1 모두 조기 종료) 프로젝트 이름 규칙은 두지 않는다.
+    # 수집기가 출처를 못 가린 'unknown'은 이미 아는 값을 덮지 않는다.
     frontend = str(payload.get("frontend") or "")[:20]
     # Codex 앱이 백그라운드로 돌리는 자동 세션(다음 메시지 제안·프로젝트 추천 생성)은 사용자 세션이 아니라
     # 헤드리스 실행이므로 auto로 분류한다. 수집기는 fork 세션에 originator가 없어 unknown으로 보낸다(2026-10-16 실측).
@@ -201,14 +205,17 @@ def ingest(c, device_id: int, ev: dict) -> str:
         args,
     )
 
-    # 토큰 폴드 — 수집기가 실은 세션 누적을 델타로 바꿔 일별 집계 (실패해도 ingest는 계속)
+    # 토큰 폴드 — 수집기가 실은 세션 누적을 델타로 바꿔 시간·일 원장에 가산 (실패해도 ingest는 계속).
+    # frontend는 payload가 아니라 위 UPDATE 이후 세션에 저장된 판정(ledger_key).
     if event in ("turn_done", "session_end") and isinstance(payload.get("tokens"), dict):
         try:
-            from . import tokens as toklib
-            toklib.fold(c, device_id, agent, session_id,
-                        project=str(project or row["project"] or ""),
+            sess = c.execute("SELECT project, frontend FROM sessions WHERE device_id=? AND agent=? AND session_id=?",
+                             (device_id, agent, session_id)).fetchone()
+            proj, fe = tokens.ledger_key(project, sess)
+            tokens.fold(c, device_id, agent, session_id,
+                        project=proj,
                         model=_real_model(payload) or str(row["model"] or ""),
-                        frontend=str(payload.get("frontend") or row["frontend"] or ""),
+                        frontend=fe,
                         ts_device=ts_device, ts_hub=ts_hub,
                         tokens=payload["tokens"], count_turn=(event == "turn_done"))
         except Exception:

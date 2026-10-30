@@ -129,7 +129,7 @@ def _record(site, cf, prompt, res: Result, started_at, ref, schema: bool, usage_
             c.execute("DELETE FROM llm_runs WHERE started_at < datetime('now','-30 days')")
             # 워커 토큰 원장 기록 — llm_runs와 같은 트랜잭션 (호출당 커밋 1회)
             _account_tokens("codex-cli" if cf["provider"] == "codex" else "claude-code",
-                            usage_map or {}, c=c)
+                            usage_map or {}, c=c, started_at=started_at)
     except Exception:
         log.exception("llm_runs 기록 실패")
 
@@ -201,9 +201,12 @@ def _codex_message(stdout: str) -> str:
 _warned_no_device = False
 
 
-def _account_tokens(agent: str, usage_map: dict, c=None):
-    """워커 호출의 토큰을 원장에 직접 가산 — 워커는 전사본을 안 남기므로(--no-session-persistence /
-    --ephemeral) 응답에 실린 사용량이 유일한 출처다. 실패해도 호출 결과에는 영향 없다."""
+def _account_tokens(agent: str, usage_map: dict, c=None, started_at: str | None = None):
+    """워커 호출의 토큰을 시간·일 원장에 직접 가산 — 워커는 전사본을 안 남기고 이벤트도 안 보내므로
+    (--no-session-persistence / --ephemeral, MADISON_SUPPRESS=1) 응답에 실린 사용량이 유일한 출처다.
+    계상 시각은 그 호출의 started_at(UTC ISO) — 일회성 채우기(backfill_hourly)가 llm_runs.started_at을 쓰는 것과
+    같은 기준이라 실시간과 복원이 같은 시·일 키를 만든다(없으면 지금). 모델별 가산 전부가 한 SAVEPOINT라
+    중간 실패 시 부분 행이 남지 않는다. 실패해도 호출 결과에는 영향 없다."""
     global _warned_no_device
     if not usage_map:
         return
@@ -215,11 +218,12 @@ def _account_tokens(agent: str, usage_map: dict, c=None):
                     _warned_no_device = True
                     log.warning("worker 토큰 기록 비활성 — 이 허브 기기의 MADISON_DEVICE를 못 찾음")
                 return
-            day = time.strftime("%Y-%m-%d")
-            for model, v in usage_map.items():
-                if any(v.values()):
-                    tokens.add_daily(conn, day, device_id, agent, CFG.llm_cwd.name, model,
-                                     "auto", "events", v)
+            hour = tokens.local_hour(started_at)   # 허브 로컬 시 — 시간·일 원장에 같은 키로 가산
+            with tokens.savepoint(conn, "madison_worker_tokens"):
+                for model, v in usage_map.items():
+                    if any(v.values()):
+                        tokens.add_ledger(conn, hour, device_id, agent, CFG.llm_cwd.name, model,
+                                          "auto", "events", v)
     except Exception:
         log.exception("worker 토큰 기록 실패")
 

@@ -2183,10 +2183,11 @@
     return out;
   }
 
-  // 토큰 스택 바 — 기간에 맞춰 단위 전환: 24시간이면 시간대별(tok.hours), 아니면 일별(tok.days).
+  // 토큰 스택 바 — 기간에 맞춰 단위 전환: tok.hours가 있으면(1·7일) 시간대별, 아니면 일별(tok.days).
+  // startDay: 기간 '전체'의 시작일 고정(YYYY-MM-DD) — 에이전트별 패널이 같은 가로축을 쓰게 한다. 없으면 tok.days[0].day.
   // 반환: {html, unit}. 컬럼이 패널 폭을 넘으면 연속 버킷을 병합해 전 범위를 스크롤 없이 그린다 —
   // 가로 스크롤이 생기면 스케일 기준인 최대 막대가 화면 밖으로 나가 보이는 구간 전체가 납작해 보인다.
-  function tokenStacks(tok, segs) {
+  function tokenStacks(tok, segs, startDay) {
     var list = [], hourly = !!tok.hours;
     if (hourly) {
       // 서버가 24개 시간 버킷을 0 채움으로 준다 — ts: 'YYYY-MM-DDTHH'
@@ -2201,7 +2202,7 @@
       var today = new Date(); today.setHours(0, 0, 0, 0);
       var start;
       if (UF.days !== '0') { start = new Date(today); start.setDate(start.getDate() - (parseInt(UF.days, 10) - 1)); }
-      else if (tok.days && tok.days.length) { start = new Date(tok.days[0].day + 'T00:00:00'); }
+      else if (startDay || (tok.days && tok.days.length)) { start = new Date((startDay || tok.days[0].day) + 'T00:00:00'); }
       else return { html: '<div class="none">기록 없음</div>', unit: '일별' };
       for (var d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
         var key = ymd(d);
@@ -2251,12 +2252,15 @@
     };
   }
 
-  function tokBars(items, key, titleFn, topN) {   // mbars 변형 — 값은 input+output, 캐시는 툴팁에
+  // 토큰 규모 = 캐시 포함 입력 + 출력 (thinking은 output에 포함) — 서버 정렬 기준(tokens.py)과 같은 정의
+  function tokVol(r) { return (r.input || 0) + (r.cache_read || 0) + (r.cache_write || 0) + (r.output || 0); }
+
+  function tokBars(items, key, titleFn, topN) {   // mbars 변형 — 값은 tokVol, 항목별 내역은 툴팁에
     if (!items.length) return '<div class="none">기록 없음</div>';
     var max = 1;
-    items.forEach(function (it) { max = Math.max(max, (it.input || 0) + (it.output || 0)); });
+    items.forEach(function (it) { max = Math.max(max, tokVol(it)); });
     function bar(it) {
-      var v = (it.input || 0) + (it.output || 0);
+      var v = tokVol(it);
       var label = titleFn ? titleFn(it) : it[key];
       var tipTxt = 'input ' + fmtTok(it.input) + ' · output ' + fmtTok(it.output) +
         ' · cache read ' + fmtTok(it.cache_read) + ' · cache write ' + fmtTok(it.cache_write);
@@ -2307,28 +2311,43 @@
     }
     var t = tok.total || {};
     var outNoTh = function (r) { return (r.output || 0) - (r.thinking || 0); };
-    var io = tokenStacks(tok, [
+    // 캐시까지 한 스택 — 아래부터 cache read, cache write, input, output, thinking (column-reverse라 배열 첫 항목이 맨 아래).
+    // Claude는 Codex의 십수 배 규모라 한 축에 두면 Codex가 안 보인다 → 에이전트별 패널로 축을 나눈다.
+    var segs = [
+      { label: 'cache read', color: 'var(--lg-tealdeep)', val: function (r) { return r.cache_read; } },
+      { label: 'cache write', color: 'var(--lg-purple)', val: function (r) { return r.cache_write; } },
       { label: 'input', color: 'var(--lg-gold)', val: function (r) { return r.input; } },
       { label: 'output', color: 'var(--lg-green)', val: outNoTh },
       { label: 'thinking', color: 'var(--lg-blue)', val: function (r) { return r.thinking; } }
-    ]);
-    // cache read는 입출력의 수백 배 규모 — 같은 축에 섞으면 입출력이 안 보여서 패널 분리
-    var cache = tokenStacks(tok, [
-      { label: 'cache read', color: 'var(--lg-gold)', val: function (r) { return r.cache_read; } },
-      { label: 'cache write', color: 'var(--lg-green)', val: function (r) { return r.cache_write; } }
-    ]);
+    ];
+    // 기간 '전체'의 시작일은 전체 응답 기준으로 맞춘다 (에이전트마다 첫 기록일이 달라 축이 어긋나는 것 방지)
+    var startDay = tok.days && tok.days.length ? tok.days[0].day : null;
+    // 에이전트 표시명 — 토큰 패널 제목과 에이전트별 막대가 같이 쓴다 (로고는 공용 agentIconFile)
+    function agentName(a) { return a === 'claude-code' ? 'Claude' : a === 'codex-cli' ? 'Codex' : a; }
+    function tokPanel(agent, series) {
+      var st = tokenStacks(series, segs, startDay);
+      var head = agent ? '<img class="picon" src="/assets/' + agentIconFile(agent) + '" alt="">' + esc(agentName(agent)) + ' ' : '';
+      return '<section class="panel"><h2 class="prov">' + head + '입출력 토큰 · ' + st.unit + '</h2>' + st.html + '</section>';
+    }
+    var sba = tok.series_by_agent || {};
+    var agents = Object.keys(sba).sort(function (a, b) {
+      var ia = ['claude-code', 'codex-cli'].indexOf(a), ib = ['claude-code', 'codex-cli'].indexOf(b);
+      if (ia < 0) ia = 2;
+      if (ib < 0) ib = 2;
+      return ia - ib || (a < b ? -1 : a > b ? 1 : 0);
+    });
+    // 구 서버(series_by_agent 없음)면 전체 합산 패널 하나
+    var tokPanels = agents.length ? agents.map(function (a) { return tokPanel(a, sba[a]); }).join('') : tokPanel('', tok);
     document.getElementById('usageMain').innerHTML =
       (provAlive('claude', hist) ? provPanel('claude', hist.claude || {}) : '') +
-      (provAlive('codex', hist) ? provPanel('codex', hist.codex || {}) : '') +
-      panel('입출력 토큰 · ' + io.unit, 'var(--lg-teal)', io.html) +
-      panel('캐시 토큰 · ' + cache.unit, 'var(--lg-blue)', cache.html);
+      (provAlive('codex', hist) ? provPanel('codex', hist.codex || {}) : '') + tokPanels;
     document.getElementById('usageRail').innerHTML =
       panel('합계', 'var(--lg-green)',
         '<div class="mstat-grid">' + stat('input', fmtTok(t.input)) + stat('output', fmtTok(t.output)) +
         stat('cache read', fmtTok(t.cache_read)) + stat('cache write', fmtTok(t.cache_write)) +
         stat('thinking', fmtTok(t.thinking)) + stat('턴', t.turns || 0) + '</div>') +
       panel('에이전트별', 'var(--lg-gold)', tokBars((tok.by_agent || []).map(function (r) {
-        return Object.assign({}, r, { agent: r.agent === 'claude-code' ? 'Claude' : r.agent === 'codex-cli' ? 'Codex' : r.agent });
+        return Object.assign({}, r, { agent: agentName(r.agent) });
       }), 'agent')) +
       panel('모델별', 'var(--lg-teal)', tokBars((tok.by_model || []).map(function (r) {
         return Object.assign({}, r, { model: String(r.model || '').replace(/^claude-/, '').replace(/-\d{8}$/, '') });
