@@ -106,6 +106,76 @@ class GatherTests(unittest.TestCase):
         _ev(self.c, "2026-08-27T01:01:00Z", "turn_done", {"summary": "No response requested."})
         self.assertEqual(report.gather(self.c, "day", "2026-08-27"), {})
 
+    def test_cross_session_and_agent_messages_become_notes_not_prompts(self):
+        xs = '<cross-session-message from="sess-1" from-name="peer-a">  배포   전에\n스키마 확인  부탁  </cross-session-message>'
+        am = '<agent-message from="impl-a">테스트 작성 끝났습니다</agent-message>'
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "실제 지시"})
+        _ev(self.c, "2026-08-27T01:00:10Z", "prompt", {"prompt": xs})
+        _ev(self.c, "2026-08-27T01:00:20Z", "prompt", {"prompt": am})
+        _ev(self.c, "2026-08-27T01:05:00Z", "turn_done", {"summary": "처리 완료"})
+        t = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual(t["prompts"], ["실제 지시"])
+        self.assertEqual(t["notes"], ["peer-a — 배포 전에 스키마 확인 부탁",      # 제목=from-name, 공백 정리
+                                      "impl-a — 테스트 작성 끝났습니다"])         # from-name 없으면 from
+
+    def test_message_without_sender_attributes_is_never_a_prompt(self):
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "<agent-message>보낸 이 없음</agent-message>"})
+        _ev(self.c, "2026-08-27T01:00:10Z", "prompt", {"prompt": "<cross-session-message>본문만</cross-session-message>"})
+        _ev(self.c, "2026-08-27T01:00:20Z", "prompt", {"prompt": "실제 지시"})
+        _ev(self.c, "2026-08-27T01:05:00Z", "turn_done", {"summary": "완료"})
+        t = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual(t["prompts"], ["실제 지시"])
+        for n in t["notes"]:                                  # 제목이 없으면 노트를 생략해도 되지만 원문 태그가 새면 안 된다
+            self.assertNotIn("<", n)
+
+    def test_message_only_turn_without_sender_is_dropped(self):
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "<agent-message>보낸 이 없음</agent-message>"})
+        _ev(self.c, "2026-08-27T01:01:00Z", "turn_done", {"summary": "No response requested."})
+        self.assertEqual(report.gather(self.c, "day", "2026-08-27"), {})
+
+    def test_from_attribute_is_not_confused_with_from_name(self):
+        am = '<agent-message from-name="이름" from="id-1">본문</agent-message>'
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": am})
+        _ev(self.c, "2026-08-27T01:01:00Z", "turn_done", {"summary": "확인"})
+        t = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual(t["notes"], ["이름 — 본문"])
+
+    def test_long_message_body_is_clipped_to_note_detail_clip(self):
+        body = "가" * 500
+        am = f'<cross-session-message from="s" from-name="peer-a">{body}</cross-session-message>'
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": am})
+        _ev(self.c, "2026-08-27T01:01:00Z", "turn_done", {"summary": "확인"})
+        note = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]["notes"][0]
+        self.assertTrue(note.startswith("peer-a — " + "가" * report.NOTE_DETAIL_CLIP))
+        self.assertNotIn("가" * (report.NOTE_DETAIL_CLIP + 1), note)     # 200자 초과분은 잘림
+        self.assertLess(len(note), len("peer-a — ") + report.NOTE_DETAIL_CLIP + 20)
+
+    def test_same_sender_messages_in_one_turn_collapse_to_one_note(self):
+        for i, ts in enumerate(("01:00:00", "01:00:05")):
+            am = f'<agent-message from="impl-a">진행 {i}</agent-message>'
+            _ev(self.c, f"2026-08-27T{ts}Z", "prompt", {"prompt": am})
+        _ev(self.c, "2026-08-27T01:05:00Z", "turn_done", {"summary": "확인"})
+        t = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual(len(t["notes"]), 1)                  # 기존 방식: 같은 제목은 첫 건만
+        self.assertTrue(t["notes"][0].startswith("impl-a — 진행 0"))
+
+    def test_other_injected_messages_are_dropped_without_notes(self):
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "실제 지시"})
+        for i, tag in enumerate(("<system-reminder>r</system-reminder>", "<command-name>/x</command-name>",
+                                 "<local-command-stdout>o</local-command-stdout>")):
+            _ev(self.c, f"2026-08-27T01:00:{10 + i}Z", "prompt", {"prompt": tag})
+        _ev(self.c, "2026-08-27T01:05:00Z", "turn_done", {"summary": "완료"})
+        t = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual((t["prompts"], t["notes"]), (["실제 지시"], []))
+
+    def test_noise_constant_is_gone_and_question_reply_stays_a_prompt(self):
+        self.assertFalse(hasattr(report, "NOISE"))
+        _ev(self.c, "2026-08-27T01:00:00Z", "prompt",
+            {"prompt": "<send_user_message_question_reply>예</send_user_message_question_reply>"})
+        _ev(self.c, "2026-08-27T01:01:00Z", "turn_done", {"summary": "진행"})
+        t = report.gather(self.c, "day", "2026-08-27")["proj"]["sessions"][0]["turns"][0]
+        self.assertEqual(len(t["prompts"]), 1)
+
     def test_last_event_at(self):
         _ev(self.c, "2026-08-27T01:00:00Z", "prompt", {"prompt": "x"})
         _ev(self.c, "2026-08-27T03:00:00Z", "turn_done", {"summary": "y"})

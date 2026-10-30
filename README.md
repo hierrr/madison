@@ -46,6 +46,10 @@ push a piece of work from one machine to another without walking over to it.
   detected by a hub-side TTL, not just by an end-of-session hook that may never fire.
 - **Task summaries** — each session's instruction is condensed to one line by a
   small model on the hub (never on the device, never in the hook's critical path).
+  The latest instruction is what gets summarized, but a short follow-up ("go ahead",
+  "commit and push") is read against the earlier instructions and the agent's replies in the same session.
+  Agent notifications and messages from other sessions are not treated as human
+  instructions, in summaries and reports alike.
 - **Session traceability** — every session id is one click away and can be resumed
   on its machine with `claude --resume <id>` or `codex resume <id>`.
 - **Session names** — the name you give a Claude Code session with `/rename` (or its

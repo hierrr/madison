@@ -35,6 +35,20 @@ def _parse_ts(ts: str) -> datetime | None:
         return None
 
 
+# 사람이 친 지시가 아닌데 UserPromptSubmit으로 들어와 prompt 이벤트가 되는 주입 메시지(백그라운드 완료 알림·시스템 주입·
+# 슬래시 명령 출력·다른 세션/에이전트가 보낸 메시지)의 시작 태그 — '사람 지시가 아닌 프롬프트'의 단일 정의로 세션 현황·요약·리포트가 함께 쓴다.
+# Codex 앱의 <send_user_message_question_reply>는 에이전트 질문에 사람이 답한 입력이라 일부러 넣지 않았다.
+NOTIFICATION_PREFIXES = ("<task-notification",)                           # 백그라운드 작업 알림
+MESSAGE_PREFIXES = ("<cross-session-message", "<agent-message")           # 다른 세션·에이전트가 보낸 메시지
+INJECTED_PREFIXES = (NOTIFICATION_PREFIXES + ("<system-reminder", "<command", "<local-command")
+                     + MESSAGE_PREFIXES)
+PROMPT_CAP = 600   # sessions.last_prompt에 보존하는 지시 길이 — events 원문과 견줄 때도 같은 길이로 자른다
+
+
+def is_injected(text) -> bool:
+    return isinstance(text, str) and text.lstrip().startswith(INJECTED_PREFIXES)
+
+
 SYNTHETIC_MODEL = "<synthetic>"   # Claude Code가 API 응답 없이 로컬 생성한 메시지의 model 표식
 # Codex 데스크톱 앱이 사용자 몰래 돌리는 보조 프롬프트의 서명 — "다음 입력 제안"(fork 세션)과 "프로젝트 추천 생성"(startup 세션)
 APP_GENERATED_RE = re.compile(
@@ -173,9 +187,10 @@ def ingest(c, device_id: int, ev: dict) -> str:
 
     # 이벤트별 부가 필드 (카운터·요약은 지연 도착과 무관하게 반영)
     if event == "prompt":
-        # 새 지시 → 요약 무효화 (요약 품질을 위해 원문을 넉넉히 보존)
-        sets += ["last_prompt=?", "task_summary=NULL"]
-        args += [str(payload.get("prompt", ""))[:600]]
+        # 새 지시 → 요약 무효화 (요약 품질을 위해 원문을 넉넉히 보존). 주입 메시지는 지시가 아니라 건너뛴다
+        if not is_injected(payload.get("prompt")):
+            sets += ["last_prompt=?", "task_summary=NULL"]
+            args += [str(payload.get("prompt", ""))[:PROMPT_CAP]]
     elif event == "turn_done":
         # 턴 수는 에이전트 종류와 무관하게 완료 이벤트 기준으로 통일한다.
         sets += ["turns=turns+1", "last_summary=?", "current_tool=NULL"]
