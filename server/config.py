@@ -113,7 +113,9 @@ class Config:
 
         # 현황 KPI의 구독 한도(Claude·Codex) — 허브가 직접 수집. USAGE=0이면 끔
         self.usage_enabled = get("USAGE", "1") == "1"
+        # 프로바이더마다 수집 주기가 따로다 — Claude(엔드포인트가 429를 내므로 느리게)·Codex(매번 app-server 기동)
         self.usage_poll_sec = max(60, int(get("USAGE_POLL_SEC", "180")))
+        self.usage_codex_poll_sec = max(30, int(get("USAGE_CODEX_POLL_SEC", "60")))
 
     def llm_timeout(self, site: str) -> int:
         return self._llm_timeouts.get(site, self._llm_timeouts["report"])

@@ -1,23 +1,31 @@
 """Claude Code·Codex 구독 한도 — 허브가 직접 수집한다(외부 도구·파일 의존 없음).
 
 - Claude: Claude Code가 macOS 키체인("Claude Code-credentials") 또는 ~/.claude/.credentials.json에 두는 OAuth
-  액세스 토큰으로 /usage가 부르는 읽기 전용 엔드포인트를 조회한다. 토큰은 메모리에만 두고 기록하지 않는다.
+  액세스 토큰으로 읽기 전용 엔드포인트 셋을 조회한다 — /api/oauth/usage(한도 창), /api/oauth/profile(플랜 표시명
+  organization.plan_display_name·조직 uuid), /api/oauth/organizations/{uuid}/prepaid/credits(사용 크레딧 잔액).
+  자격증명의 subscriptionType은 로그인 시점 값이라 갱신되지 않으므로 플랜에 쓰지 않는다. 토큰·조직 uuid는
+  메모리에만 두고 기록하지 않는다.
   만료·거절(401)이면 이번 회차는 건너뛴다 — Claude Code를 쓰면 토큰이 갱신되어 다음 회차에 회복된다(자체 갱신은
   세션·훅을 유발하므로 하지 않는다).
 - Codex: `codex app-server --stdio` JSON-RPC(initialize → initialized → account/rateLimits/read). 실패하면
   ~/.codex/sessions 최신 전사본의 token_count 스냅샷으로 대체.
 한도는 계정 단위라 허브 기기 하나에서 읽으면 된다.
 """
+import hashlib
+import http.client
 import json
 import logging
+import math
 import os
 import queue
 import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
 from . import db
@@ -28,17 +36,23 @@ _STORE_KEY = "usage.snapshot"     # settings 테이블에 마지막 성공값 �
 
 PROVIDERS = ("claude", "codex")
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+CLAUDE_CREDITS_URL = "https://api.anthropic.com/api/oauth/organizations/{org}/prepaid/credits"
 CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CLAUDE_CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
-CODEX_RPC_TTL = 300          # 초 — app-server(node 프로세스)를 매 회차 띄우지 않도록 결과 재사용
 
 _lock = threading.Lock()
 _snap: dict = {p: None for p in PROVIDERS}
-_codex_cache: dict = {"at": 0.0, "parsed": None}
 _claude_backoff_until = 0.0
 CLAUDE_BACKOFF_SEC = 600     # 429(과호출) 뒤 쉬는 시간 — 같은 계정을 다른 도구도 조회할 수 있다
+CLAUDE_PROFILE_TTL = 3600    # 초 — 플랜 표시명은 거의 안 바뀐다
+CLAUDE_CREDITS_TTL = 600     # 초 — 크레딧 잔액 재조회 간격
+CLAUDE_AUX_RETRY_SEC = 600   # 초 — 프로필·크레딧 조회가 실패(429 포함)한 뒤 다시 시도하기까지 쉬는 시간
+# 부가 정보 캐시 — fp는 토큰 지문(메모리 전용). 계정이 바뀌면 다른 계정의 값을 내지 않도록 비운다.
+_claude_profile_cache: dict = {"at": 0.0, "plan": None, "org": "", "fp": "", "failed_at": 0.0}
+_claude_credits_cache: dict = {"at": 0.0, "entry": None, "fp": "", "failed_at": 0.0}
 
 
 class UsageError(RuntimeError):
@@ -122,8 +136,9 @@ def claude_oauth() -> dict:
     return oauth
 
 
-def claude_fetch(token: str, timeout: float = 15) -> dict:
-    req = urllib.request.Request(CLAUDE_USAGE_URL, headers={
+def claude_get(url: str, token: str, label: str = "usage", timeout: float = 15, backoff: bool = False) -> dict:
+    """Claude OAuth GET → JSON 객체. 401 처리는 공통. 429는 backoff=True(usage)일 때만 전체 호출 백오프를 건다."""
+    req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json",
         "anthropic-beta": CLAUDE_OAUTH_BETA, "User-Agent": "madison-hub/usage"})
     try:
@@ -133,15 +148,21 @@ def claude_fetch(token: str, timeout: float = 15) -> dict:
         if exc.code == 401:
             raise UsageError("토큰 거절(401) — Claude Code를 한 번 쓰면 갱신됨") from exc
         if exc.code == 429:
+            if not backoff:
+                raise UsageError(f"{label} HTTP 429") from exc
             global _claude_backoff_until
             _claude_backoff_until = time.time() + CLAUDE_BACKOFF_SEC
-            raise UsageError(f"usage HTTP 429 — {CLAUDE_BACKOFF_SEC // 60}분 뒤 재시도") from exc
-        raise UsageError(f"usage HTTP {exc.code}") from exc
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        raise UsageError(f"usage 조회 실패: {exc}") from exc
+            raise UsageError(f"{label} HTTP 429 — {CLAUDE_BACKOFF_SEC // 60}분 뒤 재시도") from exc
+        raise UsageError(f"{label} HTTP {exc.code}") from exc
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
+        raise UsageError(f"{label} 조회 실패: {exc}") from exc
     if not isinstance(data, dict):
-        raise UsageError("usage 응답이 객체가 아님")
+        raise UsageError(f"{label} 응답이 객체가 아님")
     return data
+
+
+def claude_fetch(token: str, timeout: float = 15) -> dict:
+    return claude_get(CLAUDE_USAGE_URL, token, "usage", timeout, backoff=True)
 
 
 def _scope_name(item: dict):
@@ -183,15 +204,139 @@ def parse_claude(data: dict) -> list:
     return windows
 
 
+def parse_profile(data: dict) -> tuple[str, str]:
+    """/api/oauth/profile → (플랜 표시명, 조직 uuid). 없으면 빈 문자열."""
+    org = data.get("organization") if isinstance(data, dict) else None
+    if not isinstance(org, dict):
+        return "", ""
+    plan = org.get("plan_display_name")
+    uuid = org.get("uuid")
+    return (plan.strip() if isinstance(plan, str) else ""), (uuid.strip() if isinstance(uuid, str) else "")
+
+
+def format_money(minor: int, currency: str, exponent: int = 2) -> str:
+    """최소 단위 정수 → 'USD'는 '$12.34', 그 외는 '12.34 EUR'. 음수는 '-$1.50'."""
+    exponent = exponent if isinstance(exponent, int) and not isinstance(exponent, bool) and exponent >= 0 else 2
+    sign = "-" if minor < 0 else ""
+    whole, frac = divmod(abs(int(minor)), 10 ** exponent)
+    num = str(whole)
+    if exponent:
+        num += "." + str(frac).zfill(exponent)
+    cur = str(currency or "").strip().upper()
+    if cur == "USD":
+        return f"{sign}${num}"
+    return f"{sign}{num} {cur}".rstrip()
+
+
+def parse_credits(data: dict, enabled) -> dict | None:
+    """/prepaid/credits → extras 항목. amount가 숫자가 아니면 None. amount는 최소 단위(센트)."""
+    if not isinstance(data, dict):
+        return None
+    amount = data.get("amount")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return None
+    if not math.isfinite(amount):       # JSON NaN/Infinity
+        return None
+    amount = int(amount)
+    currency = data.get("currency")
+    currency = currency.strip().upper() if isinstance(currency, str) and currency.strip() else "USD"
+    balance = data.get("balance")
+    credits = balance.get("credits") if isinstance(balance, dict) else None
+    exponent = credits.get("exponent") if isinstance(credits, dict) else None
+    if isinstance(exponent, bool) or not isinstance(exponent, int):
+        exponent = 2
+    return {"title": "Credits", "value": format_money(amount, currency, exponent), "amount": amount,
+            "currency": currency, "enabled": enabled if isinstance(enabled, bool) else None,
+            "expires_at": to_epoch(data.get("next_expires_at"))}
+
+
+def _fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _claude_profile(token: str, now: float) -> tuple[str, str]:
+    """(플랜, 조직 uuid) — TTL 캐시. 실패하면 마지막 값 유지(모듈 캐시 → 스냅샷 플랜 → 빈 값).
+    실패 뒤 CLAUDE_AUX_RETRY_SEC 동안은 다시 부르지 않는다. 토큰(계정)이 바뀌면 캐시를 비운다."""
+    cache = _claude_profile_cache
+    fp = _fingerprint(token)
+    if cache["fp"] != fp:
+        cache.update(at=0.0, plan=None, org="", fp=fp, failed_at=0.0)
+    if cache["plan"] is not None and now - cache["at"] < CLAUDE_PROFILE_TTL:
+        return cache["plan"], cache["org"]
+    if not (cache["failed_at"] and now - cache["failed_at"] < CLAUDE_AUX_RETRY_SEC):
+        try:
+            plan, org = parse_profile(claude_get(CLAUDE_PROFILE_URL, token, "profile"))
+            if plan:
+                cache.update(at=now, plan=plan, org=org or cache["org"], failed_at=0.0)
+                return plan, cache["org"]
+            log.info("claude profile에 플랜 표시명 없음")
+        except UsageError as exc:
+            log.info("claude profile 조회 실패: %s", exc)
+        except Exception as exc:        # 부가 정보가 한도 창 기록을 막지 않게
+            log.info("claude profile 처리 오류: %s", type(exc).__name__)
+        cache["failed_at"] = now
+    if cache["plan"]:
+        return cache["plan"], cache["org"]
+    with _lock:
+        prev = _snap.get("claude")
+    return (str(prev.get("plan") or "") if isinstance(prev, dict) else ""), cache["org"]
+
+
+def _claude_credits(token: str, org: str, enabled, now: float) -> dict | None:
+    """사용 크레딧 extras 항목 — TTL 캐시, 실패하면 마지막 항목 유지(모듈 캐시 → 스냅샷 extras), 없으면 None.
+    실패 뒤 CLAUDE_AUX_RETRY_SEC 동안은 다시 부르지 않는다. 토큰(계정)이 바뀌면 캐시를 비운다."""
+    cache = _claude_credits_cache
+    fp = _fingerprint(token)
+    if cache["fp"] != fp:
+        cache.update(at=0.0, entry=None, fp=fp, failed_at=0.0)
+    entry = None
+    if cache["entry"] is not None and now - cache["at"] < CLAUDE_CREDITS_TTL:
+        entry = cache["entry"]
+    elif (org and time.time() >= _claude_backoff_until
+          and not (cache["failed_at"] and now - cache["failed_at"] < CLAUDE_AUX_RETRY_SEC)):
+        try:
+            url = CLAUDE_CREDITS_URL.format(org=urllib.parse.quote(org, safe=""))
+            entry = parse_credits(claude_get(url, token, "credits"), enabled)
+            if entry is None:
+                log.info("claude credits 응답에 amount 없음")
+                cache["failed_at"] = now
+            else:
+                cache.update(at=now, entry=entry, failed_at=0.0)
+        except UsageError as exc:
+            log.info("claude credits 조회 실패: %s", exc)
+            cache["failed_at"] = now
+        except Exception as exc:        # 부가 정보가 한도 창 기록을 막지 않게
+            log.info("claude credits 처리 오류: %s", type(exc).__name__)
+            cache["failed_at"] = now
+    if entry is None:
+        entry = cache["entry"]
+    if entry is None:
+        with _lock:
+            prev = _snap.get("claude")
+        for ex in (prev.get("extras") if isinstance(prev, dict) else None) or []:
+            if isinstance(ex, dict) and ex.get("title") == "Credits":
+                entry = ex
+                break
+    # on/off는 매 회차 usage 응답의 값을 쓴다(잔액 캐시와 별개로 갱신)
+    return {**entry, "enabled": enabled if isinstance(enabled, bool) else None} if entry else None
+
+
 def collect_claude(now=None) -> dict:
     if time.time() < _claude_backoff_until:
         raise UsageError("429 백오프 중")
     oauth = claude_oauth()
-    windows = parse_claude(claude_fetch(str(oauth["accessToken"])))
+    token = str(oauth["accessToken"])
+    usage = claude_fetch(token)
+    windows = parse_claude(usage)
     if not windows:
         raise UsageError("usage 응답에 한도 창이 없음")
-    plan = str(oauth.get("subscriptionType") or "").strip()
-    return {"plan": plan.capitalize() if plan else "", "windows": _finish(windows, now), "extras": [],
+    # 플랜·크레딧은 부가 정보 — 실패해도 한도 창 기록은 막지 않는다. subscriptionType은 로그인 시점 값이라 쓰지 않는다.
+    t = time.time()
+    plan, org = _claude_profile(token, t)
+    extra_usage = usage.get("extra_usage")
+    enabled = extra_usage.get("is_enabled") if isinstance(extra_usage, dict) else None
+    credits = _claude_credits(token, org, enabled, t)
+    return {"plan": plan, "windows": _finish(windows, now), "extras": [credits] if credits else [],
             "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now or time.time()))}
 
 
@@ -284,17 +429,51 @@ def _window_title(minutes) -> str:
     return f"{v}m"
 
 
+def format_credit_count(balance) -> str | None:
+    """크레딧 잔액(십진 문자열 등) → 표시 문자열. 정수면 "12", 아니면 소수 2자리까지 0 제거("12.5").
+    파싱 불가·비유한(NaN/inf)·bool 등은 None."""
+    if isinstance(balance, bool) or not isinstance(balance, (str, int, float)):
+        return None
+    try:
+        d = Decimal(str(balance).strip())
+        if not d.is_finite():
+            return None
+        q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)  # 유효숫자 과다(1e30 등)면 InvalidOperation
+    except (InvalidOperation, ValueError):
+        return None
+    text = format(q, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
+def _normalize_credits(raw) -> dict | None:
+    """RPC(camelCase)·전사본(snake_case) credits 객체 → {balance, unlimited, has_credits}. 없거나 깨지면 None."""
+    if not isinstance(raw, dict):
+        return None
+    balance = raw.get("balance")
+    if balance is None or isinstance(balance, bool) or not isinstance(balance, (str, int, float)):
+        balance = None
+    has = raw.get("hasCredits", raw.get("has_credits"))
+    unlimited = raw.get("unlimited")
+    if balance is None and unlimited is not True:
+        return None  # 쓸 만한 잔액도 무제한 표시도 없으면 폴백 후보에서 제외
+    return {"balance": str(balance) if balance is not None else None,
+            "unlimited": unlimited is True, "has_credits": has is True}
+
+
 def parse_codex_rpc(result: dict) -> dict:
-    """account/rateLimits/read 결과 → {windows, plan, reset_credits}."""
+    """account/rateLimits/read 결과 → {windows, plan, credits, reset_credits}."""
     by_id = result.get("rateLimitsByLimitId")
     if not isinstance(by_id, dict) or not by_id:
         single = result.get("rateLimits")
         by_id = {"codex": single} if isinstance(single, dict) else {}
-    windows, plan = [], None
+    windows, plan, cr_norm = [], None, None
     for limit_id, limit in by_id.items():
         if not isinstance(limit, dict):
             continue
         plan = plan or limit.get("planType")
+        cr_norm = cr_norm or _normalize_credits(limit.get("credits"))
         for slot in ("primary", "secondary", "individualLimit"):
             win = limit.get(slot)
             if not isinstance(win, dict):
@@ -307,9 +486,11 @@ def parse_codex_rpc(result: dict) -> dict:
                         float(mins) if isinstance(mins, (int, float)) else 1e9)
             if w:
                 windows.append(w)
+    if cr_norm is None and isinstance(result.get("rateLimits"), dict):
+        cr_norm = _normalize_credits(result["rateLimits"].get("credits"))
     credits = result.get("rateLimitResetCredits")
     avail = credits.get("availableCount") if isinstance(credits, dict) else None
-    return {"windows": windows, "plan": plan,
+    return {"windows": windows, "plan": plan, "credits": cr_norm,
             "reset_credits": int(avail) if isinstance(avail, (int, float)) else None}
 
 
@@ -351,7 +532,8 @@ def parse_codex_transcript(rl: dict) -> dict:
                         float(mins) if isinstance(mins, (int, float)) else 1e9)
             if w:
                 windows.append(w)
-    return {"windows": windows, "plan": rl.get("plan_type"), "reset_credits": None}
+    return {"windows": windows, "plan": rl.get("plan_type"), "reset_credits": None,
+            "credits": _normalize_credits(rl.get("credits"))}
 
 
 def codex_fallback(exc: UsageError, now: float) -> dict:
@@ -376,21 +558,31 @@ def codex_fallback(exc: UsageError, now: float) -> dict:
 
 def collect_codex(now=None) -> dict:
     now = now or time.time()
-    parsed = _codex_cache["parsed"] if now - _codex_cache["at"] < CODEX_RPC_TTL else None
-    if parsed is None:
-        try:
-            parsed = {**parse_codex_rpc(codex_rpc()), "seen_at": now}
-        except UsageError as exc:
-            log.info("codex RPC 실패 — 전사본 대체 시도: %s", exc)
-            parsed = codex_fallback(exc, now)
-        _codex_cache.update(at=now, parsed=parsed)
+    # 호출 때마다 RPC를 읽는다 — 수집 주기는 loop()의 프로바이더별 주기(USAGE_CODEX_POLL_SEC)가 단일 출처
+    try:
+        parsed = {**parse_codex_rpc(codex_rpc()), "seen_at": now}
+    except UsageError as exc:
+        log.info("codex RPC 실패 — 전사본 대체 시도: %s", exc)
+        parsed = codex_fallback(exc, now)
     if not parsed.get("windows"):
         raise UsageError("Codex 응답에 한도 창이 없음")
     plan = str(parsed.get("plan") or "").strip()
     extras = []
+    # extras 순서(Reset credits → Credits)는 여기가 단일 출처 — 프런트는 목록 순서대로 그린다.
     if isinstance(parsed.get("reset_credits"), int):
         extras.append({"title": "Reset credits", "value": f"{parsed['reset_credits']} available",
                        "count": parsed["reset_credits"]})
+    # 크레딧은 부가 정보라 어떤 예외든 항목만 생략하고 한도 창·Reset 행을 막지 않는다.
+    try:
+        cr = parsed.get("credits")
+        if isinstance(cr, dict):
+            unlimited = cr.get("unlimited") is True
+            count = format_credit_count(cr.get("balance"))
+            if unlimited or count is not None:
+                extras.append({"title": "Credits", "value": "unlimited" if unlimited else count,
+                               "unlimited": unlimited, "has_credits": cr.get("has_credits") is True})
+    except Exception as exc:
+        log.info("codex 크레딧 항목 생략: %s", type(exc).__name__)
     return {"plan": plan.capitalize() if plan else "", "windows": _finish(parsed["windows"], now),
             "extras": extras, "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(parsed["seen_at"]))}
 
@@ -594,10 +786,12 @@ def history(c, days: int = 30) -> dict:
     return {**out, "from": int(frm) if frm else None, "to": int(now)}
 
 
-def refresh() -> dict:
-    """두 프로바이더를 한 번 수집. 실패한 쪽은 마지막 성공값을 유지하고 error만 붙인다."""
+def refresh(providers=PROVIDERS) -> dict:
+    """주어진 프로바이더(기본 둘 다)를 한 번 수집. 실패한 쪽은 마지막 성공값을 유지하고 error만 붙인다."""
     changed = False
-    for name, fn in (("claude", collect_claude), ("codex", collect_codex)):
+    collectors = {"claude": collect_claude, "codex": collect_codex}
+    for name in providers:
+        fn = collectors[name]
         try:
             data = fn()
             data["error"] = ""
@@ -638,11 +832,28 @@ def snapshot() -> dict:
     return out
 
 
-def loop():
+def poll_intervals() -> dict:
+    """프로바이더별 수집 주기(초) — 설정에서 매번 읽는다."""
+    return {"claude": CFG.usage_poll_sec, "codex": CFG.usage_codex_poll_sec}
+
+
+def due_providers(next_due: dict, now: float) -> list:
+    """다음 수집 시각이 지난 프로바이더(PROVIDERS 순서)."""
+    return [p for p in PROVIDERS if next_due.get(p, 0.0) <= now]
+
+
+def loop(sleep=time.sleep, clock=time.monotonic):
     load_persisted()
+    next_due = {p: 0.0 for p in PROVIDERS}      # 첫 회차는 전부 즉시
     while True:
-        try:
-            refresh()
-        except Exception:
-            log.exception("usage loop 오류")
-        time.sleep(CFG.usage_poll_sec)
+        started = clock()
+        due = due_providers(next_due, started)
+        intervals = poll_intervals()
+        for p in due:
+            next_due[p] = started + intervals[p]     # 시도 시작 기준 — 느린 RPC가 주기를 밀지 않고, 실패해도 같다
+        if due:
+            try:
+                refresh(tuple(due))
+            except Exception:
+                log.exception("usage loop 오류")
+        sleep(max(0.0, min(next_due.values()) - clock()))

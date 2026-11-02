@@ -90,6 +90,11 @@ push a piece of work from one machine to another without walking over to it.
 - **Subscription usage** — the overview shows Claude Code and Codex rate-limit
   windows (5-hour, weekly, reset credits) with bars and warning colors; the hub
   reads them itself from the providers' own endpoints (see Security model).
+  Claude's plan name comes from the account profile (`plan_display_name`), so a
+  provider-side rename shows up without re-login (within an hour — the profile
+  is cached). The Claude tile also shows the usage-credit balance with its
+  on/off state and next expiry; the Codex tile shows its credit balance below
+  the reset credits.
   Plan changes (e.g. Team → Pro) are recorded and marked on the usage tab's
   history chart, since windows and quotas differ between plans.
   The gauges are **for the account signed in on the hub machine** — limits are
@@ -354,6 +359,9 @@ The last 5 generated versions of each report are kept (`report_versions`, restor
 - **Report generation runs in a separate worker process** (`python -m server.genworker`), so restarting or
   redeploying the hub never loses an in-flight LLM call; the hub only launches workers and shows their state
   (`report_jobs`). One worker at a time.
+- **Subscription gauges only make read-only calls.** The hub reads the account profile (plan name) and the
+  usage-credit balance with the same OAuth token it uses for the usage endpoint; the token and the
+  organization id stay in memory and are never logged or stored.
 - **Hub LLM calls are isolated.** `claude -p` runs with `--safe-mode --tools "" --no-session-persistence
   --disable-slash-commands` (codex: `--ephemeral -s read-only`) from a non-repository directory, so the
   user's CLAUDE.md, plugins, hooks, MCP servers and skills never reach the summarizer or the report
@@ -410,7 +418,8 @@ Then revoke the device from the dashboard's **Devices** tab so its token stops b
 | `DIGEST_MODEL` | `claude-sonnet-5` | Model that pre-compresses long sessions when a project block exceeds its budget — extraction work, so a cheaper model than the report model is fine |
 | `LLM_TIMEOUT_SUMMARY` / `LLM_TIMEOUT_DIGEST` / `LLM_TIMEOUT_REPORT` | `90` / `300` / `900` | Per-site timeout (seconds) for hub LLM calls. A failed or timed-out call never overwrites a stored report — the failure is recorded and shown instead |
 | `LLM_CWD` | `~/.madison/llm-cwd` | Working directory for hub LLM calls — outside any repository so the CLI sees no git context |
-| `USAGE` / `USAGE_POLL_SEC` | `1` / `180` | Claude / Codex subscription-limit tiles on the overview. The hub reads them itself: Claude via the OAuth token Claude Code keeps in the macOS Keychain (read-only usage endpoint, token never stored), Codex via `codex app-server` RPC. `USAGE=0` hides the tiles |
+| `USAGE` / `USAGE_POLL_SEC` | `1` / `180` | Claude / Codex subscription-limit tiles on the overview. The hub reads them itself: Claude via the OAuth token Claude Code keeps in the macOS Keychain (read-only usage, profile and credit-balance endpoints — plan name from the profile's `plan_display_name`; token never stored), Codex via `codex app-server` RPC. `USAGE=0` hides the tiles. `USAGE_POLL_SEC` is the Claude read interval (seconds, min 60) |
+| `USAGE_CODEX_POLL_SEC` | `60` | Codex read interval (seconds, min 30) — each read starts a short-lived `codex app-server`; kept separate because the Claude usage endpoint rate-limits (429) at faster cadences |
 | `REPORT_DAILY_CRON` / `REPORT_WEEKLY_CRON` / `REPORT_MONTHLY_CRON` | `0 * * * *` / `15 */4 * * *` / `45 */8 * * *` | Local-time cron (5 fields) at which each report is regenerated — only if something changed since the last version. A brand-new day/week/month gets its first report immediately; a hub restart never triggers generation. Generation runs in a separate worker process |
 | `REPORT_EXCLUDE_PROJECTS` | *(empty)* | Comma-separated projects to keep out of reports — drops the project's own section and any log line from other projects that mentions its name |
 | `REPORT_SERVICE_MAP` | *(empty)* | Comma-separated `project=service` pairs setting each report's top-level grouping (e.g. `web=Acme, api=Acme`). Unmapped projects use their own name; projects with different service names are never merged |

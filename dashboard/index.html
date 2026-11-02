@@ -193,8 +193,8 @@
   .u-row.u-50 .val { color: #e6c229; }
   .u-row.u-70 .val { color: #f08a24; }
   .u-row.u-90 .val { color: var(--crit); }
-  .u-credits { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; overflow: hidden; }
-  .u-credits i { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
+  .u-credits { display: flex; flex-wrap: wrap; gap: 3px; overflow: hidden; }
+  .u-credits i { width: 10px; height: 6px; border-radius: 2px; background: var(--accent); }   /* 높이·위치는 한도 진행바(.track)와 같게 */
   .u-row.text .val { color: var(--ink-2); }
   .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px 12px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 2px; min-height: 108px; }
   .tile .t-label { font-size: 12px; color: var(--ink-2); }
@@ -940,7 +940,7 @@
       var cap = p === 'claude' ? 'Claude' : 'Codex';
       var d = u[p], plan = document.getElementById('u' + cap + 'Plan'), rows = document.getElementById('u' + cap + 'Rows');
       document.getElementById('tile' + cap).classList.toggle('off', !d);
-      if (!d) { plan.textContent = ''; rows.innerHTML = ''; return; }
+      if (!d) { plan.textContent = ''; rows.innerHTML = ''; rows._html = ''; return; }
       plan.textContent = d.plan ? '· ' + d.plan : '';
       var html = (d.windows || []).map(function (w) { return usageRow(w.title.replace(' all models', ' 전체'), w.pct, w.left); }).join('');
       html += (d.extras || []).map(function (x) {
@@ -949,6 +949,14 @@
           for (var i = 0; i < Math.min(n, 12); i++) sq += '<i></i>';
           return '<div class="u-row text"><div class="head"><span class="lbl">초기화</span><span class="val">' + n + '</span></div>' +
             (n ? '<span class="u-credits">' + sq + '</span>' : '') + '</div>';
+        }
+        if (x.title === 'Credits') {
+          // 사용 크레딧: 꺼짐이면 한도 도달 시 크레딧을 안 쓴다는 설명을 공용 data-d 툴팁으로 (title은 5초 재렌더로 사라진다)
+          var cv = x.unlimited === true ? '무제한' : esc(x.value), off = x.enabled === false;
+          if (off) cv += ' · 꺼짐';
+          if (typeof x.expires_at === 'number') cv += ' · ' + fmtEpoch(x.expires_at, true) + ' 만료';
+          return '<div class="u-row text"><div class="head"><span class="lbl">크레딧</span><span class="val"' +
+            (off ? ' data-d="' + esc('플랜 한도에 닿아도 크레딧을 쓰지 않음 — claude.ai 설정에서 켤 수 있음') + '"' : '') + '>' + cv + '</span></div></div>';
         }
         return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
       }).join('');
@@ -2097,7 +2105,10 @@
 
   // 한도 % 계단선 차트 — 라이브러리 없이 인라인 SVG (뷰박스 고정, 폭에 맞춰 비율 유지 스케일)
   // resets: {win: [{ts, from, to, early}]} — 조기(프로바이더 발) 리셋만 마커로 표시
-  function svgSteps(windows, from, to, resets, planChanges) {
+  // live: 지금 존재하는 창 이름 배열(null/undefined = 모름 → 전부 연장). 목록에 없는 창은 사라진 것 —
+  // 마지막 점에서 선을 끊고, 그 이후 시점의 호버/레전드 값도 내지 않는다.
+  function svgSteps(windows, from, to, resets, planChanges, live) {
+    var isLive = function (w) { return !Array.isArray(live) || live.indexOf(w) >= 0; };
     var names = Object.keys(windows);
     if (!names.length) return '<div class="none">아직 기록 없음 — 한도가 변할 때마다 쌓입니다</div>';
     var W = 640, H = 150, L = 30, R = 6, T = 8, B = 16;
@@ -2125,7 +2136,7 @@
       if (!s.length) return;
       var d = 'M' + x(s[0][0]) + ' ' + y(s[0][1]);
       for (var j = 1; j < s.length; j++) d += 'H' + x(s[j][0]) + 'V' + y(s[j][1]);   // step-after
-      d += 'H' + x(to);   // 마지막 값을 우측 끝까지 연장
+      if (isLive(w)) d += 'H' + x(to);   // 마지막 값을 우측 끝까지 연장 (사라진 창은 마지막 점에서 끝)
       out += '<path class="w" d="' + d + '" style="stroke:' + WINCOLORS[i % WINCOLORS.length] + '"/>';
     });
     // 호버 스트립 — 버킷마다 각 창의 값 (공용 #tip 위임 핸들러가 data-d를 읽는다)
@@ -2136,7 +2147,8 @@
     for (var b = 0; b < NB; b++) {
       var t = Math.min(to, from + (b + 1) / NB * (to - from) - 1);
       var parts = names.map(function (w) {
-        var v = stepAt(windows[w], t);
+        var ws = windows[w];
+        var v = !isLive(w) && ws.length && t > ws[ws.length - 1][0] ? null : stepAt(ws, t);   // 사라진 창은 마지막 점 이후 값 없음
         return v == null ? null : w.replace(' all models', ' 전체') + ' ' + v + '%';
       }).filter(Boolean);
       if (!parts.length) continue;
@@ -2177,7 +2189,7 @@
     out += '</svg><div class="ulegend">' + names.map(function (w, i) {
       var s = windows[w], last = s.length ? s[s.length - 1][1] : null;
       return '<span><i style="background:' + WINCOLORS[i % WINCOLORS.length] + '"></i>' +
-        esc(w.replace(' all models', ' 전체')) + (last == null ? '' : ' <span class="mono">' + last + '%</span>') + '</span>';
+        esc(w.replace(' all models', ' 전체')) + (last == null ? '' : ' <span class="mono">' + (isLive(w) ? last + '%' : '종료') + '</span>') + '</span>';
     }).join('') + (earlyN ? '<span class="reset-note">● 조기 리셋 ' + earlyN + '회</span>' : '') +
       (planN ? '<span class="plan-note">● 플랜 변경 ' + planN + '회</span>' : '') + '</div>';
     return out;
@@ -2304,7 +2316,7 @@
       var cap = p === 'claude' ? 'Claude' : 'Codex';
       return '<section class="panel"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
         cap + (d.plan ? ' · ' + esc(d.plan) : '') + '</h2>' +
-        '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}, d.plan_changes || []) + '</div></section>';
+        '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}, d.plan_changes || [], d.live) + '</div></section>';
     }
     function stat(label, val) {
       return '<div class="mstat"><div class="ml">' + label + '</div><div class="mv">' + val + '</div></div>';

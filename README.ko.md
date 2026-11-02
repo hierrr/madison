@@ -74,6 +74,10 @@ Mac 여러 대(그리고 Windows)에서 **Claude Code**와 **Codex**를 함께 �
   52주 스트릭 잔디 — 월 표시, 좌우 스크롤, 처음엔 최신 주가 보임)도 함께 보여줍니다.
 - **구독 사용량** — 현황에 Claude Code·Codex의 한도 창(5시간·주간·초기화 크레딧)을 바와
   경고색으로 보여줍니다. 허브가 프로바이더의 엔드포인트에서 직접 읽습니다(보안 모델 참고).
+  Claude 플랜 이름은 계정 프로필(`plan_display_name`)에서 가져옵니다. 프로바이더가
+  이름을 바꾸면 재로그인 없이 최대 1시간 안에(프로필 캐시) 반영됩니다. Claude 타일에는 사용
+  크레딧 잔액을 켜짐/꺼짐 상태·다음 만료일과 함께, Codex 타일에는 초기화 크레딧 아래에
+  크레딧 잔액을 표시합니다.
   플랜이 바뀌면(예: Team → Pro) 기록해 사용량 탭 이력 차트에 변경 마커로 표시합니다 —
   플랜마다 창 구성과 한도가 달라 전후 %는 비교 대상이 아니기 때문입니다.
   게이지는 **허브 기기에 로그인된 계정 기준**입니다 — 한도는 계정 단위라 같은 계정을 쓰는
@@ -300,6 +304,8 @@ macOS 수집기보다 기능이 뒤처지는** 베타입니다(예: 백그라운
   올립니다(64KB / 1MB 상한).
 - **리포트 생성은 별도 워커 프로세스**(`python -m server.genworker`)에서 돕니다. 허브를 재시작·재배포해도 진행 중인
   LLM 호출이 버려지지 않고, 허브는 워커를 띄우고 상태(`report_jobs`)만 보여 줍니다. 워커는 한 번에 하나.
+- **구독 게이지는 읽기 전용 호출만 합니다.** 허브는 usage 엔드포인트와 같은 OAuth 토큰으로 계정 프로필(플랜
+  이름)과 사용 크레딧 잔액도 읽기만 합니다. 토큰과 조직 ID는 메모리에만 두고 기록하거나 저장하지 않습니다.
 - **허브의 LLM 호출은 격리됩니다.** `claude -p`는 `--safe-mode --tools "" --no-session-persistence
   --disable-slash-commands`(codex는 `--ephemeral -s read-only`)로 저장소 밖 디렉터리에서 실행되어, 사용자의
   CLAUDE.md·플러그인·훅·MCP·스킬이 요약기나 리포트 작성기에 들어가지 않고 세션 전사본도 남기지 않습니다.
@@ -355,7 +361,8 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 | `DIGEST_MODEL` | `claude-sonnet-5` | 프로젝트 블록이 예산을 넘을 때 긴 세션을 미리 압축하는 모델 — 추출 작업이라 리포트 모델보다 싼 모델로 충분 |
 | `LLM_TIMEOUT_SUMMARY` / `LLM_TIMEOUT_DIGEST` / `LLM_TIMEOUT_REPORT` | `90` / `300` / `900` | 허브 LLM 호출의 사이트별 타임아웃(초). 실패·타임아웃은 저장된 리포트를 덮지 않고 사유만 기록·표시 |
 | `LLM_CWD` | `~/.madison/llm-cwd` | 허브 LLM 호출의 작업 디렉터리 — 저장소 밖이라 CLI가 git 컨텍스트를 보지 않음 |
-| `USAGE` / `USAGE_POLL_SEC` | `1` / `180` | 현황의 Claude / Codex 구독 한도 타일. 허브가 직접 수집 — Claude는 Claude Code가 키체인에 두는 OAuth 토큰으로 읽기 전용 usage 엔드포인트 조회(토큰 저장 안 함), Codex는 `codex app-server` RPC. `USAGE=0`이면 숨김 |
+| `USAGE` / `USAGE_POLL_SEC` | `1` / `180` | 현황의 Claude / Codex 구독 한도 타일. 허브가 직접 수집 — Claude는 Claude Code가 키체인에 두는 OAuth 토큰으로 읽기 전용 usage·프로필·크레딧 잔액 엔드포인트 조회(플랜 이름은 프로필의 `plan_display_name`, 토큰 저장 안 함), Codex는 `codex app-server` RPC. `USAGE=0`이면 숨김. `USAGE_POLL_SEC`은 Claude 수집 주기(초, 최소 60) |
+| `USAGE_CODEX_POLL_SEC` | `60` | Codex 수집 주기(초, 최소 30) — 읽을 때마다 `codex app-server`를 잠깐 띄움. Claude usage 엔드포인트가 빠른 주기에서 429를 내므로 주기를 따로 둠 |
 | `REPORT_DAILY_CRON` / `REPORT_WEEKLY_CRON` / `REPORT_MONTHLY_CRON` | `0 * * * *` / `15 */4 * * *` / `45 */8 * * *` | 각 리포트를 다시 만드는 로컬 시각(크론 5필드) — 마지막 판 이후 바뀐 것이 있을 때만. 새 날·주·월의 첫 리포트는 즉시 만들고, 허브 재시작은 생성을 유발하지 않음. 생성은 별도 워커 프로세스에서 |
 | `REPORT_EXCLUDE_PROJECTS` | *(없음)* | 리포트에서 제외할 프로젝트(콤마 구분) — 해당 프로젝트 섹션과, 다른 프로젝트 로그에서 그 이름이 언급된 줄까지 뺀다 |
 | `REPORT_SERVICE_MAP` | *(없음)* | 리포트 최상위 묶음이 될 `프로젝트=서비스` 쌍(콤마 구분, 예: `web=에이크미, api=에이크미`). 매핑 없는 프로젝트는 프로젝트명 그대로 쓰이고, 서비스명이 다른 프로젝트는 절대 합쳐지지 않는다 |

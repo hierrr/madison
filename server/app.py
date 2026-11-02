@@ -853,7 +853,10 @@ async def get_usage_history(request: Request, days: int = 30):
         h = usage.history(c, days)
     snap = usage.snapshot()   # 패널 제목용 플랜명 (현황 타일과 동일 표기)
     for p in usage.PROVIDERS:
-        h[p]["plan"] = (snap.get(p) or {}).get("plan") or ""
+        cur = snap.get(p)
+        h[p]["plan"] = (cur or {}).get("plan") or ""
+        # 현재 스냅샷에 있는 창 제목 — 사라진 창(예: 5h)의 마지막 값을 '지금'까지 늘이지 않게 하는 용도. 스냅샷 없으면 None
+        h[p]["live"] = [w["title"] for w in cur["windows"]] if cur else None
     return h
 
 
