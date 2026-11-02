@@ -47,6 +47,9 @@ _lock = threading.Lock()
 _snap: dict = {p: None for p in PROVIDERS}
 _claude_backoff_until = 0.0
 CLAUDE_BACKOFF_SEC = 600     # 429(과호출) 뒤 쉬는 시간 — 같은 계정을 다른 도구도 조회할 수 있다
+CODEX_BACKOFF_SEC = 300      # Codex RPC 실패 뒤 app-server를 다시 띄우기까지 쉬는 시간 — 고장난 동안 매 분 프로세스·전사본 스캔을 반복하지 않는다
+# RPC 백오프 상태 — until(epoch)까지는 codex_rpc를 부르지 않고, reason은 마지막 실패 사유(오류 문구를 창 내내 같게 유지)
+_codex_backoff: dict = {"until": 0.0, "reason": ""}
 CLAUDE_PROFILE_TTL = 3600    # 초 — 플랜 표시명은 거의 안 바뀐다
 CLAUDE_CREDITS_TTL = 600     # 초 — 크레딧 잔액 재조회 간격
 CLAUDE_AUX_RETRY_SEC = 600   # 초 — 프로필·크레딧 조회가 실패(429 포함)한 뒤 다시 시도하기까지 쉬는 시간
@@ -405,6 +408,9 @@ def codex_rpc(timeout: float = 20) -> dict:
                 if not isinstance(result, dict):
                     raise UsageError("rateLimits/read 결과 없음")
                 return result
+    except (OSError, ValueError) as exc:
+        # 자식이 먼저 죽으면 stdin 쓰기가 BrokenPipeError(OSError)·닫힌 파일(ValueError)로 터진다
+        raise UsageError(f"codex app-server 통신 실패: {exc}") from exc
     finally:
         try:
             proc.terminate()
@@ -558,10 +564,18 @@ def codex_fallback(exc: UsageError, now: float) -> dict:
 
 def collect_codex(now=None) -> dict:
     now = now or time.time()
-    # 호출 때마다 RPC를 읽는다 — 수집 주기는 loop()의 프로바이더별 주기(USAGE_CODEX_POLL_SEC)가 단일 출처
+    # 호출 때마다 RPC를 읽는다 — 수집 주기는 loop()의 프로바이더별 주기(USAGE_CODEX_POLL_SEC)가 단일 출처.
+    # 단, RPC가 실패하면 CODEX_BACKOFF_SEC 동안은 app-server도 전사본 스캔도 하지 않는다(문구는 창 내내 동일).
+    if now < _codex_backoff["until"]:
+        raise UsageError(f"Codex 읽기 실패: {_codex_backoff['reason']} — {CODEX_BACKOFF_SEC // 60}분마다 재시도")
     try:
         parsed = {**parse_codex_rpc(codex_rpc()), "seen_at": now}
+        if not parsed.get("windows"):
+            # 응답은 왔지만 쓸 게 없으면 실패와 같다 — 백오프·전사본 대체도 똑같이 탄다
+            raise UsageError("rateLimits/read 응답에 한도 창이 없음")
+        _codex_backoff.update(until=0.0, reason="")
     except UsageError as exc:
+        _codex_backoff.update(until=now + CODEX_BACKOFF_SEC, reason=str(exc))
         log.info("codex RPC 실패 — 전사본 대체 시도: %s", exc)
         parsed = codex_fallback(exc, now)
     if not parsed.get("windows"):

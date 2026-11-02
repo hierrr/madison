@@ -1091,10 +1091,14 @@ class CodexCollectCreditsTests(unittest.TestCase):
         with usage._lock:
             self._snap = usage._snap["codex"]
             usage._snap["codex"] = None
+        self._saved_codex_backoff = dict(usage._codex_backoff)      # RPC 실패가 다음 테스트를 백오프에 가두지 않게
+        usage._codex_backoff.update(until=0.0, reason="")
 
     def tearDown(self):
         with usage._lock:
             usage._snap["codex"] = self._snap
+        usage._codex_backoff.clear()
+        usage._codex_backoff.update(self._saved_codex_backoff)
 
     def collect(self, result=None, now=None, rpc=None):
         with mock.patch.object(usage, "codex_rpc", rpc or mock.Mock(return_value=result)):
@@ -1204,14 +1208,19 @@ class CodexCollectCreditsTests(unittest.TestCase):
             out = usage.collect_codex(self.NOW)
         self.assertEqual(out["extras"], [{"title": "Credits", "value": "0", "unlimited": False, "has_credits": False}])
 
-    def test_transcript_fallback_retries_rpc_on_every_call(self):
+    def test_transcript_fallback_does_not_retry_rpc_within_backoff_window(self):
         rl = {**CODEX_RL_TRANSCRIPT, "credits": {"has_credits": True, "unlimited": True}}
         seen = usage.to_epoch("2026-10-30T00:00:00Z")
         rpc = mock.Mock(side_effect=usage.UsageError("timeout"))
         with mock.patch.object(usage, "codex_rpc", rpc), \
                 mock.patch.object(usage, "codex_transcript_snapshot", return_value=(rl, seen)) as snap:
             first = usage.collect_codex(self.NOW)
-            second = usage.collect_codex(self.NOW + 60)
+            self.assertEqual((rpc.call_count, snap.call_count), (1, 1))
+            self.assertEqual(self.entry(first, "Credits")["value"], "unlimited")
+            with self.assertRaises(usage.UsageError):                   # 창 안: RPC도 전사본 스캔도 없다
+                usage.collect_codex(self.NOW + 60)
+            self.assertEqual((rpc.call_count, snap.call_count), (1, 1))
+            second = usage.collect_codex(self.NOW + usage.CODEX_BACKOFF_SEC)   # 창이 끝나면 RPC를 다시 시도하고 다시 대체
         self.assertEqual((rpc.call_count, snap.call_count), (2, 2))
         self.assertEqual(second["extras"], first["extras"])
         self.assertEqual(self.entry(second, "Credits")["value"], "unlimited")
@@ -1223,7 +1232,7 @@ class CodexCollectCreditsTests(unittest.TestCase):
         with mock.patch.object(usage, "codex_rpc", rpc), \
                 mock.patch.object(usage, "codex_transcript_snapshot", return_value=(rl, seen)):
             first = usage.collect_codex(self.NOW)
-            second = usage.collect_codex(self.NOW + 60)
+            second = usage.collect_codex(self.NOW + usage.CODEX_BACKOFF_SEC)      # 백오프 창이 끝난 뒤에야 RPC를 다시 부른다
         self.assertEqual(self.entry(first, "Credits")["value"], "1")
         self.assertEqual(self.titles(second), ["Reset credits", "Credits"])
         self.assertEqual(self.entry(second, "Credits")["value"], "0")
@@ -1271,6 +1280,302 @@ class CodexCollectCreditsTests(unittest.TestCase):
         self.assertEqual(out["extras"], [{"title": "Reset credits", "value": "2 available", "count": 2}])
         self.assertEqual([(w["title"], w["pct"]) for w in out["windows"]], [("7d", 17)])
         self.assertEqual(out["plan"], "Prolite")
+
+
+class CodexBackoffTests(unittest.TestCase):
+    NOW = 1793770000.0
+    END = NOW + usage.CODEX_BACKOFF_SEC
+
+    def setUp(self):
+        self._saved_codex_backoff = dict(usage._codex_backoff)
+        usage._codex_backoff.update(until=0.0, reason="")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        usage._codex_backoff.clear()
+        usage._codex_backoff.update(self._saved_codex_backoff)
+
+    def fail_once(self, reason="timeout"):
+        """NOW에 RPC를 실패시켜 백오프를 건다(대체도 실패). (rpc, fb, 전파된 예외)를 돌려준다."""
+        rpc = mock.Mock(side_effect=usage.UsageError(reason))
+        fb = mock.Mock(side_effect=usage.UsageError("no transcript"))
+        raised = None
+        with mock.patch.object(usage, "codex_rpc", rpc), mock.patch.object(usage, "codex_fallback", fb):
+            try:
+                usage.collect_codex(self.NOW)
+            except usage.UsageError as exc:
+                raised = exc
+        return rpc, fb, raised
+
+    def test_constants(self):
+        self.assertEqual(usage.CODEX_BACKOFF_SEC, 300)
+
+    def test_rpc_failure_sets_window_and_reason(self):
+        self.fail_once("boom")
+        self.assertEqual(usage._codex_backoff, {"until": self.END, "reason": "boom"})
+
+    def test_backoff_skips_rpc_and_fallback_and_raises(self):
+        self.fail_once("boom")
+        rpc, fb = mock.Mock(), mock.Mock()
+        with mock.patch.object(usage, "codex_rpc", rpc), mock.patch.object(usage, "codex_fallback", fb), \
+                mock.patch.object(usage, "codex_transcript_snapshot") as snap:
+            for dt in (1, 60, 299):
+                with self.assertRaises(usage.UsageError):
+                    usage.collect_codex(self.NOW + dt)
+        rpc.assert_not_called()
+        fb.assert_not_called()
+        snap.assert_not_called()
+
+    def test_error_text_identical_within_window_and_contains_reason(self):
+        self.fail_once("rateLimits/read 실패: boom")
+        msgs = []
+        with mock.patch.object(usage, "codex_rpc"), mock.patch.object(usage, "codex_fallback"):
+            for dt in (1, 100, 299):
+                with self.assertRaises(usage.UsageError) as cm:
+                    usage.collect_codex(self.NOW + dt)
+                msgs.append(str(cm.exception))
+        self.assertEqual(len(set(msgs)), 1)
+        self.assertIn("rateLimits/read 실패: boom", msgs[0])
+        self.assertIn("5분", msgs[0])
+
+    def test_window_boundary(self):
+        self.fail_once("boom")
+        rpc = mock.Mock(return_value=codex_rpc_result())
+        with mock.patch.object(usage, "codex_rpc", rpc):
+            with self.assertRaises(usage.UsageError):
+                usage.collect_codex(self.END - 1)
+            rpc.assert_not_called()
+            out = usage.collect_codex(self.END)                         # now == until → 재시도
+        rpc.assert_called_once_with()
+        self.assertEqual(out["plan"], "Prolite")
+
+    def test_rpc_success_after_window_clears_backoff(self):
+        self.fail_once("boom")
+        with mock.patch.object(usage, "codex_rpc", return_value=codex_rpc_result()):
+            usage.collect_codex(self.END + 10)
+            self.assertEqual(usage._codex_backoff, {"until": 0.0, "reason": ""})
+            usage.collect_codex(self.END + 11)                          # 즉시 다음 호출도 RPC를 부른다
+        self.assertEqual(usage._codex_backoff["until"], 0.0)
+
+    def test_rpc_failing_again_after_window_starts_new_window_with_new_reason(self):
+        self.fail_once("first")
+        rpc = mock.Mock(side_effect=usage.UsageError("second"))
+        with mock.patch.object(usage, "codex_rpc", rpc), \
+                mock.patch.object(usage, "codex_fallback", side_effect=usage.UsageError("x")):
+            with self.assertRaises(usage.UsageError):
+                usage.collect_codex(self.END)
+            with self.assertRaises(usage.UsageError) as cm:
+                usage.collect_codex(self.END + 1)
+        self.assertEqual(rpc.call_count, 1)
+        self.assertEqual(usage._codex_backoff, {"until": self.END + usage.CODEX_BACKOFF_SEC, "reason": "second"})
+        self.assertIn("second", str(cm.exception))
+        self.assertNotIn("first", str(cm.exception))
+
+    def test_fallback_success_still_sets_backoff(self):
+        rpc = mock.Mock(side_effect=usage.UsageError("boom"))
+        seen = usage.to_epoch("2026-10-30T00:00:00Z")
+        real_fb = usage.codex_fallback
+        fb = mock.Mock(side_effect=real_fb)
+        with mock.patch.object(usage, "codex_rpc", rpc), mock.patch.object(usage, "codex_fallback", fb), \
+                mock.patch.object(usage, "codex_transcript_snapshot", return_value=(CODEX_RL_TRANSCRIPT, seen)):
+            out = usage.collect_codex(self.NOW)                         # 대체 성공 → 값은 나온다
+            self.assertEqual([w["title"] for w in out["windows"]], ["7d"])
+            self.assertEqual(usage._codex_backoff["until"], self.END)
+            with self.assertRaises(usage.UsageError):                   # 그러나 다음 호출은 RPC를 안 부른다
+                usage.collect_codex(self.NOW + 60)
+        self.assertEqual((rpc.call_count, fb.call_count), (1, 1))
+        self.assertEqual(fb.call_args.args[1], self.NOW)
+
+    def test_fallback_failure_propagates_and_still_sets_backoff(self):
+        rpc, fb, raised = self.fail_once("boom")
+        self.assertEqual((rpc.call_count, fb.call_count), (1, 1))
+        self.assertIsInstance(raised, usage.UsageError)                 # 대체 실패가 호출자까지 전파된다
+        self.assertEqual(str(raised), "no transcript")
+        self.assertEqual(usage._codex_backoff, {"until": self.END, "reason": "boom"})
+
+    # ── RPC는 성공했지만 한도 창이 없는 응답: RPC 실패와 똑같이 백오프 + 대체 1회 ──
+    EMPTY_REASON = "rateLimits/read 응답에 한도 창이 없음"
+
+    def empty_rpc(self):
+        return mock.Mock(return_value={"rateLimits": {"planType": "prolite"}})      # 창 슬롯 없음
+
+    def test_empty_windows_rpc_sets_backoff_and_tries_fallback_once(self):
+        rpc, fb = self.empty_rpc(), mock.Mock(side_effect=usage.UsageError("no transcript"))
+        with mock.patch.object(usage, "codex_rpc", rpc), mock.patch.object(usage, "codex_fallback", fb):
+            with self.assertRaises(usage.UsageError) as cm:
+                usage.collect_codex(self.NOW)
+        self.assertEqual((rpc.call_count, fb.call_count), (1, 1))
+        self.assertEqual(usage._codex_backoff, {"until": self.END, "reason": self.EMPTY_REASON})
+        self.assertEqual(str(cm.exception), "no transcript")             # 대체 실패 예외가 그대로 전파
+        self.assertEqual(str(fb.call_args.args[0]), self.EMPTY_REASON)   # 대체에는 빈 응답 사유가 전달된다
+        self.assertEqual(fb.call_args.args[1], self.NOW)
+
+    def test_empty_windows_rpc_fallback_success_returns_fallback_data(self):
+        rpc = self.empty_rpc()
+        seen = usage.to_epoch("2026-10-30T00:00:00Z")
+        with mock.patch.object(usage, "codex_rpc", rpc), \
+                mock.patch.object(usage, "codex_transcript_snapshot", return_value=(CODEX_RL_TRANSCRIPT, seen)):
+            out = usage.collect_codex(self.NOW)
+        self.assertEqual([w["title"] for w in out["windows"]], ["7d"])
+        self.assertEqual(out["updated"], time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seen)))
+        self.assertEqual(usage._codex_backoff, {"until": self.END, "reason": self.EMPTY_REASON})
+
+    def test_empty_windows_rpc_next_call_in_window_raises_without_rpc(self):
+        with mock.patch.object(usage, "codex_rpc", self.empty_rpc()), \
+                mock.patch.object(usage, "codex_fallback", side_effect=usage.UsageError("x")):
+            with self.assertRaises(usage.UsageError):
+                usage.collect_codex(self.NOW)
+        rpc, fb = mock.Mock(), mock.Mock()
+        with mock.patch.object(usage, "codex_rpc", rpc), mock.patch.object(usage, "codex_fallback", fb), \
+                mock.patch.object(usage, "codex_transcript_snapshot") as snap:
+            for dt in (1, 150, 299):
+                with self.assertRaises(usage.UsageError) as cm:
+                    usage.collect_codex(self.NOW + dt)
+                self.assertIn(self.EMPTY_REASON, str(cm.exception))
+                self.assertIn("5분", str(cm.exception))
+        rpc.assert_not_called()
+        fb.assert_not_called()
+        snap.assert_not_called()
+
+    def test_empty_windows_rpc_does_not_clear_existing_backoff_reason_until_usable(self):
+        self.fail_once("boom")
+        # 창 만료 후 빈 응답 → 백오프가 새 사유로 다시 걸리고, 이어 정상 응답이 와야만 풀린다
+        with mock.patch.object(usage, "codex_rpc", self.empty_rpc()), \
+                mock.patch.object(usage, "codex_fallback", side_effect=usage.UsageError("x")):
+            with self.assertRaises(usage.UsageError):
+                usage.collect_codex(self.END)
+        self.assertEqual(usage._codex_backoff, {"until": self.END + usage.CODEX_BACKOFF_SEC, "reason": self.EMPTY_REASON})
+        with mock.patch.object(usage, "codex_rpc", return_value=codex_rpc_result()):
+            usage.collect_codex(self.END + usage.CODEX_BACKOFF_SEC)
+        self.assertEqual(usage._codex_backoff, {"until": 0.0, "reason": ""})
+
+    def test_fallback_with_no_windows_still_raises(self):
+        # 대체가 창 없는 값을 돌려주면(방어 경로) 마지막 가드가 "Codex 응답에 한도 창이 없음"을 올린다
+        with mock.patch.object(usage, "codex_rpc", self.empty_rpc()), \
+                mock.patch.object(usage, "codex_fallback", return_value={"windows": [], "seen_at": self.NOW}):
+            with self.assertRaises(usage.UsageError) as cm:
+                usage.collect_codex(self.NOW)
+        self.assertEqual(str(cm.exception), "Codex 응답에 한도 창이 없음")
+        self.assertEqual(usage._codex_backoff["until"], self.END)
+
+    def test_non_usage_error_from_rpc_does_not_set_backoff(self):
+        with mock.patch.object(usage, "codex_rpc", side_effect=RuntimeError("bug")):
+            with self.assertRaises(RuntimeError):
+                usage.collect_codex(self.NOW)
+        self.assertEqual(usage._codex_backoff, {"until": 0.0, "reason": ""})
+
+    def test_rpc_success_leaves_backoff_untouched_when_none_was_set(self):
+        with mock.patch.object(usage, "codex_rpc", return_value=codex_rpc_result()):
+            usage.collect_codex(self.NOW)
+        self.assertEqual(usage._codex_backoff["until"], 0.0)
+
+
+class CodexBackoffRefreshTests(unittest.TestCase):
+    NOW = 1793770000.0
+
+    def setUp(self):
+        p = mock.patch.object(usage.time, "time", return_value=self.NOW)       # 실시계 의존 제거
+        p.start()
+        self.addCleanup(p.stop)
+        with usage._lock:
+            self.saved = dict(usage._snap)
+            usage._snap.update(
+                claude={"plan": "Max", "windows": [{"title": "5h", "pct": 3}], "extras": [], "updated": "c", "error": "keep"},
+                codex={"plan": "Prolite", "windows": [{"title": "7d", "pct": 9}], "extras": [], "updated": "2026-11-02T00:00:00Z", "error": ""})
+        self.claude_before = dict(usage._snap["claude"])
+        self.codex_before = dict(usage._snap["codex"])
+        for target in ("_persist", "record_history", "record_plan"):
+            p = mock.patch.object(usage, target)
+            setattr(self, target, p.start())
+            self.addCleanup(p.stop)
+        p = mock.patch.object(usage.db, "tx")
+        p.start()
+        self.addCleanup(p.stop)
+        self._saved_codex_backoff = dict(usage._codex_backoff)
+        usage._codex_backoff.update(until=self.NOW + 250, reason="app-server down")
+
+    def tearDown(self):
+        with usage._lock:
+            usage._snap.update(self.saved)
+        usage._codex_backoff.clear()
+        usage._codex_backoff.update(self._saved_codex_backoff)
+
+    def test_refresh_during_backoff_keeps_snapshot_and_sets_error(self):
+        with mock.patch.object(usage, "codex_rpc") as rpc, mock.patch.object(usage, "codex_fallback") as fb:
+            usage.refresh(("codex",))
+        rpc.assert_not_called()
+        fb.assert_not_called()
+        got = usage._snap["codex"]
+        self.assertEqual(got["windows"], self.codex_before["windows"])
+        self.assertEqual(got["updated"], self.codex_before["updated"])
+        self.assertEqual(got["plan"], "Prolite")
+        self.assertIn("app-server down", got["error"])
+        self.assertIn("5분", got["error"])
+        self.assertEqual(usage._snap["claude"], self.claude_before)
+        self._persist.assert_not_called()
+        self.record_history.assert_not_called()
+
+    def test_refresh_error_text_is_stable_across_calls(self):
+        errors = []
+        with mock.patch.object(usage, "codex_rpc"), mock.patch.object(usage, "codex_fallback"):
+            for _ in range(3):
+                usage.refresh(("codex",))
+                errors.append(usage._snap["codex"]["error"])
+        self.assertEqual(len(set(errors)), 1)
+
+
+class CodexRpcCommunicationTests(unittest.TestCase):
+    class NotUsageRuntimeError(RuntimeError):
+        pass
+
+    def fake_proc(self, write_exc):
+        proc = mock.Mock()
+        proc.stdin.write.side_effect = write_exc
+        proc.stdout = iter([])                      # pump 스레드가 바로 끝난다
+        proc.terminate.return_value = None
+        proc.wait.return_value = 0
+        return proc
+
+    def run_rpc(self, proc):
+        with mock.patch.object(usage, "_codex_bin", return_value="/nonexistent/codex"), \
+                mock.patch.object(usage.subprocess, "Popen", return_value=proc):
+            return usage.codex_rpc(timeout=2)
+
+    def test_broken_pipe_on_stdin_write_becomes_usage_error_and_cleans_up(self):
+        proc = self.fake_proc(BrokenPipeError(32, "Broken pipe"))
+        with self.assertRaises(usage.UsageError) as cm:
+            self.run_rpc(proc)
+        self.assertIn("codex app-server 통신 실패", str(cm.exception))
+        self.assertIsInstance(cm.exception.__cause__, BrokenPipeError)
+        proc.terminate.assert_called_once_with()
+        proc.wait.assert_called_once()
+
+    def test_value_error_closed_file_becomes_usage_error(self):
+        proc = self.fake_proc(ValueError("I/O operation on closed file"))
+        with self.assertRaises(usage.UsageError) as cm:
+            self.run_rpc(proc)
+        self.assertIn("통신 실패", str(cm.exception))
+        proc.terminate.assert_called_once_with()
+
+    def test_other_exceptions_are_not_converted(self):
+        proc = self.fake_proc(self.NotUsageRuntimeError("bug"))
+        with self.assertRaises(self.NotUsageRuntimeError):
+            self.run_rpc(proc)
+        proc.terminate.assert_called_once_with()    # 변환은 안 해도 정리는 한다
+
+    def test_startup_failure_message_unchanged(self):
+        with mock.patch.object(usage, "_codex_bin", return_value="/nonexistent/codex"), \
+                mock.patch.object(usage.subprocess, "Popen", side_effect=FileNotFoundError("no such file")):
+            with self.assertRaises(usage.UsageError) as cm:
+                usage.codex_rpc(timeout=2)
+        self.assertIn("codex app-server 시작 실패", str(cm.exception))
+
+    def test_cleanup_kills_when_terminate_fails(self):
+        proc = self.fake_proc(BrokenPipeError())
+        proc.terminate.side_effect = ProcessLookupError()
+        with self.assertRaises(usage.UsageError):
+            self.run_rpc(proc)
+        proc.kill.assert_called_once_with()
 
 
 # ── 수집 주기·스케줄 ─────────────────────────────────
@@ -1349,10 +1654,14 @@ class RefreshProvidersTests(unittest.TestCase):
         p = mock.patch.object(usage.db, "tx")
         p.start()
         self.addCleanup(p.stop)
+        self._saved_codex_backoff = dict(usage._codex_backoff)
+        usage._codex_backoff.update(until=0.0, reason="")
 
     def tearDown(self):
         with usage._lock:
             usage._snap.update(self.saved)
+        usage._codex_backoff.clear()
+        usage._codex_backoff.update(self._saved_codex_backoff)
 
     def codex_data(self):
         return {"plan": "Prolite", "windows": [{"title": "7d", "pct": 1}], "extras": [], "updated": "2026-11-02T00:00:00Z"}

@@ -362,7 +362,7 @@ rm -rf ~/.claude/madison ~/.claude/skills/handoff ~/.claude/skills/pickup \
 | `LLM_TIMEOUT_SUMMARY` / `LLM_TIMEOUT_DIGEST` / `LLM_TIMEOUT_REPORT` | `90` / `300` / `900` | 허브 LLM 호출의 사이트별 타임아웃(초). 실패·타임아웃은 저장된 리포트를 덮지 않고 사유만 기록·표시 |
 | `LLM_CWD` | `~/.madison/llm-cwd` | 허브 LLM 호출의 작업 디렉터리 — 저장소 밖이라 CLI가 git 컨텍스트를 보지 않음 |
 | `USAGE` / `USAGE_POLL_SEC` | `1` / `180` | 현황의 Claude / Codex 구독 한도 타일. 허브가 직접 수집 — Claude는 Claude Code가 키체인에 두는 OAuth 토큰으로 읽기 전용 usage·프로필·크레딧 잔액 엔드포인트 조회(플랜 이름은 프로필의 `plan_display_name`, 토큰 저장 안 함), Codex는 `codex app-server` RPC. `USAGE=0`이면 숨김. `USAGE_POLL_SEC`은 Claude 수집 주기(초, 최소 60) |
-| `USAGE_CODEX_POLL_SEC` | `60` | Codex 수집 주기(초, 최소 30) — 읽을 때마다 `codex app-server`를 잠깐 띄움. Claude usage 엔드포인트가 빠른 주기에서 429를 내므로 주기를 따로 둠 |
+| `USAGE_CODEX_POLL_SEC` | `60` | Codex 수집 주기(초, 최소 30) — 읽을 때마다 `codex app-server`를 잠깐 띄움. Claude usage 엔드포인트가 빠른 주기에서 429를 내므로 주기를 따로 둠. 읽기에 실패하면 5분간 app-server를 다시 띄우지 않고 그동안 마지막 값을 계속 보여줌 |
 | `REPORT_DAILY_CRON` / `REPORT_WEEKLY_CRON` / `REPORT_MONTHLY_CRON` | `0 * * * *` / `15 */4 * * *` / `45 */8 * * *` | 각 리포트를 다시 만드는 로컬 시각(크론 5필드) — 마지막 판 이후 바뀐 것이 있을 때만. 새 날·주·월의 첫 리포트는 즉시 만들고, 허브 재시작은 생성을 유발하지 않음. 생성은 별도 워커 프로세스에서 |
 | `REPORT_EXCLUDE_PROJECTS` | *(없음)* | 리포트에서 제외할 프로젝트(콤마 구분) — 해당 프로젝트 섹션과, 다른 프로젝트 로그에서 그 이름이 언급된 줄까지 뺀다 |
 | `REPORT_SERVICE_MAP` | *(없음)* | 리포트 최상위 묶음이 될 `프로젝트=서비스` 쌍(콤마 구분, 예: `web=에이크미, api=에이크미`). 매핑 없는 프로젝트는 프로젝트명 그대로 쓰이고, 서비스명이 다른 프로젝트는 절대 합쳐지지 않는다 |
