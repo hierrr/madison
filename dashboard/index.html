@@ -1480,7 +1480,7 @@
     } else if (v === 'usage') {
       loadUsage();
     } else if (v === 'report') {
-      loadReport(); loadMetrics();
+      rptFollowToday(); loadReport(); loadMetrics();
     } else if (v === 'settings') {
       loadSettings();
     }
@@ -1898,9 +1898,18 @@
   });
 
   // ── 리포트 탭 ──
-  var RPT = { range: 'day', date: null, poll: null };
+  // follow = 날짜를 직접 고르지 않아 기본값(오늘)을 따르는 중. 기본값의 실제 날짜는 탭에 들어갈 때 정하고, 탭에 머무는 동안
+  // 날짜가 지나면 따라간다(rptSyncToday) — 페이지를 연 시점·탭을 떠난 시점에 박아 두면 자정을 넘긴 뒤 들어갔을 때
+  // 어제 리포트가 뜬다(2026-11-04 사용자 보고)
+  var RPT = { range: 'day', date: null, follow: true, poll: null };
   function ymd(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
-  RPT.date = ymd(new Date());
+  function rptFollowToday() { if (RPT.follow) RPT.date = ymd(new Date()); }
+  // 기간 키 — 일=그 날, 주=그 주 월요일, 월=그 달 (서버 norm_day와 같은 달력 고정)
+  function rptPeriod(range, day) {
+    var d = new Date(day + 'T00:00:00');
+    if (range === 'week') d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return range === 'month' ? ymd(d).slice(0, 7) : ymd(d);
+  }
 
   function stopPoll() { if (RPT.poll) { clearInterval(RPT.poll); RPT.poll = null; } }
   function schedulePoll() { stopPoll(); RPT.poll = setInterval(loadReport, 6000); }
@@ -1959,7 +1968,9 @@
 
   function loadReport() {
     document.getElementById('rptDate').textContent = rptLabel();
-    getJSON('/api/report?range=' + RPT.range + '&date=' + RPT.date).then(function (r) {
+    var range = RPT.range, day = RPT.date;
+    getJSON('/api/report?range=' + range + '&date=' + day).then(function (r) {
+      if (RPT.range !== range || RPT.date !== day) return;   // 그사이 날짜·범위가 바뀌었으면 늦게 온 응답은 버린다
       var body = document.getElementById('reportBody'), copyBtn = document.getElementById('rptCopy');
       // 갱신 중에도 기존 리포트는 계속 보여준다 — 완료되면 폴링이 새 내용으로 자동 교체
       if (r.markdown) {
@@ -2070,7 +2081,9 @@
     if (jandi) jandi.scrollLeft = jandi.scrollWidth;
   }
   function loadMetrics() {
-    getJSON('/api/metrics?range=' + RPT.range + '&date=' + RPT.date).then(renderMetrics)
+    var range = RPT.range, day = RPT.date;
+    getJSON('/api/metrics?range=' + range + '&date=' + day)
+      .then(function (m) { if (RPT.range === range && RPT.date === day) renderMetrics(m); })   // 늦게 온 응답은 버린다
       .catch(function () { document.getElementById('metricsBody').innerHTML = ''; });
   }
 
@@ -2426,17 +2439,29 @@
     else d.setDate(d.getDate() + (RPT.range === 'week' ? 7 : 1) * dir);
     var today = new Date(); today.setHours(0, 0, 0, 0);
     if (d > today) return;
-    RPT.date = ymd(d); rptReload();
+    // 이동 결과가 오늘이 든 기간이면 다시 기본값(오늘)을 따른다 — 월간 이동은 1일로 맞춰지므로 날짜가 아니라 기간으로 비교
+    var t = ymd(today);
+    RPT.follow = rptPeriod(RPT.range, ymd(d)) === rptPeriod(RPT.range, t);
+    RPT.date = RPT.follow ? t : ymd(d);
+    rptReload();
   }
   document.getElementById('rptPrev').addEventListener('click', function () { rptShift(-1); });
   document.getElementById('rptNext').addEventListener('click', function () { rptShift(1); });
-  document.getElementById('rptToday').addEventListener('click', function () { RPT.date = ymd(new Date()); rptReload(); });
+  document.getElementById('rptToday').addEventListener('click', function () { RPT.follow = true; rptFollowToday(); rptReload(); });
   document.getElementById('rptRefresh').addEventListener('click', refreshReport);
+  // 리포트 탭에 머문 채 자정을 넘기면 기본값(오늘)을 따르는 중일 때만 오늘로. 창이 계속 보이면 visibilitychange가
+  // 오지 않으므로 30초마다도 확인한다. 생성 폴링 중에는 미뤘다가 폴링이 끝난 뒤의 확인에서 맞춘다.
+  function rptSyncToday() {
+    if (VIEW !== 'report' || !RPT.follow || RPT.poll || RPT.date === ymd(new Date())) return;
+    rptFollowToday(); rptReload();
+  }
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') rptSyncToday(); });
+  setInterval(rptSyncToday, 30000);
 
   // 탭을 떠나면 그 탭을 처음 화면으로 — 필터·검색·페이지·정렬, 리포트 범위·날짜, 스크롤까지. 다른 탭에 다녀왔는데
   // 예전 조건이 남아 목록이 비어 보이는 일 방지(2026-10-28 사용자 요청: 모든 탭 공통). 들어갈 때가 아니라 떠날 때 비우므로,
   // 기기 탭 '태스크' 버튼처럼 이동하면서 조건을 싣는 경로는 그대로 동작한다. 펼친 행·문서, 사용량 '더 보기'는 들어갈 때 다시 그려져 저절로 접히고,
-  // 설정은 들어갈 때 저장값을 다시 불러온다. 리포트 날짜의 '오늘'은 떠나는 시점 기준이라 자정 넘겨 열어 둔 페이지도 맞다.
+  // 설정은 들어갈 때 저장값을 다시 불러온다. 리포트 날짜는 '오늘 따르기'로만 되돌리고 실제 날짜는 들어갈 때 정한다(rptFollowToday).
   var FILTER_INIT = JSON.stringify({ FILTERS: FILTERS, devF: HIST.devF, devSort: HIST.devSort, taskF: HIST.taskF,
                                      QF: QF, AF: AF, EF: EF, UF: UF, rptRange: RPT.range });
   function resetTab(v) {
@@ -2452,7 +2477,7 @@
     else if (v === 'auto') { AF = init.AF; PG.auto = 1; }
     else if (v === 'events') { EF = init.EF; PG.events = 1; }
     else if (v === 'report') {
-      RPT.range = init.rptRange; RPT.date = ymd(new Date());
+      RPT.range = init.rptRange; RPT.follow = true;
       Array.prototype.forEach.call(document.getElementById('rptRange').children, function (c) { c.classList.toggle('on', c.dataset.r === RPT.range); });
     }
     else if (v === 'usage') {
