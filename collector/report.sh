@@ -21,6 +21,10 @@ case "$AGENT" in claude-code|codex-cli) : ;; *) exit 0 ;; esac
 # shellcheck disable=SC1090
 . "$ENV_FILE" 2>/dev/null || exit 0
 [ -n "${MADISON_URL:-}" ] && [ -n "${MADISON_TOKEN:-}" ] || exit 0
+if [ "$EV" = "session_end" ] && [ -f "$MAD_DIR/worker.py" ]; then
+  python3 "$MAD_DIR/worker.py" enqueue "$AGENT" --mad-dir "$MAD_DIR"
+  exit 0
+fi
 command -v jq >/dev/null 2>&1 || exit 0
 mkdir -p "$THROTTLE_DIR" 2>/dev/null
 
@@ -288,7 +292,7 @@ fi
 # ── 토큰 누적 추출 (turn_done·session_end) ────────────
 # 세션 **누적** 토큰 맵 {model: {in,out,cr,cw,th}}을 stdout으로. 허브가 직전 값과의 델타만
 # 가산하므로 누락된 턴은 다음 이벤트가 따라잡는다. 실패/없음이면 빈 값 — 이벤트는 그대로 전송.
-# 전체 스캔이지만 jq 스트리밍이라 수십 MB 전사본도 0.1초대 (훅 예산 내).
+# 새 종료 훅은 worker.py 큐로 분리하며, 이 경로는 턴 완료와 구형 설치 폴백이다.
 extract_tokens() {
   [ -n "$TP" ] && [ -f "$TP" ] || return 0
   if [ "$AGENT" = "claude-code" ]; then

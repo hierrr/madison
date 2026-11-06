@@ -54,6 +54,7 @@ class CollectorTests(unittest.TestCase):
             "if [ -n \"$data\" ] && [ -n \"${MADISON_TEST_CAPTURE:-}\" ]; then printf '%s' \"$data\" > \"$MADISON_TEST_CAPTURE\"; fi\n"
             "case \"$url\" in\n"
             "  *'/api/handoffs?mine=1'*) printf '%s' \"${MADISON_TEST_HANDOFFS:-[]}\" ;;\n"
+            "  *'/api/collector/status') printf '200'; exit \"${MADISON_TEST_CURL_STATUS:-0}\" ;;\n"
             "  *) printf '200' ;;\n"
             "esac\n",
         )
@@ -334,6 +335,10 @@ class CollectorTests(unittest.TestCase):
             }
             hooks_path = home / ".codex" / "hooks.json"
             hooks_path.write_text(json.dumps(existing_hooks))
+            settings_path = home / ".claude" / "settings.json"
+            settings_path.write_text(json.dumps({"hooks": {"SessionEnd": [{"hooks": [
+                {"type": "command", "command": "~/.claude/madison/report.sh session_end 2>/dev/null || true", "statusMessage": "keep"},
+                {"type": "command", "command": "custom-end", "timeout": 4}]}]}}))
 
             env = os.environ.copy()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
@@ -358,6 +363,13 @@ class CollectorTests(unittest.TestCase):
                 self.assertNotIn("async", handlers[0], name)
             stop_madison = [h for group in hooks["Stop"] for h in group.get("hooks", []) if "madison" in h["command"]]
             self.assertEqual(stop_madison[0]["timeout"], 5)
+            claude_end = json.loads(settings_path.read_text())["hooks"]["SessionEnd"][0]["hooks"]
+            self.assertEqual(claude_end[0]["timeout"], 10)
+            self.assertEqual(claude_end[0]["statusMessage"], "keep")
+            self.assertEqual(claude_end[1]["timeout"], 4)
+            self.assertTrue((mad / "worker.py").exists())
+            self.assertTrue((mad / "pending/install.json").exists())
+            self.assertIn("WatchPaths", (la_dir / "dev.madison.flush.plist").read_text())
 
             for skill in ("handoff", "pickup"):
                 self.assertTrue((home / ".codex" / "skills" / skill / "SKILL.md").exists(), skill)
@@ -375,6 +387,22 @@ class CollectorTests(unittest.TestCase):
             log_text = log.read_text()
             self.assertIn("madison.test", log_text)
             self.assertNotIn("example.com", log_text)
+
+    def test_installer_distinguishes_http_response_from_transfer_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            log = root / "curl.log"
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
+                        "MADISON_TEST_LOG": str(log), "MADISON_TEST_CURL_STATUS": "28"})
+            proc = subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO,
+                                  check=True, capture_output=True, text=True)
+            self.assertIn("HTTP=200, curl=28", proc.stdout)
+            self.assertNotIn("200000", proc.stdout)
+            self.assertIn("/api/collector/status", log.read_text())
+            self.assertNotIn("/api/state", log.read_text())
 
     def test_installer_rerun_refreshes_skills_without_reenroll(self):
         # 허브 갱신 뒤 등록된 기기에서 재실행: enroll 없이 env(토큰)를 보존하고, 두 에이전트의 설치된 스킬을 정본으로 덮는다

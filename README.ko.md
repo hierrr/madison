@@ -233,6 +233,41 @@ source ~/.claude/madison/env
 curl -fsSL "$MADISON_URL/install.sh" | bash
 ```
 
+허브와 노드를 동시에 갱신할 필요는 없습니다. 기존 노드는 기존 이벤트 API로 계속 보고하고,
+갱신한 macOS 노드부터 종료 작업 큐와 사용량 대조를 사용합니다. 노드별 수집기 버전은 대시보드
+**기기** 탭에 표시됩니다. 대조 결과는 화면에 표시하지 않으며 아래 API로 확인합니다.
+
+수집기 `2026.11.04.1`부터 Claude·Codex 종료 훅은 종료 정보만 로컬 `pending/`에 먼저 저장합니다.
+launchd 처리기가 즉시 종료 이벤트를 전송하고, 별도로 최종 토큰을 집계합니다. 실패한 작업은
+디스크에 남아 5분 주기로 재시도됩니다. Claude의 종료 훅 제한은 10초, Codex는 최대 3초를 유지합니다.
+
+`2026.11.04.2`는 Cloudflare의 `403 / error code: 1010`을 유발하던 Python 기본 요청 식별자를
+`MADISON-Collector/<버전>`으로 바꿉니다. 해당 오류가 발생한 노드는 위 재설치 명령을 실행한 뒤
+`python3 ~/.claude/madison/worker.py run`으로 대기 작업을 재개하세요. 큐와 대조 완료 기록을
+유지하므로 완료한 전체 대조를 다시 실행할 필요는 없습니다. 배포 검증에는 실제 터널 주소를
+사용한 Python 처리기의 GET·POST 성공도 포함해야 합니다.
+
+설치 갱신은 로컬 사용량 대조를 한 번 예약합니다. 전사본의 사용 시각·누적값을 세션별로 비교해
+확인된 누락만 원래 시간·일 원장에 반영합니다. 세션 상태·턴 수는 변경하지 않습니다. 재전송은
+중복 가산하지 않으며, 늦게 도착한 구형 수집기 이벤트도 보정된 기준점을 되돌리지 못합니다.
+`~/.claude.json`의 마지막 세션 집계와 Codex 로컬 DB는 보조 자료입니다. 원본 누락, 진행 중 세션,
+불완전한 자료, 카운터 충돌은 자동 보정하지 않고 확인 필요로 표시합니다. 이는 누락 확정 건수가 아닙니다.
+대화 본문과 로컬 경로는 대조 API로 보내지 않습니다. 로컬에 남지 않은 과거 사용량은 복구를 보장하지 않습니다.
+
+대조 기능은 허브에 계속 남지만 전체 재스캔은 정기 실행하지 않습니다. 같은 대조 개정판으로
+재설치해도 완료한 전체 대조는 반복하지 않습니다. 필요할 때 명시적으로 다시 실행할 수 있습니다:
+
+```bash
+python3 ~/.claude/madison/worker.py audit
+# 자기 기기의 상태와 세션별 결과 확인
+source ~/.claude/madison/env
+curl -fsS -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/collector/status"
+curl -fsS -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/collector/results"
+```
+
+Linux는 설치 안내에 따라 `worker.py run`을 cron/systemd로 실행해야 합니다. Windows 수집기는
+기존 방식으로 계속 동작하며 이번 macOS 종료 큐·자동 대조 갱신의 대상이 아닙니다.
+
 ### hermes 수집기 (선택)
 
 hermes를 쓰는 기기라면 리포터 플러그인을 얹어 같은 대시보드에서 hermes 세션까지 추적할 수

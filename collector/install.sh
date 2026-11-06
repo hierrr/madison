@@ -51,18 +51,24 @@ fi
 command -v jq >/dev/null 2>&1 || { echo "jq가 필요합니다: brew install jq" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3가 필요합니다" >&2; exit 1; }
 
-mkdir -p "$MAD_DIR/throttle" "$MAD_DIR/locks" "$MAD_DIR/bin" "$SKILLS_DIR/handoff" "$SKILLS_DIR/pickup"
+mkdir -p "$MAD_DIR/throttle" "$MAD_DIR/locks" "$MAD_DIR/bin" "$MAD_DIR/pending" "$SKILLS_DIR/handoff" "$SKILLS_DIR/pickup"
+chmod 700 "$MAD_DIR/pending"
 
 # ── 1) 파일 배치 (로컬 체크아웃이면 복사, 아니면 허브에서 다운로드) ──
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/nonexistent}")" 2>/dev/null && pwd || echo /nonexistent)"
 fetch() { # $1 상대경로 → $2 대상
+  local staged
+  staged=$(mktemp "$(dirname "$2")/.madison-download.XXXXXX")
   if [ -f "$SRC_DIR/$1" ]; then
-    cp "$SRC_DIR/$1" "$2"
+    cp "$SRC_DIR/$1" "$staged"
   else
-    curl -fsSL -m 10 "$HUB/collector/$1" -o "$2"
+    curl -fsSL -m 10 "$HUB/collector/$1" -o "$staged"
   fi
+  mv "$staged" "$2"
 }
 # launchd 잡의 실행 파일명 = 로그인 항목 표시 이름이므로, 잡 스크립트는 madison-* 스텁명으로 배치한다
+fetch worker.py "$MAD_DIR/worker.py"
+fetch version.json "$MAD_DIR/version.json"
 fetch report.sh "$MAD_DIR/report.sh"
 fetch flush.sh "$MAD_DIR/bin/madison-flush"
 fetch skills/handoff/SKILL.md "$SKILLS_DIR/handoff/SKILL.md"
@@ -115,14 +121,15 @@ changed = False
 for event, entries in tmpl.items():
     existing = hooks.setdefault(event, [])
     for entry in entries:
-        cmd = entry["hooks"][0]["command"]
-        present = any(
-            h.get("command") == cmd
-            for e in existing if isinstance(e, dict)
-            for h in e.get("hooks", [])
-        )
-        if not present:
+        wanted = entry["hooks"][0]
+        cmd = wanted["command"]
+        found = next((h for e in existing if isinstance(e, dict)
+                      for h in e.get("hooks", []) if isinstance(h, dict) and h.get("command") == cmd), None)
+        if found is None:
             existing.append(entry)
+            changed = True
+        elif event == "SessionEnd" and found.get("timeout") != wanted.get("timeout"):
+            found["timeout"] = wanted["timeout"]
             changed = True
 
 if changed:
@@ -148,6 +155,7 @@ if [ "$(uname)" = "Darwin" ]; then
     <string>$MAD_DIR/bin/madison-flush</string>
   </array>
   <key>StartInterval</key><integer>300</integer>
+  <key>WatchPaths</key><array><string>$MAD_DIR/pending</string></array>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$MAD_DIR/flush.log</string>
   <key>StandardErrorPath</key><string>$MAD_DIR/flush.log</string>
@@ -157,7 +165,7 @@ EOF
   sleep 1
   launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
     || { sleep 1; launchctl bootstrap "gui/$(id -u)" "$PLIST"; }
-  note "스풀 플러셔 등록 (dev.madison.flush, 5분 주기)"
+  note "종료 작업 감시·스풀 플러셔 등록 (즉시 처리, 재시도 5분 주기)"
 
   # 서버에서 제거된 구형 P3 태스크 폴러 정리 — 라벨이 기기마다 달라 plist 내용(api/tasks)으로 식별한다.
   grep -l 'api/tasks' "$HOME/Library/LaunchAgents"/*.plist 2>/dev/null | while IFS= read -r OLD_PLIST; do
@@ -296,15 +304,23 @@ PY
 fi
 
 # ── 6) 검증 + 안내 ──
-. "$ENV_FILE"
-CODE=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
-  -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/state" 2>/dev/null || echo 000)
-if [ "$CODE" = "200" ]; then
-  note "허브 연결 확인 (GET /api/state → 200)"
+python3 "$MAD_DIR/worker.py" installed
+if [ "$(uname)" = "Darwin" ]; then
+  launchctl kickstart "gui/$(id -u)/dev.madison.flush" 2>/dev/null || true
 else
-  note "경고: 허브 연결 확인 실패 (code=$CODE) — 네트워크/토큰 확인 필요"
+  note "백그라운드 처리기를 cron/systemd로 실행해야 합니다: python3 $MAD_DIR/worker.py run"
+fi
+. "$ENV_FILE"
+CURL_STATUS=0
+CODE=$(curl -sS -m 5 -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/collector/status" 2>/dev/null) || CURL_STATUS=$?
+if [ "$CURL_STATUS" -eq 0 ] && [ "$CODE" = "200" ]; then
+  note "허브 연결 확인 (GET /api/collector/status → 200)"
+else
+  note "경고: 허브 연결 확인 실패 (HTTP=${CODE:-000}, curl=$CURL_STATUS) — 네트워크/토큰 확인 필요"
 fi
 note "설치 완료. 유의사항:"
+note "  · 로컬 사용량 일회성 대조는 백그라운드 처리기가 실행합니다. 결과는 GET /api/collector/results로 확인하세요"
 note "  · 이미 열려 있는 Claude Code/Codex 세션은 재시작해야 새 훅이 적용됩니다"
 note "  · Codex CLI에서 /hooks를 열어 MADISON 훅을 신뢰하세요"
 case "$MADISON_URL" in

@@ -9,7 +9,7 @@ import threading
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import auth, db, llm, llm_meta, registry, report, reporting, state, summary, tokens, usage
+from . import auth, db, llm, llm_meta, reconciliation, registry, report, reporting, state, summary, tokens, usage
 from .config import CFG, REPO_ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,6 +49,7 @@ COLLECTOR_FILES = {
     "hooks.template.json", "codex-hooks.template.json",
     "skills/handoff/SKILL.md", "skills/pickup/SKILL.md",
     "collect_tokens_local.py",   # 토큰 백필 운반 — 허브 없는 기기에서 집계 JSON 생성
+    "worker.py", "version.json",
 }
 
 
@@ -143,6 +144,72 @@ async def post_events(request: Request):
 
 
 # ── 조회 ──────────────────────────────────────────────
+
+@app.get("/api/collector/status")
+async def collector_status(request: Request):
+    actor = _require(request, ("device", "admin"))
+    with db.tx() as c:
+        return reconciliation.status(c, actor["device"]["id"] if actor["kind"] == "device" else None)
+
+
+async def _collector_body(request: Request):
+    raw = await request.body()
+    if len(raw) > 2_000_000:
+        raise HTTPException(413, "사용량 대조 요청은 2MB 이하")
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(400, "JSON 본문이 필요합니다")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "객체 본문이 필요합니다")
+    return body
+
+
+@app.post("/api/collector/status")
+async def post_collector_status(request: Request):
+    actor = _require(request, ("device",))
+    body = await _collector_body(request)
+    try:
+        with db.tx() as c:
+            return reconciliation.update_status(c, actor["device"]["id"], body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/collector/sessions")
+async def collector_sessions(request: Request):
+    actor = _require(request, ("device",))
+    with db.tx() as c:
+        rows = c.execute("SELECT agent,session_id FROM sessions WHERE device_id=?"
+                         " AND agent IN ('claude-code','codex-cli')", (actor["device"]["id"],)).fetchall()
+    return {"sessions": [dict(row) for row in rows]}
+
+
+@app.post("/api/collector/reconcile")
+async def reconcile_usage(request: Request):
+    actor = _require(request, ("device",))
+    body = await _collector_body(request)
+    try:
+        with db.tx() as c:
+            return reconciliation.reconcile(c, actor["device"]["id"], body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/collector/results")
+async def collector_results(request: Request, device: str = "", run_id: str = ""):
+    actor = _require(request, ("device", "admin"))
+    with db.tx() as c:
+        dev = actor["device"] if actor["kind"] == "device" else c.execute("SELECT id FROM devices WHERE name=?", (device,)).fetchone()
+        if not dev:
+            raise HTTPException(404, "기기 없음")
+        if not run_id:
+            last = c.execute("SELECT audit_id FROM collector_status WHERE device_id=?", (dev["id"],)).fetchone()
+            run_id = last["audit_id"] if last else ""
+        rows = c.execute("SELECT agent,session_id,status,added_total,checked_at,evidence FROM token_reconciliations"
+                         " WHERE device_id=? AND run_id=? ORDER BY agent,session_id", (dev["id"], run_id)).fetchall()
+    return {"run_id": run_id, "sessions": [{**dict(r), "evidence": json.loads(r["evidence"] or "{}")} for r in rows]}
+
 
 @app.get("/api/state")
 async def get_state(request: Request):

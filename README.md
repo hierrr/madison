@@ -270,6 +270,48 @@ source ~/.claude/madison/env
 curl -fsSL "$MADISON_URL/install.sh" | bash
 ```
 
+The hub accepts old and new collectors together, so devices can upgrade later.
+The **Devices** tab shows each collector version. Reconciliation results are not
+shown in the dashboard; query them through the API below.
+
+Starting with collector `2026.11.04.1`, macOS Claude and Codex shutdown hooks
+persist a small job in `~/.claude/madison/pending/`. A launchd worker sends the end
+event promptly and reconciles final token usage separately. Failed jobs survive
+process exit and retry every five minutes. Claude's hook timeout is ten seconds;
+Codex retains its three-second maximum.
+
+Collector `2026.11.04.2` identifies requests as `MADISON-Collector/<version>` to
+fix Cloudflare `403 / error code: 1010` responses to Python's default user agent.
+Affected devices should rerun the installer above, then run
+`python3 ~/.claude/madison/worker.py run` to resume queued work. Queues and audit
+checkpoints are preserved; completed audits do not need a full rescan. Release
+checks must exercise the Python worker's GET and POST requests through the
+actual tunnel URL as well as the local hub address.
+
+An upgrade schedules one local usage audit per audit revision. Session counters
+are compared with hub baselines; only verified missing usage is added to its
+original hour and day. Session status and turn counts are unchanged. Repeated
+uploads and delayed older events cannot count a correction twice. Last-session
+Claude cache values and the Codex local database provide supporting evidence;
+missing, active, incomplete, or conflicting records are reported for review,
+not automatically reconstructed. Conversation text and local paths are not
+uploaded through the reconciliation API. Deleted historical data cannot always
+be recovered.
+
+Reconciliation remains available permanently, but full scans are not periodic.
+To explicitly run another audit and inspect this device's results:
+
+```bash
+python3 ~/.claude/madison/worker.py audit
+source ~/.claude/madison/env
+curl -fsS -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/collector/status"
+curl -fsS -H "Authorization: Bearer $MADISON_TOKEN" "$MADISON_URL/api/collector/results"
+```
+
+Linux deployments must schedule `worker.py run` with cron/systemd as the installer
+indicates. Windows collectors remain compatible through the existing event path;
+this macOS queue and automatic audit rollout does not migrate them.
+
 ### hermes collector (optional)
 
 On a machine that runs hermes, drop in the reporter plugin to track hermes sessions on

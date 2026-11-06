@@ -173,6 +173,21 @@ CREATE TABLE IF NOT EXISTS token_daily (
   PRIMARY KEY (day, device_id, agent, project, model, frontend, source)
 );
 CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day);
+CREATE TABLE IF NOT EXISTS collector_status (
+  device_id INTEGER PRIMARY KEY REFERENCES devices(id),
+  version TEXT, installed_at TEXT, audit_id TEXT, audit_state TEXT,
+  started_at TEXT, finished_at TEXT, inventory TEXT
+);
+CREATE TABLE IF NOT EXISTS token_reconcile_floors (
+  device_id INTEGER NOT NULL, agent TEXT NOT NULL, session_id TEXT NOT NULL, cum TEXT NOT NULL,
+  PRIMARY KEY(device_id,agent,session_id)
+);
+CREATE TABLE IF NOT EXISTS token_reconciliations (
+  device_id INTEGER NOT NULL, run_id TEXT NOT NULL, agent TEXT NOT NULL, session_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL, status TEXT NOT NULL, added_total INTEGER NOT NULL DEFAULT 0,
+  result TEXT NOT NULL, checked_at TEXT NOT NULL, evidence TEXT,
+  PRIMARY KEY(device_id,run_id,agent,session_id)
+);
 """
 
 # 시간 원장 — token_daily와 같은 열, day 대신 hour. 1·7일 롤링 창(tokens.window)이 읽는다.
@@ -201,6 +216,7 @@ SCHEMA = _BASE_SCHEMA + ";\n".join(_HOURLY_DDL) + ";\n"
 
 # 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)
 MIGRATIONS = (
+    "ALTER TABLE token_reconciliations ADD COLUMN evidence TEXT",
     "ALTER TABLE sessions ADD COLUMN task_summary TEXT",
     "ALTER TABLE sessions ADD COLUMN model TEXT",
     "ALTER TABLE sessions ADD COLUMN effort TEXT",

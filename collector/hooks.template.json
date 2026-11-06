@@ -8,6 +8,6 @@
     "Notification":      [{ "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh idle 2>/dev/null || true" }] }],
     "Stop":              [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh turn_done 2>/dev/null || true" }] }],
     "SubagentStop":      [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh subagent_stop 2>/dev/null || true" }] }],
-    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh session_end 2>/dev/null || true" }] }]
+    "SessionEnd":        [{ "hooks": [{ "type": "command", "command": "~/.claude/madison/report.sh session_end 2>/dev/null || true", "timeout": 10 }] }]
   }
 }

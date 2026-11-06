@@ -268,7 +268,15 @@ def fold(c, device_id: int, agent: str, session_id: str, *, project: str, model:
         if not isinstance(old, dict):
             old = {}
 
+        # 보정 뒤 지연 도착한 구형 수집기의 누적으로 기준점이 역행하지 않게 한다.
+        floor = c.execute("SELECT cum FROM token_reconcile_floors WHERE device_id=? AND agent=? AND session_id=?",
+                          (device_id, agent, session_id)).fetchone()
+        if floor:
+            from .reconciliation import merge_max
+            old = merge_max(old, _clean(json.loads(floor["cum"])))
         deltas, stored = _step(agent, old, cum, model)
+        if floor:
+            stored = merge_max(old, stored)
         hour = local_hour(ts_device, ts_hub)
         for m, d, turns in _spread(deltas, count_turn):
             add_ledger(c, hour, device_id, agent, project, m, frontend, "events", d, turns=turns)
