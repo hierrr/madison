@@ -285,6 +285,10 @@ cp collector/hermes/env.example ~/.hermes/plugins/madison/env
 카운터에 반영됩니다. hermes의 자동 세션 리셋은 훅 없이 일어나므로 리포터가 60초 주기
 스윕으로 종료를 감지하고, 유휴 24시간이 지난 세션은 합성 종료로 정리합니다.
 
+수집기 설치 스크립트(`collector/install.sh`)를 다시 실행하면 이미 설치된 플러그인의 코드
+파일이 갱신되고(`env`와 런타임 상태는 유지), 플러그인이 활성 상태면 실행 중인 게이트웨이에
+리로드됩니다. 최초 설치는 위처럼 수동으로 합니다.
+
 ### Windows (베타)
 
 Windows 수집기는 launchd 대신 작업 스케줄러를 쓰는 PowerShell 스크립트

@@ -330,6 +330,10 @@ and delegations feed the subagent counter. hermes' automatic session resets fire
 the reporter detects endings with a 60-second sweep and synthesizes an end for sessions idle
 longer than 24 hours.
 
+Re-running the collector installer (`collector/install.sh`) updates the code files of an
+already-installed plugin (`env` and runtime state are kept) and reloads it in the running
+gateway if it is enabled. The first install stays manual, as above.
+
 ### Windows (beta)
 
 Windows collectors ship as PowerShell scripts (`collector/install.ps1`,

@@ -50,6 +50,7 @@ COLLECTOR_FILES = {
     "skills/handoff/SKILL.md", "skills/pickup/SKILL.md",
     "collect_tokens_local.py",   # 토큰 백필 운반 — 허브 없는 기기에서 집계 JSON 생성
     "worker.py", "version.json",
+    "hermes/__init__.py", "hermes/madison_common.py", "hermes/plugin.yaml",   # hermes 리포터 플러그인 갱신용
 }
 
 

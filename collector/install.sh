@@ -56,15 +56,15 @@ chmod 700 "$MAD_DIR/pending"
 
 # ── 1) 파일 배치 (로컬 체크아웃이면 복사, 아니면 허브에서 다운로드) ──
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/nonexistent}")" 2>/dev/null && pwd || echo /nonexistent)"
-fetch() { # $1 상대경로 → $2 대상
+fetch() { # $1 상대경로 → $2 대상. 실패 시 대상을 건드리지 않고 1을 반환한다 (if/|| 안에서 errexit가 꺼져도 안전하도록 명시 처리)
   local staged
-  staged=$(mktemp "$(dirname "$2")/.madison-download.XXXXXX")
+  staged=$(mktemp "$(dirname "$2")/.madison-download.XXXXXX") || return 1
   if [ -f "$SRC_DIR/$1" ]; then
-    cp "$SRC_DIR/$1" "$staged"
+    cp "$SRC_DIR/$1" "$staged" || { rm -f "$staged"; return 1; }
   else
-    curl -fsSL -m 10 "$HUB/collector/$1" -o "$staged"
+    curl -fsSL -m 10 "$HUB/collector/$1" -o "$staged" || { rm -f "$staged"; return 1; }
   fi
-  mv "$staged" "$2"
+  mv "$staged" "$2" || { rm -f "$staged"; return 1; }
 }
 # launchd 잡의 실행 파일명 = 로그인 항목 표시 이름이므로, 잡 스크립트는 madison-* 스텁명으로 배치한다
 fetch worker.py "$MAD_DIR/worker.py"
@@ -301,6 +301,58 @@ PY
     fi
   fi
   note "Codex에서 /hooks를 열어 새 MADISON command hooks를 검토·신뢰해야 합니다"
+fi
+
+# ── 5b) hermes 리포터 플러그인 갱신 (이미 설치된 기기만) ──
+# 최초 설치는 수동(env·토큰 기입, config 활성화 필요)이라 건드리지 않는다.
+# 코드 파일 3개만 교체하고 env·state.json·spool.jsonl(토큰·런타임 상태)은 절대 만지지 않는다.
+# 어떤 단계가 실패해도 설치 전체를 중단하지 않는다.
+HERMES_PLUGIN="$HOME/.hermes/plugins/madison"
+if [ -f "$HERMES_PLUGIN/plugin.yaml" ]; then
+  # 이전 실행이 남긴 임시 파일·스테이징 폴더 정리
+  rm -rf "$HERMES_PLUGIN"/.madison-download.* "$HERMES_PLUGIN"/.madison-stage.* 2>/dev/null || true
+  # 전부 성공해야만 교체한다 (all-or-nothing) — 먼저 플러그인 디렉터리 안 스테이징 폴더에 받는다
+  HERMES_UPDATED=0
+  HERMES_STAGE=$(mktemp -d "$HERMES_PLUGIN/.madison-stage.XXXXXX" 2>/dev/null || true)
+  if [ -n "$HERMES_STAGE" ] && [ -d "$HERMES_STAGE" ]; then
+    HERMES_UPDATED=1
+    for f in __init__.py madison_common.py plugin.yaml; do
+      if ! fetch "hermes/$f" "$HERMES_STAGE/$f"; then
+        HERMES_UPDATED=0
+        break
+      fi
+    done
+    if [ "$HERMES_UPDATED" = "1" ]; then
+      chmod 644 "$HERMES_STAGE"/__init__.py "$HERMES_STAGE"/madison_common.py "$HERMES_STAGE"/plugin.yaml 2>/dev/null || HERMES_UPDATED=0
+    fi
+    if [ "$HERMES_UPDATED" = "1" ]; then
+      for f in __init__.py madison_common.py plugin.yaml; do
+        mv -f "$HERMES_STAGE/$f" "$HERMES_PLUGIN/$f" || HERMES_UPDATED=0
+      done
+    fi
+    rm -rf "$HERMES_STAGE"
+  fi
+  if [ "$HERMES_UPDATED" != "1" ]; then
+    note "경고: hermes 플러그인 갱신 실패 — 기존 파일 유지, 리로드 생략 (허브 연결·권한 확인 후 재실행)"
+  else
+    HERMES_VER=$(sed -n 's/^version:[[:space:]]*//p' "$HERMES_PLUGIN/plugin.yaml" 2>/dev/null | head -1 || true)
+    HERMES_INFO=""
+    if command -v hermes >/dev/null 2>&1; then
+      HERMES_INFO=$(hermes plugins info madison </dev/null 2>/dev/null || true)
+    fi
+    if grep -q '^Status: enabled' <<<"$HERMES_INFO"; then
+      # 비활성화 → 활성화가 실행 중 게이트웨이에 핫리로드된다 (curl | bash의 stdin을 먹지 않도록 </dev/null)
+      if ! hermes plugins disable madison </dev/null >/dev/null 2>&1; then
+        note "경고: hermes 플러그인 파일은 갱신했으나 리로드 실패 — 'hermes plugins disable madison && hermes plugins enable madison' 실행 필요"
+      elif hermes plugins enable madison </dev/null >/dev/null 2>&1 || { sleep 1; hermes plugins enable madison </dev/null >/dev/null 2>&1; }; then
+        note "hermes 리포터 플러그인 갱신·리로드 (v${HERMES_VER:-?})"
+      else
+        note "경고: hermes 플러그인이 현재 비활성화 상태입니다 (게이트웨이에 보고되지 않음) — 'hermes plugins enable madison' 을 실행하세요"
+      fi
+    else
+      note "hermes 리포터 플러그인 파일 갱신 (v${HERMES_VER:-?}) — 리로드 없이 파일만 교체함 (hermes CLI 없음 또는 플러그인 비활성)"
+    fi
+  fi
 fi
 
 # ── 6) 검증 + 안내 ──

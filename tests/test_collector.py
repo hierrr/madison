@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -426,6 +427,169 @@ class CollectorTests(unittest.TestCase):
                 for skill in ("handoff", "pickup"):
                     self.assertEqual((home / agent / "skills" / skill / "SKILL.md").read_bytes(),
                                      (REPO / "collector" / "skills" / skill / "SKILL.md").read_bytes(), f"{agent}/{skill}")
+
+    HERMES_CODE_FILES = ("__init__.py", "madison_common.py", "plugin.yaml")
+    HERMES_RUNTIME_FILES = {
+        "env": b"MADISON_URL=http://plugin-hub.test\nMADISON_TOKEN=plugin-token\n",
+        "state.json": b'{"cursor": 7}\n',
+        "spool.jsonl": b'{"event": "queued"}\n',
+    }
+
+    def install_with_hermes_plugin(self, status=None, disable_rc=0, installed=True,
+                                   enable_failures=0, broken_download=False):
+        """임시 HOME에 (선택) 구버전 hermes 플러그인을 두고 실제 install.sh를 실행.
+        status: fake hermes CLI의 `plugins info madison` Status 값 (None이면 CLI 자체가 없음).
+        enable_failures: `plugins enable madison`이 처음 N번 실패한다.
+        broken_download: collector 복사본에서 hermes/madison_common.py를 빼 curl 폴백을 강제하고,
+        가짜 curl이 hermes 경로 요청을 전부 실패시킨다 (다운로드 중간 실패)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, _mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            plugin = home / ".hermes" / "plugins" / "madison"
+            if installed:
+                plugin.mkdir(parents=True)
+                for name in self.HERMES_CODE_FILES:
+                    (plugin / name).write_text("stale\n")
+                    (plugin / name).chmod(0o600)
+                for name, data in self.HERMES_RUNTIME_FILES.items():
+                    (plugin / name).write_bytes(data)
+                (plugin / ".madison-download.leftover").write_text("partial\n")
+                (plugin / ".madison-stage.leftover").mkdir()
+                (plugin / ".madison-stage.leftover" / "__init__.py").write_text("partial\n")
+            hermes_log = root / "hermes.log"
+            if status is not None:
+                executable(
+                    bindir / "hermes",
+                    "#!/bin/bash\n"
+                    "echo \"$*\" >> \"$MADISON_TEST_HERMES_LOG\"\n"
+                    "case \"$*\" in\n"
+                    f"  'plugins info madison') printf 'Name: madison\\nStatus: {status}\\n' ;;\n"
+                    f"  'plugins disable madison') exit {disable_rc} ;;\n"
+                    "  'plugins enable madison')\n"
+                    "    n=$(cat \"$MADISON_TEST_HERMES_LOG.enable\" 2>/dev/null || echo 0)\n"
+                    "    echo $((n + 1)) > \"$MADISON_TEST_HERMES_LOG.enable\"\n"
+                    "    [ \"$n\" -lt \"$MADISON_TEST_ENABLE_FAILS\" ] && exit 1 ;;\n"
+                    "esac\n"
+                    "exit 0\n",
+                )
+            install = INSTALL
+            extra_dirs = []
+            if broken_download:
+                src = root / "collector"
+                shutil.copytree(REPO / "collector", src, ignore=shutil.ignore_patterns("__pycache__"))
+                (src / "hermes" / "madison_common.py").unlink()
+                install = src / "install.sh"
+                failing = root / "failing-bin"
+                failing.mkdir()
+                real_curl = bindir / "curl"
+                executable(
+                    failing / "curl",
+                    "#!/bin/bash\n"
+                    "case \"$*\" in *'/collector/hermes/'*) exit 22 ;; esac\n"
+                    f"exec '{real_curl}' \"$@\"\n",
+                )
+                extra_dirs = [str(bindir)]
+                bindir = failing
+            # 호스트에 실제 hermes가 있어도 영향받지 않도록 PATH에서 제외한다
+            path_dirs = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "hermes").exists()]
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "PATH": os.pathsep.join([str(bindir)] + extra_dirs + path_dirs),
+                        "MADISON_TEST_HERMES_LOG": str(hermes_log),
+                        "MADISON_TEST_ENABLE_FAILS": str(enable_failures)})
+            proc = subprocess.run(["bash", str(install)], env=env, cwd=REPO, capture_output=True, text=True)
+            calls = hermes_log.read_text().splitlines() if hermes_log.exists() else []
+            runtime = {name: (plugin / name).read_bytes() for name in self.HERMES_RUNTIME_FILES if (plugin / name).exists()}
+            code = {name: (plugin / name).read_bytes() for name in self.HERMES_CODE_FILES if (plugin / name).exists()}
+            leftovers = list(plugin.glob(".madison-*")) if plugin.exists() else []
+            modes = {name: stat.S_IMODE((plugin / name).stat().st_mode) for name in self.HERMES_CODE_FILES if (plugin / name).exists()}
+            return {"proc": proc, "calls": calls, "runtime": runtime, "code": code, "modes": modes,
+                    "leftovers": leftovers, "plugin_exists": plugin.exists()}
+
+    def assert_hermes_code_refreshed(self, result):
+        for name in self.HERMES_CODE_FILES:
+            self.assertEqual(result["code"][name], (REPO / "collector" / "hermes" / name).read_bytes(), name)
+        self.assertEqual(result["runtime"], self.HERMES_RUNTIME_FILES)  # 토큰·런타임 상태는 그대로
+        self.assertEqual(result["leftovers"], [])
+
+    def test_installer_refreshes_enabled_hermes_plugin_and_reloads(self):
+        r = self.install_with_hermes_plugin(status="enabled")
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assert_hermes_code_refreshed(r)
+        self.assertEqual(r["calls"], ["plugins info madison", "plugins disable madison", "plugins enable madison"])
+        self.assertIn("hermes 리포터 플러그인 갱신·리로드", r["proc"].stdout)
+
+    def test_installer_refreshes_disabled_hermes_plugin_without_reload(self):
+        r = self.install_with_hermes_plugin(status="disabled")
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assert_hermes_code_refreshed(r)
+        self.assertEqual(r["calls"], ["plugins info madison"])  # disable/enable 호출 없음
+        self.assertIn("리로드 없이 파일만 교체", r["proc"].stdout)
+
+    def test_installer_refreshes_hermes_plugin_files_when_cli_missing(self):
+        r = self.install_with_hermes_plugin(status=None)
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assert_hermes_code_refreshed(r)
+        self.assertEqual(r["calls"], [])
+        self.assertIn("리로드 없이 파일만 교체", r["proc"].stdout)
+
+    def test_installer_continues_when_hermes_plugin_reload_fails(self):
+        r = self.install_with_hermes_plugin(status="enabled", disable_rc=1)
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assert_hermes_code_refreshed(r)
+        self.assertEqual(r["calls"], ["plugins info madison", "plugins disable madison"])  # 실패하면 enable로 가지 않음
+        self.assertIn("경고", r["proc"].stdout)
+        self.assertIn("리로드 실패", r["proc"].stdout)
+        self.assertNotIn("갱신·리로드 (v", r["proc"].stdout)
+
+    def test_installer_keeps_hermes_plugin_untouched_when_a_download_fails(self):
+        # 3개 중 하나라도 못 받으면 아무것도 교체하지 않는다 (all-or-nothing)
+        r = self.install_with_hermes_plugin(status="enabled", broken_download=True)
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        for name in self.HERMES_CODE_FILES:
+            self.assertEqual(r["code"][name], b"stale\n", name)
+        self.assertEqual(r["runtime"], self.HERMES_RUNTIME_FILES)
+        self.assertEqual(r["calls"], [])  # hermes CLI를 호출하지 않는다
+        self.assertEqual(r["leftovers"], [])  # 스테이징 폴더·임시 파일 정리
+        self.assertIn("경고: hermes 플러그인 갱신 실패 — 기존 파일 유지, 리로드 생략", r["proc"].stdout)
+
+    def test_installer_retries_hermes_plugin_enable_once(self):
+        r = self.install_with_hermes_plugin(status="enabled", enable_failures=1)
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assert_hermes_code_refreshed(r)
+        self.assertEqual(r["calls"], ["plugins info madison", "plugins disable madison",
+                                      "plugins enable madison", "plugins enable madison"])
+        self.assertIn("hermes 리포터 플러그인 갱신·리로드", r["proc"].stdout)
+        self.assertNotIn("비활성화 상태", r["proc"].stdout)
+
+    def test_installer_warns_when_hermes_plugin_stays_disabled_after_retry(self):
+        r = self.install_with_hermes_plugin(status="enabled", enable_failures=2)
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assert_hermes_code_refreshed(r)
+        self.assertEqual(r["calls"], ["plugins info madison", "plugins disable madison",
+                                      "plugins enable madison", "plugins enable madison"])
+        self.assertIn("경고: hermes 플러그인이 현재 비활성화 상태입니다", r["proc"].stdout)
+        self.assertIn("hermes plugins enable madison", r["proc"].stdout)
+        self.assertNotIn("갱신·리로드 (v", r["proc"].stdout)
+
+    def test_installer_sets_hermes_plugin_files_to_mode_0644(self):
+        r = self.install_with_hermes_plugin(status="disabled")  # 기존 파일은 0600으로 시작
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assertEqual(r["modes"], {name: 0o644 for name in self.HERMES_CODE_FILES})
+
+    def test_installer_does_not_create_hermes_plugin_dir_when_not_installed(self):
+        r = self.install_with_hermes_plugin(status="enabled", installed=False)
+        self.assertEqual(r["proc"].returncode, 0, r["proc"].stderr)
+        self.assertFalse(r["plugin_exists"])
+        self.assertEqual(r["calls"], [])  # 미설치 기기에서는 hermes CLI도 건드리지 않는다
+
+    def test_hub_serves_hermes_plugin_code_files_but_not_env_example(self):
+        from server import app as hub
+        for name in self.HERMES_CODE_FILES:
+            rel = f"hermes/{name}"
+            self.assertIn(rel, hub.COLLECTOR_FILES)
+            self.assertTrue((hub.COLLECTOR_DIR / rel).is_file(), rel)
+        self.assertNotIn("hermes/env.example", hub.COLLECTOR_FILES)
 
     def test_installer_requires_hub_on_first_install(self):
         # 첫 설치(env 없음)에서 --hub 미지정이면 터널 기본값으로 가지 않고 안내와 함께 거절한다
