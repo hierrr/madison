@@ -1,5 +1,5 @@
 name: madison
-version: 0.3.0
+version: 0.3.1
 description: Report hermes sessions/turns/approvals to the MADISON hub (all surfaces)
 author: hierrr
 provides_hooks:

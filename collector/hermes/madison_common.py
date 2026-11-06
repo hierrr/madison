@@ -312,7 +312,8 @@ def _post(payload):
     req = urllib.request.Request(
         URL + "/api/events",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + TOKEN},
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + TOKEN,
+                 "User-Agent": "MADISON-Hermes"},
     )
     with urllib.request.urlopen(req, timeout=4) as r:
         r.read()
