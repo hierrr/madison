@@ -475,17 +475,22 @@
   .ucol { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
   .panel h2 img.picon { width: 16px; height: 16px; border-radius: 4px; flex: none; }
   .panel h2.prov { text-transform: none; font-size: 12.5px; }
+  .prov-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .prov-head h2 { margin-bottom: 0; }
+  .prov-resets:not(:empty) { display: flex; gap: 8px 16px; flex-wrap: wrap; max-width: 100%; }
+  .prov-resets .u-row { width: 120px; }
+  .prov-resets .u-credits i { background: var(--lg-violet); }
   .uchart svg { display: block; width: 100%; height: auto; }
   .uchart .grid { stroke: var(--line); stroke-width: 1; }
   .uchart .axis { fill: var(--ink-3); font-size: 9px; font-family: var(--mono); }
   .uchart path.w { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
   .uchart circle.reset { fill: var(--crit); stroke: var(--surface); stroke-width: 1; }
-  .uchart circle.plan { fill: var(--lg-blue); stroke: var(--surface); stroke-width: 1; }
+  .uchart circle.plan { fill: var(--lg-purple); stroke: var(--surface); stroke-width: 1; }
   .ulegend { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-2); margin-top: 8px; }
   .ulegend .mono { font-family: var(--mono); color: var(--ink-3); }
   .ulegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
   .ulegend .reset-note { color: var(--crit); }
-  .ulegend .plan-note { color: var(--lg-blue); }
+  .ulegend .plan-note { color: var(--lg-purple); }
   .uscroll { overflow-x: auto; padding-bottom: 2px; }
   .tstack { display: flex; gap: 2px; align-items: flex-end; height: 110px; min-width: 100%; width: max-content; }
   /* 컬럼은 전체 높이 히트 영역(호버 툴팁) — 세그먼트는 column-reverse로 바닥부터 쌓인다 */
@@ -928,8 +933,54 @@
       '<span class="track"><span class="fill" style="width:' + Math.max(0, Math.min(pct, 100)) + '%"></span></span></div>';
   }
   var LAST_USAGE = null;  // 사용량 탭이 "이 프로바이더가 살아 있나"를 판단할 때 참조
+  function resetCreditTooltip(x, label) {
+    var groups = {};
+    (x.expirations || []).forEach(function (e) {
+      if (Number.isFinite(e.expires_at) && Number.isInteger(e.count) && e.count > 0) {
+        groups[e.expires_at] = (groups[e.expires_at] || 0) + e.count;
+      }
+    });
+    var times = Object.keys(groups).sort(function (a, b) { return Number(a) - Number(b); });
+    if (!times.length) return '';
+    return (label || '초기화') + '권 만료 (한국 시간) · ' + times.map(function (t) {
+      var date = new Date(Number(t) * 1000).toLocaleString('ko-KR', {
+        timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+      });
+      return groups[t] + '장: ' + date;
+    }).join(' / ');
+  }
+  function resetCreditRow(x, label) {
+    label = label || '초기화';
+    var n = Number(x.count || 0), sq = '', expiryTip = resetCreditTooltip(x, label);
+    for (var i = 0; i < Math.min(n, 12); i++) sq += '<i></i>';
+    return '<div class="u-row text"' + (expiryTip ? ' data-d="' + esc(expiryTip) + '"' : '') +
+      '><div class="head"><span class="lbl">' + esc(label) + '</span><span class="val">' + n + '</span></div>' +
+      (n ? '<span class="u-credits">' + sq + '</span>' : '') + '</div>';
+  }
+  function resetCreditRows(x) {
+    // 구형 스냅샷과 Codex는 합계를 유지하고, 종류가 제공되면 각 종류의 만료 정보만 보여준다.
+    if (!Array.isArray(x.groups) || !x.groups.length) return resetCreditRow(x);
+    var labels = { session: '5h 초기화', weekly: '주간 초기화', fable: 'Fable 초기화', full: '전체 초기화' };
+    return x.groups.map(function (g) {
+      return resetCreditRow(g, labels[g.kind] || '기타 초기화');
+    }).join('');
+  }
+  function resetCreditsHtml(d) {
+    var resets = ((d && d.extras) || []).find(function (x) { return x.title === 'Reset credits'; });
+    return resets ? resetCreditRows(resets) : '';
+  }
+  function syncUsageResets(u) {
+    ['claude', 'codex'].forEach(function (p) {
+      var el = document.getElementById('usage-' + p + '-resets');
+      if (!el) return;
+      var html = resetCreditsHtml(u && u[p]);
+      if (el.innerHTML !== html) el.innerHTML = html;  // 호버 중인 초기화권은 내용이 바뀔 때만 교체
+    });
+  }
   function renderUsage(u) {
     LAST_USAGE = u;
+    syncUsageResets(u);  // 사용량 탭도 같은 현재 스냅샷으로 갱신(별도 조회·캐시 없음)
     // USAGE=0이거나 허브에 계정이 하나도 없으면 통째로 숨김(4열), 한쪽만 없으면 그 타일만 숨김(5열)
     var nProv = u ? ['claude', 'codex'].filter(function (p) { return u[p]; }).length : 0;
     var kpis = document.getElementById('kpis');
@@ -945,10 +996,7 @@
       var html = (d.windows || []).map(function (w) { return usageRow(w.title.replace(' all models', ' 전체'), w.pct, w.left); }).join('');
       html += (d.extras || []).map(function (x) {
         if (x.title === 'Reset credits') {
-          var n = Number(x.count || 0), sq = '';
-          for (var i = 0; i < Math.min(n, 12); i++) sq += '<i></i>';
-          return '<div class="u-row text"><div class="head"><span class="lbl">초기화</span><span class="val">' + n + '</span></div>' +
-            (n ? '<span class="u-credits">' + sq + '</span>' : '') + '</div>';
+          return resetCreditRows(x);
         }
         if (x.title === 'Credits') {
           // 사용 크레딧: 꺼짐이면 한도 도달 시 크레딧을 안 쓴다는 설명을 공용 data-d 툴팁으로 (title은 5초 재렌더로 사라진다)
@@ -2101,7 +2149,8 @@
   var UDEVS = [];   // 지금까지 관측한 기기 이름 (필터된 응답에도 칩이 안 사라지게 합집합 유지)
   var USAGE_TOP_N = 5;   // 서비스별·프로젝트별 기본 노출 개수 (나머지는 펼치기)
   // 좌측 그래프 항목 색: 모든 그래프에서 등장 순서대로 gold → green → blue 통일 (테마 변수라 다크/라이트 자동)
-  var WINCOLORS = ['var(--lg-gold)', 'var(--lg-green)', 'var(--lg-blue)', 'var(--lg-violet)', 'var(--lg-purple)', 'var(--lg-coral)'];
+  // 보라색은 플랜 변경 마커 전용 — 한도 선과 범례에는 쓰지 않는다.
+  var WINCOLORS = ['var(--lg-gold)', 'var(--lg-green)', 'var(--lg-blue)', 'var(--lg-teal)', 'var(--lg-tealdeep)', 'var(--lg-coral)'];
 
   function fmtTok(n) {
     n = Number(n) || 0;
@@ -2335,8 +2384,9 @@
     // 한도 패널 제목은 현황 타일과 동일하게 — 로고 + 이름 · 플랜
     function provPanel(p, d) {
       var cap = p === 'claude' ? 'Claude' : 'Codex';
-      return '<section class="panel"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
+      return '<section class="panel"><div class="prov-head"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
         cap + (d.plan ? ' · ' + esc(d.plan) : '') + '</h2>' +
+        '<div class="prov-resets" id="usage-' + p + '-resets">' + resetCreditsHtml(LAST_USAGE && LAST_USAGE[p]) + '</div></div>' +
         '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}, d.plan_changes || [], d.live) + '</div></section>';
     }
     function stat(label, val) {

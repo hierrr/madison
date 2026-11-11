@@ -92,11 +92,18 @@ push a piece of work from one machine to another without walking over to it.
   reads them itself from the providers' own endpoints (see Security model).
   Claude's plan name comes from the account profile (`plan_display_name`), so a
   provider-side rename shows up without re-login (within an hour — the profile
-  is cached). The Claude tile also shows the usage-credit balance with its
-  on/off state and next expiry; the Codex tile shows its credit balance below
-  the reset credits.
+  is cached). Both tiles show reset credits above the usage-credit balance,
+  with Claude's weekly and Fable resets listed separately. Hover over a reset row
+  to see that kind's available expiry timestamps in Korea time;
+  credits expiring together are grouped. Claude's usage-credit balance also
+  shows its on/off state and next expiry. Claude reset details are requested
+  through usage's `cedar_ember` field using the installed CLI version.
+  Unavailable counts or expiry details are not treated as zero or unlimited validity.
   Plan changes (e.g. Team → Pro) are recorded and marked on the usage tab's
-  history chart, since windows and quotas differ between plans.
+  history chart, since windows and quotas differ between plans. Purple is reserved
+  for plan-change markers and their legend within each limit chart. Its upper-right
+  corner also shows current reset credits by kind with violet credit squares and
+  expiry tooltips, updated alongside the overview tiles.
   The gauges are **for the account signed in on the hub machine** — limits are
   per-account, so consumption from every device on that account is already
   included, while devices signed into a different account never appear in any

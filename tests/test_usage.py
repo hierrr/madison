@@ -304,6 +304,157 @@ USAGE = {"five_hour": None,
          "extra_usage": {"is_enabled": False}}
 
 
+class ResetCreditTests(unittest.TestCase):
+    NOW = usage.to_epoch("2026-11-10T00:00:00Z")
+    EXPIRY = "2027-03-09T07:59:00Z"
+
+    def claude(self, grants, **status):
+        return usage.parse_claude_resets({"cedar_ember": {"eligible": True, "grants": grants, **status}}, self.NOW)
+
+    def test_claude_held_resets_and_expirations(self):
+        got = self.claude([
+            {"resets_left": 2, "ends_at": self.EXPIRY, "usable_now": False, "use_requires_limit": True},
+            {"resets_left": 1, "ends_at": None},
+        ])
+        self.assertEqual(got["count"], 3)  # 한도 도달 전에도 미사용 초기화권은 표시
+        self.assertEqual(got["expirations"], [{"count": 2, "expires_at": usage.to_epoch(self.EXPIRY)}])
+
+    def test_claude_excludes_used_expired_future_and_paused_grants(self):
+        got = self.claude([
+            {"resets_left": 1, "ends_at": self.NOW},
+            {"resets_left": 1, "starts_at": self.NOW + 60},
+            {"resets_left": 1, "paused": True},
+            {"resets_left": 0, "ends_at": self.EXPIRY},
+            {"resets_left": 2, "starts_at": self.NOW, "ends_at": self.NOW + 1},
+        ])
+        self.assertEqual(got["count"], 2)
+        self.assertEqual(got["expirations"], [{"count": 2, "expires_at": self.NOW + 1}])
+
+    def test_claude_weekly_and_fable_have_separate_counts_and_expirations(self):
+        weekly_expiry, fable_expiry = self.NOW + 100, self.NOW + 200
+        got = self.claude([
+            {"resets_left": 2, "type": "full", "gives_back_weekly": True,
+             "clears": ["seven_day_overage_included"], "ends_at": fable_expiry},
+            {"resets_left": 1, "type": "weekly", "gives_back_weekly": False,
+             "clears": ["seven_day", "seven_day_overage_included"], "ends_at": weekly_expiry},
+            {"resets_left": 2, "type": "full", "gives_back_weekly": True,
+             "usable_now": False, "ends_at": fable_expiry},
+        ])
+        self.assertEqual(got["count"], 5)
+        self.assertEqual(got["groups"], [
+            {"kind": "weekly", "count": 1, "expirations": [{"count": 1, "expires_at": weekly_expiry}]},
+            {"kind": "fable", "count": 4, "expirations": [
+                {"count": 2, "expires_at": fable_expiry}, {"count": 2, "expires_at": fable_expiry}]},
+        ])
+        self.assertEqual(sum(g["count"] for g in got["groups"]), got["count"])
+        self.assertEqual(sum(e["count"] for e in got["expirations"]), got["count"])
+
+    def test_claude_full_without_weekly_refund_is_not_fable(self):
+        got = self.claude([
+            {"resets_left": 1, "type": "full", "gives_back_weekly": False},
+            {"resets_left": 2, "type": "session"},
+        ])
+        self.assertEqual(got["groups"], [{"kind": "session", "count": 2}, {"kind": "full", "count": 1}])
+
+    def test_claude_legacy_kind_uses_only_known_clear_windows(self):
+        for clears, expected in ((["five_hour"], "session"), (["seven_day"], "weekly"),
+                                 (["seven_day_overage_included"], "weekly"),
+                                 (["five_hour", "seven_day"], "full")):
+            with self.subTest(clears=clears):
+                self.assertEqual(self.claude([{"resets_left": 1, "clears": clears}])["groups"],
+                                 [{"kind": expected, "count": 1}])
+        for fields in ({}, {"type": "future", "clears": ["seven_day"]}, {"type": []},
+                       {"clears": []}, {"clears": "seven_day"}, {"clears": [None]},
+                       {"clears": ["future_window"]}, {"gives_back_weekly": "true"}):
+            with self.subTest(fields=fields):
+                self.assertNotIn("groups", self.claude([{"resets_left": 1, **fields}]))
+
+    def test_claude_unknown_kind_is_preserved_beside_known_group(self):
+        got = self.claude([
+            {"resets_left": 2, "type": "future", "ends_at": self.NOW + 100},
+            {"resets_left": 3},
+            {"resets_left": 1, "type": "weekly"},
+        ])
+        self.assertEqual(got["count"], 6)
+        self.assertEqual(got["groups"], [
+            {"kind": "weekly", "count": 1},
+            {"kind": "unknown", "count": 5, "expirations": [{"count": 2, "expires_at": self.NOW + 100}]},
+        ])
+
+    def test_claude_group_zero_is_kept_but_inactive_grants_are_excluded(self):
+        got = self.claude([
+            {"resets_left": 0, "type": "weekly", "ends_at": self.NOW + 100},
+            {"resets_left": 4, "type": "weekly", "ends_at": self.NOW},
+            {"resets_left": 3, "type": "full", "gives_back_weekly": True, "paused": True},
+            {"resets_left": 2, "type": "full", "gives_back_weekly": True, "starts_at": self.NOW + 60},
+            {"resets_left": 1, "type": "full", "gives_back_weekly": True, "ends_at": self.NOW + 200},
+        ])
+        self.assertEqual(got["count"], 1)
+        self.assertEqual(got["groups"], [
+            {"kind": "weekly", "count": 0},
+            {"kind": "fable", "count": 1, "expirations": [{"count": 1, "expires_at": self.NOW + 200}]},
+        ])
+        self.assertEqual(self.claude([{"resets_left": 0, "type": "weekly"}]), {
+            "title": "Reset credits", "value": "0 available", "count": 0,
+            "groups": [{"kind": "weekly", "count": 0}]})
+
+    def test_claude_unknown_is_distinct_from_zero(self):
+        for status in (None, {}, {"eligible": False, "ineligible_reason": "surface", "grants": []},
+                       {"eligible": True}, {"eligible": True, "grants": "bad"}):
+            self.assertIsNone(usage.parse_claude_resets({"cedar_ember": status}, self.NOW))
+        self.assertEqual(self.claude([])["count"], 0)
+        self.assertEqual(self.claude([{"resets_left": 0}])["count"], 0)
+
+    def test_bad_counts_and_dates_do_not_break_usage(self):
+        for bad in (True, -1, 1.5, "2", None, float("nan"), float("inf")):
+            with self.subTest(count=bad):
+                self.assertIsNone(self.claude([{"resets_left": bad}]))
+                parsed = usage.parse_codex_rpc({"rateLimitResetCredits": {"availableCount": bad}})
+                self.assertIsNone(parsed["reset_credits"])
+        for bad in (True, "garbage", float("nan"), float("inf"), {}):
+            with self.subTest(expiry=bad):
+                self.assertEqual(self.claude([{"resets_left": 1, "ends_at": bad}]),
+                                 {"title": "Reset credits", "value": "1 available", "count": 1})
+
+    def test_codex_count_authoritative_and_only_available_expirations(self):
+        parsed = usage.parse_codex_rpc({"rateLimitResetCredits": {"availableCount": 4, "credits": [
+            {"status": "used", "expiresAt": self.NOW + 1},
+            {"status": "expired", "expiresAt": self.NOW - 1},
+            {"status": "available", "expiresAt": self.NOW + 100},
+            {"status": "available", "expiresAt": self.NOW + 200},
+            {"status": "available", "expiresAt": None},
+            {"status": "available", "expiresAt": float("nan")}, None,
+        ]}})
+        self.assertEqual(parsed["reset_credits"], 4)
+        self.assertEqual(parsed["reset_credit_expirations"], [
+            {"count": 1, "expires_at": self.NOW + 100}, {"count": 1, "expires_at": self.NOW + 200}])
+
+    def test_codex_missing_details_or_zero_count_has_no_hover(self):
+        for count, details in ((2, None), (2, []), (2, "bad"), (0, [{"status": "available", "expiresAt": self.NOW}])):
+            parsed = usage.parse_codex_rpc({"rateLimitResetCredits": {"availableCount": count, "credits": details}})
+            self.assertEqual(parsed["reset_credits"], count)
+            self.assertEqual(parsed["reset_credit_expirations"], [])
+
+    def test_cli_user_agent_tracks_installed_version_and_update(self):
+        usage._claude_version_user_agent.cache_clear()
+        self.addCleanup(usage._claude_version_user_agent.cache_clear)
+        with mock.patch.object(usage.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0, stdout="2.1.300 (Claude Code)\n")
+            expected = "claude-cli/2.1.300 (external, cli) madison-hub/usage"
+            self.assertEqual(usage._claude_version_user_agent("/tmp/claude", 1), expected)
+            self.assertEqual(usage._claude_version_user_agent("/tmp/claude", 1), expected)
+            self.assertEqual(run.call_count, 1)
+            run.return_value = mock.Mock(returncode=0, stdout="2.1.301 (Claude Code)\n")
+            self.assertIn("2.1.301", usage._claude_version_user_agent("/tmp/claude", 2))
+
+    def test_cli_version_failure_keeps_plain_usage_client(self):
+        for result in (mock.Mock(returncode=1, stdout=""), mock.Mock(returncode=0, stdout="invalid"), OSError()):
+            usage._claude_version_user_agent.cache_clear()
+            with mock.patch.object(usage.subprocess, "run", side_effect=[result]):
+                self.assertEqual(usage._claude_version_user_agent("/tmp/claude", 0), "madison-hub/usage")
+        usage._claude_version_user_agent.cache_clear()
+
+
 class ProfileCreditsParseTests(unittest.TestCase):
     def test_parse_profile(self):
         self.assertEqual(usage.parse_profile(PROFILE), ("Ultra", "org-x"))
@@ -442,6 +593,33 @@ class ClaudeCollectTests(ClaudeCollectBase):
         d = usage.collect_claude()
         self.assertEqual(d["extras"], [{"title": "Credits", "value": "$0.00", "amount": 0, "currency": "USD",
                                         "enabled": False, "expires_at": None}])
+
+    def test_resets_precede_credits_and_refresh_without_credit_cache(self):
+        self.responses["usage"] = {**USAGE, "cedar_ember": {"eligible": True, "grants": [
+            {"resets_left": 3, "ends_at": "2027-03-09T07:59:00Z"}]}}
+        first = usage.collect_claude(now=ResetCreditTests.NOW)
+        self.assertEqual([x["title"] for x in first["extras"]], ["Reset credits", "Credits"])
+        self.assertEqual(first["extras"][0]["count"], 3)
+        self.assertEqual(len(first["extras"][0]["expirations"]), 1)
+        self.responses["usage"] = {**USAGE, "cedar_ember": {"eligible": True, "grants": []}}
+        second = usage.collect_claude(now=ResetCreditTests.NOW)
+        self.assertEqual(second["extras"][0]["count"], 0)
+        self.assertNotIn("expirations", second["extras"][0])
+        self.assertEqual(self.labels().count("credits"), 1)
+
+    def test_reset_groups_reach_extras_and_refresh_after_use(self):
+        grants = [{"resets_left": 1, "type": "weekly"},
+                  {"resets_left": 2, "type": "full", "gives_back_weekly": True}]
+        self.responses["usage"] = {**USAGE, "cedar_ember": {"eligible": True, "grants": grants}}
+        first = usage.collect_claude(now=ResetCreditTests.NOW)
+        self.assertEqual(first["extras"][0]["groups"], [
+            {"kind": "weekly", "count": 1}, {"kind": "fable", "count": 2}])
+        grants[0]["resets_left"] = 0
+        second = usage.collect_claude(now=ResetCreditTests.NOW)
+        self.assertEqual(second["extras"][0]["groups"], [
+            {"kind": "weekly", "count": 0}, {"kind": "fable", "count": 2}])
+        self.assertEqual(second["extras"][0]["count"], 2)
+        self.assertEqual(self.labels().count("credits"), 1)
 
     def test_credits_url_uses_org_uuid_from_profile(self):
         usage.collect_claude()
@@ -713,6 +891,8 @@ class ClaudeBackoffTests(unittest.TestCase):
     """claude_get의 429 → 공통 백오프. urlopen만 대체한다."""
 
     def setUp(self):
+        patcher = mock.patch.object(usage, "_claude_user_agent", return_value="claude-cli/2.1.300 (external, cli) madison-hub/usage")
+        patcher.start(); self.addCleanup(patcher.stop)
         self._saved_backoff = usage._claude_backoff_until
         usage._claude_backoff_until = 0.0
         self._saved_pcache = dict(usage._claude_profile_cache)
@@ -748,6 +928,14 @@ class ClaudeBackoffTests(unittest.TestCase):
             with self.assertRaisesRegex(usage.UsageError, "usage HTTP 429"):
                 usage.claude_fetch("tok")
         self.assertGreaterEqual(usage._claude_backoff_until, before + usage.CLAUDE_BACKOFF_SEC)
+
+    def test_usage_request_includes_reset_query_and_cli_surface(self):
+        with mock.patch("urllib.request.urlopen", return_value=self.ok(USAGE)) as urlopen:
+            usage.claude_fetch("tok")
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_method(), "GET")
+        self.assertEqual(req.full_url, "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
+        self.assertEqual(req.get_header("User-agent"), "claude-cli/2.1.300 (external, cli) madison-hub/usage")
 
     def test_aux_429_does_not_set_backoff(self):
         for url, label in ((usage.CLAUDE_PROFILE_URL, "profile"),
@@ -1115,6 +1303,15 @@ class CodexCollectCreditsTests(unittest.TestCase):
         self.assertEqual(self.titles(out), ["Reset credits", "Credits"])      # 사용자 요청: 초기화 행이 크레딧 위
         self.assertEqual(out["extras"][0], {"title": "Reset credits", "value": "2 available", "count": 2})
         self.assertEqual(out["extras"][1], {"title": "Credits", "value": "12.5", "unlimited": False, "has_credits": True})
+
+    def test_reset_expirations_reach_extras(self):
+        result = codex_rpc_result()
+        result["rateLimitResetCredits"]["credits"] = [
+            {"status": "available", "expiresAt": self.NOW + 100},
+            {"status": "available", "expiresAt": self.NOW + 200}]
+        out = self.collect(result)
+        self.assertEqual(out["extras"][0]["expirations"], [
+            {"count": 1, "expires_at": self.NOW + 100}, {"count": 1, "expires_at": self.NOW + 200}])
 
     def test_real_sample_zero_balance_is_shown(self):
         out = self.collect(codex_rpc_result())

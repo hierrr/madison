@@ -1,7 +1,7 @@
 """Claude Code·Codex 구독 한도 — 허브가 직접 수집한다(외부 도구·파일 의존 없음).
 
 - Claude: Claude Code가 macOS 키체인("Claude Code-credentials") 또는 ~/.claude/.credentials.json에 두는 OAuth
-  액세스 토큰으로 읽기 전용 엔드포인트 셋을 조회한다 — /api/oauth/usage(한도 창), /api/oauth/profile(플랜 표시명
+  액세스 토큰으로 읽기 전용 엔드포인트 셋을 조회한다 — /api/oauth/usage?cedar_ember=1(한도 창·초기화권), /api/oauth/profile(플랜 표시명
   organization.plan_display_name·조직 uuid), /api/oauth/organizations/{uuid}/prepaid/credits(사용 크레딧 잔액).
   자격증명의 subscriptionType은 로그인 시점 값이라 갱신되지 않으므로 플랜에 쓰지 않는다. 토큰·조직 uuid는
   메모리에만 두고 기록하지 않는다.
@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -26,6 +27,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from functools import lru_cache
 from pathlib import Path
 
 from . import db
@@ -35,7 +37,7 @@ log = logging.getLogger("madison.usage")
 _STORE_KEY = "usage.snapshot"     # settings 테이블에 마지막 성공값 보존 — 허브 재시작 직후 빈 타일 방지
 
 PROVIDERS = ("claude", "codex")
-CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
 CLAUDE_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 CLAUDE_CREDITS_URL = "https://api.anthropic.com/api/oauth/organizations/{org}/prepaid/credits"
 CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
@@ -114,7 +116,55 @@ def _finish(windows, now=None) -> list:
     return out
 
 
+def _reset_count(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0 or int(value) != value:
+        return None
+    return int(value)
+
+
+def _reset_expiry(value) -> float | None:
+    stamp = to_epoch(value)
+    return stamp if stamp is not None and math.isfinite(stamp) else None
+
+
+def _reset_entry(count: int, expirations=()) -> dict:
+    entry = {"title": "Reset credits", "value": f"{count} available", "count": count}
+    if expirations:
+        entry["expirations"] = expirations
+    return entry
+
+
 # ── Claude ────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def _claude_version_user_agent(cli: str, mtime_ns: int) -> str:
+    """초기화권은 CLI 버전·surface를 확인한다. 설치된 버전을 읽고 MADISON도 명시한다.
+    바이너리가 갱신되면 캐시 키(mtime)가 바뀐다. 조회 실패 시 기존 사용량 수집은 계속한다."""
+    try:
+        env = {**os.environ, "PATH": os.path.dirname(cli) + os.pathsep + os.environ.get("PATH", "")}
+        done = subprocess.run([cli, "--version"], capture_output=True, text=True, timeout=5, check=False, env=env)
+        version = re.match(r"\d+\.\d+\.\d+(?:[-+][\w.-]+)?(?=\s|$)", done.stdout.strip())
+        if done.returncode == 0 and version:
+            return f"claude-cli/{version[0]} (external, cli) madison-hub/usage"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "madison-hub/usage"
+
+
+def _claude_user_agent() -> str:
+    from . import llm
+    try:
+        cli = llm.conf("summary")["claude_bin"]
+    except Exception:
+        cli = CFG.task_summary_bin
+    try:
+        mtime_ns = Path(cli).stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return _claude_version_user_agent(cli, mtime_ns)
+
 
 def claude_oauth() -> dict:
     raw = ""
@@ -143,7 +193,8 @@ def claude_get(url: str, token: str, label: str = "usage", timeout: float = 15, 
     """Claude OAuth GET → JSON 객체. 401 처리는 공통. 429는 backoff=True(usage)일 때만 전체 호출 백오프를 건다."""
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json",
-        "anthropic-beta": CLAUDE_OAUTH_BETA, "User-Agent": "madison-hub/usage"})
+        "anthropic-beta": CLAUDE_OAUTH_BETA,
+        "User-Agent": _claude_user_agent() if url == CLAUDE_USAGE_URL else "madison-hub/usage"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)
@@ -215,6 +266,67 @@ def parse_profile(data: dict) -> tuple[str, str]:
     plan = org.get("plan_display_name")
     uuid = org.get("uuid")
     return (plan.strip() if isinstance(plan, str) else ""), (uuid.strip() if isinstance(uuid, str) else "")
+
+
+def _claude_reset_kind(grant: dict) -> str:
+    """CLI와 같이 Fable 환급 표시를 type보다 우선한다. 불명확한 종류는 추정하지 않는다."""
+    if grant.get("gives_back_weekly") is True:
+        return "fable"
+    kind = grant.get("type")
+    if kind in ("session", "weekly", "full"):
+        return kind
+    if kind is not None:
+        return "unknown"
+    clears = grant.get("clears")
+    known = ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet",
+             "seven_day_overage_included", "seven_day_cowork", "seven_day_omelette", "seven_day_oauth_apps")
+    if not isinstance(clears, list) or not clears or any(x not in known for x in clears):
+        return "unknown"
+    session = "five_hour" in clears
+    weekly = any(x != "five_hour" for x in clears)
+    return "full" if session and weekly else "session" if session else "weekly"
+
+
+def parse_claude_resets(data: dict, now=None) -> dict | None:
+    """유효한 grant의 보유량·종류별 만료. 사용 한도 resets_at과 ends_at은 별개다."""
+    status = data.get("cedar_ember")
+    if not isinstance(status, dict) or status.get("eligible") is not True:
+        return None  # surface/cli_version 등 조회 불가를 0장으로 오인하지 않는다
+    grants = status.get("grants")
+    if not isinstance(grants, list):
+        return None
+    now = time.time() if now is None else now
+    count, valid, expirations, groups = 0, 0, [], {}
+    for grant in grants:
+        if not isinstance(grant, dict):
+            continue
+        left = _reset_count(grant.get("resets_left"))
+        if left is None:
+            continue
+        valid += 1
+        starts = _reset_expiry(grant.get("starts_at"))
+        ends = _reset_expiry(grant.get("ends_at"))
+        if (grant.get("paused") is True
+                or (starts is not None and starts > now) or (ends is not None and ends <= now)):
+            continue
+        kind = _claude_reset_kind(grant)
+        group = groups.setdefault(kind, {"kind": kind, "count": 0})
+        if not left:
+            continue  # 유효 기간 안의 소진된 종류는 0장으로 표시
+        # usable_now=False는 아직 한도에 닿지 않았다는 뜻일 수도 있다. 미사용 권리는 계속 표시한다.
+        count += left
+        group["count"] += left
+        if ends is not None:
+            expiry = {"count": left, "expires_at": ends}
+            expirations.append(expiry)
+            group.setdefault("expirations", []).append(expiry)
+    if not valid and grants:
+        return None
+    entry = _reset_entry(count, expirations)
+    if any(kind != "unknown" for kind in groups):
+        entry["groups"] = [groups[kind] for kind in ("session", "weekly", "fable", "full", "unknown")
+                           if kind in groups]
+    return entry
 
 
 def format_money(minor: int, currency: str, exponent: int = 2) -> str:
@@ -339,7 +451,8 @@ def collect_claude(now=None) -> dict:
     extra_usage = usage.get("extra_usage")
     enabled = extra_usage.get("is_enabled") if isinstance(extra_usage, dict) else None
     credits = _claude_credits(token, org, enabled, t)
-    return {"plan": plan, "windows": _finish(windows, now), "extras": [credits] if credits else [],
+    resets = parse_claude_resets(usage, now)
+    return {"plan": plan, "windows": _finish(windows, now), "extras": [x for x in (resets, credits) if x is not None],
             "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now or time.time()))}
 
 
@@ -495,9 +608,18 @@ def parse_codex_rpc(result: dict) -> dict:
     if cr_norm is None and isinstance(result.get("rateLimits"), dict):
         cr_norm = _normalize_credits(result["rateLimits"].get("credits"))
     credits = result.get("rateLimitResetCredits")
-    avail = credits.get("availableCount") if isinstance(credits, dict) else None
+    avail = _reset_count(credits.get("availableCount")) if isinstance(credits, dict) else None
+    details = credits.get("credits") if isinstance(credits, dict) else None
+    expirations = []
+    if avail and isinstance(details, list):
+        # availableCount가 권위값이다. 상세 목록은 일부만 내려올 수도 있다.
+        available = [x for x in details if isinstance(x, dict) and x.get("status") == "available"]
+        for item in available[:avail]:
+            expires = _reset_expiry(item.get("expiresAt"))
+            if expires is not None:
+                expirations.append({"count": 1, "expires_at": expires})
     return {"windows": windows, "plan": plan, "credits": cr_norm,
-            "reset_credits": int(avail) if isinstance(avail, (int, float)) else None}
+            "reset_credits": avail, "reset_credit_expirations": expirations}
 
 
 def codex_transcript_snapshot():
@@ -584,8 +706,7 @@ def collect_codex(now=None) -> dict:
     extras = []
     # extras 순서(Reset credits → Credits)는 여기가 단일 출처 — 프런트는 목록 순서대로 그린다.
     if isinstance(parsed.get("reset_credits"), int):
-        extras.append({"title": "Reset credits", "value": f"{parsed['reset_credits']} available",
-                       "count": parsed["reset_credits"]})
+        extras.append(_reset_entry(parsed["reset_credits"], parsed.get("reset_credit_expirations", [])))
     # 크레딧은 부가 정보라 어떤 예외든 항목만 생략하고 한도 창·Reset 행을 막지 않는다.
     try:
         cr = parsed.get("credits")
