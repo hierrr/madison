@@ -15,6 +15,7 @@
     --spark-dim: #86b6ef;
     --good: #0ca30c; --good-text: #006300; --good-bg: rgba(12, 163, 12, 0.10);
     --warn: #fab219; --warn-text: #8a5d00; --warn-bg: rgba(250, 178, 25, 0.16);
+    --orange: #f08a24;
     --crit: #d03b3b; --crit-bg: rgba(208, 59, 59, 0.10);
     --stale: #898781; --stale-bg: rgba(137, 135, 129, 0.12);
     --hf-received: #006f80; --hf-received-bg: rgba(0, 127, 148, 0.12);
@@ -187,11 +188,11 @@
   .u-row .track { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
   .u-row .fill { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
   .u-row.u-50 .fill { background: #e6c229; }
-  .u-row.u-70 .fill { background: #f08a24; }
+  .u-row.u-70 .fill { background: var(--orange); }
   .u-row.u-90 .fill { background: var(--crit); }
   .u-row .val { font-family: var(--mono); color: var(--ink-3); white-space: nowrap; }
   .u-row.u-50 .val { color: #e6c229; }
-  .u-row.u-70 .val { color: #f08a24; }
+  .u-row.u-70 .val { color: var(--orange); }
   .u-row.u-90 .val { color: var(--crit); }
   .u-credits { display: flex; flex-wrap: wrap; gap: 3px; overflow: hidden; }
   .u-credits i { width: 10px; height: 6px; border-radius: 2px; background: var(--accent); }   /* 높이·위치는 한도 진행바(.track)와 같게 */
@@ -485,12 +486,12 @@
   .uchart .axis { fill: var(--ink-3); font-size: 9px; font-family: var(--mono); }
   .uchart path.w { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
   .uchart circle.reset { fill: var(--crit); stroke: var(--surface); stroke-width: 1; }
-  .uchart circle.plan { fill: var(--lg-purple); stroke: var(--surface); stroke-width: 1; }
+  .uchart circle.plan { fill: var(--orange); stroke: var(--surface); stroke-width: 1; }
   .ulegend { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-2); margin-top: 8px; }
   .ulegend .mono { font-family: var(--mono); color: var(--ink-3); }
   .ulegend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; vertical-align: -1px; }
   .ulegend .reset-note { color: var(--crit); }
-  .ulegend .plan-note { color: var(--lg-purple); }
+  .ulegend .plan-note { color: var(--orange); }
   .uscroll { overflow-x: auto; padding-bottom: 2px; }
   .tstack { display: flex; gap: 2px; align-items: flex-end; height: 110px; min-width: 100%; width: max-content; }
   /* 컬럼은 전체 높이 히트 영역(호버 툴팁) — 세그먼트는 column-reverse로 바닥부터 쌓인다 */

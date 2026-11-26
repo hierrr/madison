@@ -100,8 +100,8 @@ push a piece of work from one machine to another without walking over to it.
   through usage's `cedar_ember` field using the installed CLI version.
   Unavailable counts or expiry details are not treated as zero or unlimited validity.
   Plan changes (e.g. Team → Pro) are recorded and marked on the usage tab's
-  history chart, since windows and quotas differ between plans. Purple is reserved
-  for plan-change markers and their legend within each limit chart. Its upper-right
+  history chart, since windows and quotas differ between plans. Plan-change markers
+  and their legend use the same orange as the 70% usage tier. Each chart's upper-right
   corner also shows current reset credits by kind with violet credit squares and
   expiry tooltips, updated alongside the overview tiles.
   The gauges are **for the account signed in on the hub machine** — limits are
