@@ -936,7 +936,25 @@ class ClaudeBackoffTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", side_effect=self.http_error(429, usage.CLAUDE_USAGE_URL)):
             with self.assertRaisesRegex(usage.UsageError, "usage HTTP 429"):
                 usage.claude_fetch("tok", key=CKEY)
-        self.assertGreaterEqual(usage._st(CKEY)["backoff_until"], before + usage.CLAUDE_BACKOFF_SEC)
+        self.assertGreaterEqual(usage._st(CKEY)["backoff_until"], before + usage.CFG.usage_poll_sec)
+
+    def test_retry_after_seconds_and_http_date(self):
+        from email.utils import formatdate
+        now = 1800000000
+        with mock.patch.object(usage.CFG, "usage_poll_sec", 90):
+            self.assertEqual(usage.claude_retry_seconds("471", now), 471)
+            self.assertEqual(usage.claude_retry_seconds(formatdate(now + 600, usegmt=True), now), 600)
+            for invalid in (None, "", "0", "-5", "bad", "nan", "inf"):
+                self.assertEqual(usage.claude_retry_seconds(invalid, now), 90, invalid)
+
+    def test_usage_429_honors_server_retry_after(self):
+        err = self.http_error(429, usage.CLAUDE_USAGE_URL)
+        err.headers["retry-after"] = "471"
+        with mock.patch.object(usage.CFG, "usage_poll_sec", 90), mock.patch("time.time", return_value=1000), \
+                mock.patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaisesRegex(usage.UsageError, "471초 뒤 재시도"):
+                usage.claude_fetch("tok", key=CKEY)
+        self.assertEqual(usage._st(CKEY)["backoff_until"], 1471)
 
     def test_usage_request_includes_reset_query_and_cli_surface(self):
         with mock.patch("urllib.request.urlopen", return_value=self.ok(USAGE)) as urlopen:

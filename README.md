@@ -90,6 +90,10 @@ push a piece of work from one machine to another without walking over to it.
 - **Subscription usage** — the overview shows Claude Code and Codex rate-limit
   windows (5-hour, weekly, reset credits) with bars and warning colors; the hub
   reads them itself from the providers' own endpoints (see Security model).
+  Overview cards show the age of the last successful read and refresh status on one line.
+  Hover over it for the exact read time and any failure reason.
+  After a Claude usage 429, retries wait for the longer of the server's `Retry-After`
+  and the current poll interval. Without a valid header, the poll interval is used.
   Claude's plan name comes from the account profile (`plan_display_name`), so a
   provider-side rename shows up without re-login (within an hour — the profile
   is cached). Both tiles show reset credits above the usage-credit balance,

@@ -44,6 +44,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
@@ -70,7 +71,6 @@ _lock = threading.Lock()
 _snap: dict = {"claude": {}, "codex": {}}
 # 프로바이더별 마지막 탐색 결과 [{key, label, account}] — 폴더 이름순. 수집 주기마다 갱신
 _slots: dict = {"claude": [], "codex": []}
-CLAUDE_BACKOFF_SEC = 600     # 429(과호출) 뒤 쉬는 시간 — 같은 계정을 다른 도구도 조회할 수 있다
 CODEX_BACKOFF_SEC = 300      # Codex RPC 실패 뒤 app-server를 다시 띄우기까지 쉬는 시간 — 고장난 동안 매 분 프로세스를 반복해 띄우지 않는다
 CLAUDE_PROFILE_TTL = 3600    # 초 — 플랜 표시명은 거의 안 바뀐다
 CLAUDE_CREDITS_TTL = 600     # 초 — 크레딧 잔액 재조회 간격
@@ -337,6 +337,19 @@ def claude_credentials(key: str, only: str | None = None) -> tuple[dict, str]:
     return oauth, found
 
 
+def claude_retry_seconds(value, now: float) -> int:
+    """서버 Retry-After(초 또는 HTTP 날짜)를 존중하고, 없으면 현재 수집 주기만큼 기다린다."""
+    fallback = CFG.usage_poll_sec
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        try:
+            delay = parsedate_to_datetime(str(value)).timestamp() - now
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+    return max(fallback, math.ceil(delay)) if math.isfinite(delay) else fallback
+
+
 def claude_get(url: str, token: str, label: str = "usage", timeout: float = 15, backoff: bool = False,
                key: str = "") -> dict:
     """Claude OAuth GET → JSON 객체. 401 처리는 공통. 429는 backoff=True(usage)일 때만 그 슬롯(key)의
@@ -354,8 +367,13 @@ def claude_get(url: str, token: str, label: str = "usage", timeout: float = 15, 
         if exc.code == 429:
             if not backoff:
                 raise UsageError(f"{label} HTTP 429") from exc
-            _st(key)["backoff_until"] = time.time() + CLAUDE_BACKOFF_SEC
-            raise UsageError(f"{label} HTTP 429 — {CLAUDE_BACKOFF_SEC // 60}분 뒤 재시도") from exc
+            now = time.time()
+            retry_after = exc.headers.get("retry-after") if exc.headers else None
+            delay = claude_retry_seconds(retry_after, now)
+            _st(key)["backoff_until"] = now + delay
+            log.info("claude rate limit '%s': poll=%ss retry_after=%r wait=%ss",
+                     Path(key).name, CFG.usage_poll_sec, retry_after, delay)
+            raise UsageError(f"{label} HTTP 429 — {delay}초 뒤 재시도") from exc
         raise UsageError(f"{label} HTTP {exc.code}") from exc
     except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as exc:
         raise UsageError(f"{label} 조회 실패: {exc}") from exc

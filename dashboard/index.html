@@ -1067,17 +1067,31 @@
       return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
     }).join('');
     if (isClaude) html += loginRow(d);
-    var ago = d.updated ? Math.round((Date.now() - new Date(d.updated).getTime()) / 60000) : null;
+    var updated = d.updated ? new Date(d.updated) : null;
+    var hasUpdated = updated && !isNaN(updated.getTime());
     // 실패 사유는 공용 data-d 툴팁(#tip)으로 — 브라우저 기본 title은 5초 폴링마다 행이 다시 그려져 뜨기 전에 사라졌다.
     // 사유에 줄바꿈 포함 JSON 본문이 올 수 있어 공백을 한 칸으로 접는다.
     var reasonText = d.error ? String(d.error).replace(/\s+/g, ' ').trim() : '';
     if (reasonText && prov === 'codex' && d.key) reasonText += " — 다시 로그인: CODEX_HOME='" + shq(d.key) + "' codex login --device-auth";
     var reason = esc(reasonText);
-    if (d.error && !windows.length) {
+    if (hasUpdated) {
+      // 경과 시간·갱신 상태는 한 줄, 정확한 성공 시각·오류 사유는 툴팁으로 둔다.
+      var now = new Date(), ago = Math.max(0, Math.floor((now.getTime() - updated.getTime()) / 60000));
+      var age = ago < 1 ? '방금' : ago < 60 ? ago + '분 전'
+        : ago < 1440 ? Math.floor(ago / 60) + '시간 전' : Math.floor(ago / 1440) + '일 전';
+      var exact = '마지막 성공 수집: ' + updated.toLocaleString('ko-KR', {
+        year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+      });
+      var limited = /\b429\b/.test(reasonText);
+      var status = d.error ? (limited ? ' · 대기' : ' · 실패') : '';
+      var detail = exact + (d.error ? ' · ' + (limited ? '요청이 많아 조회를 잠시 쉬고 있습니다. ' : '') + reasonText : '');
+      html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span>' +
+        '<time class="val dim" datetime="' + esc(d.updated) + '" data-d="' + esc(detail) + '">' + age + status + '</time></div></div>';
+    } else if (d.error && !windows.length) {
       // 한 번도 값을 못 가져온 계정(로그인 안 된 보조 계정 등) — 타일은 보이되 수집 실패로
       html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" data-d="' + reason + '">수집 실패</span></div></div>';
-    } else if (d.error) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" data-d="' + reason + '">실패 · 마지막 값</span></div></div>';
-    else if (ago !== null && ago > 5) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim">' + ago + '분 전</span></div></div>';
+    } else if (windows.length) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim"' +
+      (d.error ? ' data-d="' + reason + '"' : '') + '>시각 없음</span></div></div>';
     return html;
   }
   function setTileRows(rows, html) {
