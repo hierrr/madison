@@ -2355,7 +2355,7 @@
 
   function loadUsage() {
     // 전체(null)면 필터 생략, 빈 배열이면 존재할 수 없는 이름으로 "아무 기기도 아님"을 표현
-    var devParam = UF.devs === null ? '' : (UF.devs.length ? UF.devs.join(',') : ' ');
+    var devParam = UF.devs === null ? '' : (UF.devs.length ? UF.devs.join(',') : ' ');
     var qs = 'days=' + UF.days + '&agent=' + encodeURIComponent(UF.agent) +
       '&device=' + encodeURIComponent(devParam) + (UF.human ? '&human=1' : '');
     Promise.all([getJSON('/api/usage/history?days=' + UF.days), getJSON('/api/usage/tokens?' + qs)])
