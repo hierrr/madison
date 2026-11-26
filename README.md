@@ -96,14 +96,17 @@ push a piece of work from one machine to another without walking over to it.
   with Claude's weekly and Fable resets listed separately. Hover over a reset row
   to see that kind's available expiry timestamps in Korea time;
   credits expiring together are grouped. Claude's usage-credit balance also
-  shows its on/off state and next expiry. Claude reset details are requested
+  shows its on/off state and next expiry. The overview tiles leave the credit row
+  out when the balance is zero (unlimited still shows); the usage tab's charts
+  show it even at zero. Claude reset details are requested
   through usage's `cedar_ember` field using the installed CLI version.
   Unavailable counts or expiry details are not treated as zero or unlimited validity.
   Plan changes (e.g. Team → Pro) are recorded and marked on the usage tab's
   history chart, since windows and quotas differ between plans. Plan-change markers
   and their legend use the same orange as the 70% usage tier. Each chart's upper-right
   corner also shows current reset credits by kind with violet credit squares and
-  expiry tooltips, updated alongside the overview tiles.
+  expiry tooltips, followed by the usage-credit balance, updated alongside the
+  overview tiles.
   The gauges are **for the accounts signed in on the hub machine** — limits are
   per-account, so consumption from every device on that account is already
   included, while an account not signed in on the hub never appears in any gauge.

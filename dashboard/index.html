@@ -491,6 +491,7 @@
   .prov-head h2 { margin-bottom: 0; }
   .prov-resets:not(:empty) { display: flex; gap: 8px 16px; flex-wrap: wrap; max-width: 100%; }
   .prov-resets .u-row { width: 120px; }
+  .prov-resets .u-row.credit { width: auto; min-width: 120px; }   /* "$94.10 · 12/26 만료"처럼 길어질 수 있다 */
   .prov-resets .u-credits i { background: var(--lg-violet); }
   .uchart svg { display: block; width: 100%; height: auto; }
   .uchart .grid { stroke: var(--line); stroke-width: 1; }
@@ -965,9 +966,29 @@
       return resetCreditRow(g, labels[g.kind] || '기타 초기화');
     }).join('');
   }
-  function resetCreditsHtml(d) {
-    var resets = ((d && d.extras) || []).find(function (x) { return x.title === 'Reset credits'; });
-    return resets ? resetCreditRows(resets) : '';
+  // 사용 크레딧 잔액이 0인지 — 무제한은 0이 아니다. Claude는 amount(센트), Codex는 value("0"·"12.5")로 판단하고
+  // 숫자로 읽을 수 없으면 0으로 추정하지 않는다(행을 그대로 보인다).
+  function creditZero(x) {
+    if (x.unlimited === true) return false;
+    var n = typeof x.amount === 'number' ? x.amount
+      : parseFloat(String(x.value == null ? '' : x.value).replace(/[^0-9.\-]/g, ''));
+    return n === 0;
+  }
+  // 사용 크레딧 행 — 현황 타일과 사용량 탭 패널이 같이 쓴다. 꺼짐이면 한도 도달 시 크레딧을 안 쓴다는 설명을
+  // 공용 data-d 툴팁으로 (title은 5초 재렌더로 사라진다)
+  function creditRow(x) {
+    var cv = x.unlimited === true ? '무제한' : esc(x.value), off = x.enabled === false;
+    if (off) cv += ' · 꺼짐';
+    if (typeof x.expires_at === 'number') cv += ' · ' + fmtEpoch(x.expires_at, true) + ' 만료';
+    return '<div class="u-row text credit"><div class="head"><span class="lbl">크레딧</span><span class="val"' +
+      (off ? ' data-d="' + esc('플랜 한도에 닿아도 크레딧을 쓰지 않음 — claude.ai 설정에서 켤 수 있음') + '"' : '') + '>' + cv + '</span></div></div>';
+  }
+  // 사용량 탭 한도 패널 오른쪽 위 — 초기화권(종류별) 다음 크레딧. 상세 화면이라 크레딧은 0이어도 보인다(현황 타일은 0이면 생략).
+  function usageExtrasHtml(d) {
+    var extras = (d && d.extras) || [];
+    var resets = extras.find(function (x) { return x.title === 'Reset credits'; });
+    var credits = extras.find(function (x) { return x.title === 'Credits'; });
+    return (resets ? resetCreditRows(resets) : '') + (credits ? creditRow(credits) : '');
   }
   // 프로바이더(claude·codex) 계정 목록 정규화 — 새 서버는 배열, 옛 서버는 객체 하나(key '')·null, 없으면 []
   function provAccounts(c) {
@@ -1004,8 +1025,8 @@
   function syncUsageResets(u) {
     Array.prototype.forEach.call(document.querySelectorAll('.prov-resets[data-prov]'), function (el) {
       var d = u ? findAcct(u[el.dataset.prov], el.dataset.key) : null;
-      var html = resetCreditsHtml(d);
-      if (el.innerHTML !== html) el.innerHTML = html;  // 호버 중인 초기화권은 내용이 바뀔 때만 교체
+      var html = usageExtrasHtml(d);
+      if (el.innerHTML !== html) el.innerHTML = html;  // 호버 중인 초기화권·크레딧은 내용이 바뀔 때만 교체
     });
   }
   // 작은따옴표 안에 넣을 셸 값 이스케이프 — ' → '\''
@@ -1038,12 +1059,8 @@
         return resetCreditRows(x);
       }
       if (x.title === 'Credits') {
-        // 사용 크레딧: 꺼짐이면 한도 도달 시 크레딧을 안 쓴다는 설명을 공용 data-d 툴팁으로 (title은 5초 재렌더로 사라진다)
-        var cv = x.unlimited === true ? '무제한' : esc(x.value), off = x.enabled === false;
-        if (off) cv += ' · 꺼짐';
-        if (typeof x.expires_at === 'number') cv += ' · ' + fmtEpoch(x.expires_at, true) + ' 만료';
-        return '<div class="u-row text"><div class="head"><span class="lbl">크레딧</span><span class="val"' +
-          (off ? ' data-d="' + esc('플랜 한도에 닿아도 크레딧을 쓰지 않음 — claude.ai 설정에서 켤 수 있음') + '"' : '') + '>' + cv + '</span></div></div>';
+        // 현황 타일은 잔액 0이면 크레딧 행을 생략한다(사용량 탭 패널에는 0이어도 보인다)
+        return creditZero(x) ? '' : creditRow(x);
       }
       return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
     }).join('');
@@ -2467,7 +2484,7 @@
       return '<section class="panel"><div class="prov-head"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
         provTitleHtml(p, d, true) + '</h2>' +
         '<div class="prov-resets" id="usage-' + p + '-' + idx + '-resets" data-prov="' + p + '" data-key="' + esc(d.key || '') + '">' +
-        resetCreditsHtml(live) + '</div></div>' +
+        usageExtrasHtml(live) + '</div></div>' +
         '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}, d.plan_changes || [], d.live) + '</div></section>';
     }
     // 한 프로바이더의 패널들: 이력 계정 순서대로, 이력에 없고 라이브에만 있는 계정은 뒤에 붙인다
