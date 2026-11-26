@@ -29,11 +29,11 @@ if (-not $Hub) {
         "터널 호스트(https://…)는 망 밖에서 보고할 기기에만. 애매하면 사용자에게 확인하세요.")
 }
 
-New-Item -ItemType Directory -Force -Path $MadDir, (Join-Path $MadDir "throttle") | Out-Null
+New-Item -ItemType Directory -Force -Path $MadDir, (Join-Path $MadDir "throttle"), (Join-Path $MadDir "cache") | Out-Null  # cache: 계정 규칙의 로그인 요약 캐시
 
 # 1) 파일 배치
 Invoke-WebRequest -Uri "$Hub/collector/report.ps1" -OutFile (Join-Path $MadDir "report.ps1") -TimeoutSec 15
-Write-Host "[MADISON] report.ps1 배치 완료"
+Write-Host "[MADISON] report.ps1 배치 완료 (계정 규칙은 report.ps1에 포함 — 별도 파일 없음)"
 
 # 2) 등록 (env에 토큰 있으면 생략 — 멱등)
 $enrolled = (Test-Path $EnvFile) -and ((Get-Content $EnvFile -Raw) -match "MADISON_TOKEN=.+")

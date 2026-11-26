@@ -301,3 +301,96 @@ class InjectedIngestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateAccountTests(unittest.TestCase):
+    """로그인 계정(detail.account) — 세션 저장과 토큰 원장 귀속. 수집기 계약상 account는 이벤트의 detail 안에 온다."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        self.conn.execute(
+            "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at)"
+            " VALUES (1,'device-a','x',datetime('now'),datetime('now'))")
+        self.n = 0
+
+    def tearDown(self):
+        self.conn.close()
+
+    def send(self, ts, tokens_in=None, *, event="turn_done", session="s1", agent="claude-code", top=None, **detail):
+        self.n += 1
+        d = {"frontend": "cli", "model": "model-a", **detail}
+        if tokens_in is not None:
+            d["tokens"] = {"v": 1, "cum": {"model-a": {"in": tokens_in, "out": 0, "cr": 0, "cw": 0, "th": 0}}}
+        ev = {"agent": agent, "session_id": session, "event_id": f"a{self.n}", "event": event,
+              "ts": ts, "project": "acme", "detail": d, **(top or {})}
+        return state.ingest(self.conn, 1, ev)
+
+    def session_account(self, session="s1"):
+        return self.conn.execute("SELECT account FROM sessions WHERE session_id=?", (session,)).fetchone()[0]
+
+    def ledger(self, table="token_daily"):
+        return {r["account"]: r["input"] for r in self.conn.execute(f"SELECT account, SUM(input) input FROM {table} GROUP BY account")}
+
+    def test_detail_account_is_normalized_and_stored_on_the_session(self):
+        self.send("2026-11-26T01:00:00Z", event="session_start", account="  Alice@Example.COM ")
+        self.assertEqual(self.session_account(), "alice@example.com")
+        self.send("2026-11-26T01:01:00Z", event="prompt", prompt="x", account="api:Acme Org")
+        self.assertEqual(self.session_account(), "api:Acme Org")
+
+    def test_account_only_counts_inside_detail_not_at_the_event_top_level(self):
+        self.send("2026-11-26T01:00:00Z", 10, top={"account": "top@example.com"})
+        self.assertEqual(self.session_account(), "")
+        self.assertEqual(self.ledger(), {"": 10})
+
+    def test_missing_or_unusable_account_never_wipes_the_stored_one(self):
+        self.send("2026-11-26T01:00:00Z", event="session_start", account="alice@example.com")
+        for i, bad in enumerate(("", "   ", "not-an-email", "api:", None, 5, ["a@example.com"], {"a": 1})):
+            with self.subTest(bad=bad):
+                self.send(f"2026-11-26T01:0{i + 1}:00Z", event="prompt", prompt="x", account=bad)
+                self.assertEqual(self.session_account(), "alice@example.com")
+        self.send("2026-11-26T01:30:00Z", event="prompt", prompt="x")   # 키 자체가 없는 이벤트
+        self.assertEqual(self.session_account(), "alice@example.com")
+
+    def test_ledger_uses_event_account_then_session_account_then_empty(self):
+        self.send("2026-11-26T01:00:00Z", 10)                                             # 계정 미상
+        self.assertEqual(self.ledger(), {"": 10})
+        self.send("2026-11-26T01:01:00Z", 30, account="alice@example.com")                 # 이벤트 자신의 값
+        self.send("2026-11-26T01:02:00Z", 60)                                              # 값 없음 → 세션 값
+        self.assertEqual(self.ledger(), {"": 10, "alice@example.com": 50})
+        self.assertEqual(self.ledger("token_hourly"), self.ledger("token_daily"))
+
+    def test_account_switch_splits_the_ledger_without_double_counting(self):
+        self.send("2026-11-26T01:00:00Z", 100, account="alice@example.com")
+        self.send("2026-11-26T01:10:00Z", 160, account="bob@example.com")
+        self.send("2026-11-26T01:20:00Z", 200, account="bob@example.com")
+        self.assertEqual(self.ledger(), {"alice@example.com": 100, "bob@example.com": 100})
+        self.assertEqual(self.session_account(), "bob@example.com")
+        self.assertEqual(self.conn.execute("SELECT SUM(turns) FROM token_daily").fetchone()[0], 3)
+
+    def test_late_arrival_keeps_session_account_but_books_to_its_own_account(self):
+        self.send("2026-11-26T02:00:00Z", 100, account="bob@example.com")                  # 최신
+        self.send("2026-11-26T01:00:00Z", 100, account="alice@example.com",                # 지연 도착(더 오래된 ts)
+                  session="s1")
+        self.assertEqual(self.session_account(), "bob@example.com")                        # 세션 값은 지연 도착이 못 덮는다
+        # 두 번째 이벤트의 누적은 100 → 델타 0이라 가산은 없지만, 더 큰 누적이 오면 그 이벤트의 계정으로 계상된다
+        self.send("2026-11-26T01:30:00Z", 150, account="alice@example.com")
+        self.assertEqual(self.ledger(), {"bob@example.com": 100, "alice@example.com": 50})
+        self.assertEqual(self.session_account(), "bob@example.com")
+
+    def test_session_end_event_account_attributes_the_final_delta(self):
+        self.send("2026-11-26T01:00:00Z", 100, account="alice@example.com")
+        self.send("2026-11-26T01:05:00Z", 140, event="session_end", reason="exit", account="alice@example.com")
+        self.assertEqual(self.ledger(), {"alice@example.com": 140})
+
+    def test_codex_events_carry_accounts_too(self):
+        self.send("2026-11-26T01:00:00Z", 70, agent="codex-cli", session="x1", account="codex@example.com")
+        r = self.conn.execute("SELECT agent, account, input FROM token_daily").fetchone()
+        self.assertEqual((r["agent"], r["account"], r["input"]), ("codex-cli", "codex@example.com", 70))
+        self.assertEqual(self.session_account("x1"), "codex@example.com")
+
+    def test_events_payload_keeps_the_account_as_received(self):
+        self.send("2026-11-26T01:00:00Z", event="session_start", account="Alice@Example.com")
+        payload = json.loads(self.conn.execute("SELECT payload FROM events").fetchone()[0])
+        self.assertEqual(payload["account"], "Alice@Example.com")   # 원문 보존 — 정규화는 세션·원장에만

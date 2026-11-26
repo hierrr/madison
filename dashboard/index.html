@@ -175,12 +175,19 @@
 
   /* ── KPI ── */
   /* 타일이 늘면 한 줄의 칸도 늘어나되, 칸 폭이 160px 밑으로 내려가면 다음 줄로 넘긴다(auto-fit — 타일이 적으면 빈 칸이 접혀 예전처럼 한 줄을 꽉 채움).
-     160px = 타일 안쪽 폭 128px에 "100% · 3d05h" 값(약 90px)과 라벨 말줄임 자리가 남는 하한. 1020px 이하 2열 미디어쿼리는 뒤에 와서 이긴다. */
+     160px = 타일 안쪽 폭 128px에 "100% · 3d05h" 값(약 90px)과 라벨 말줄임 자리가 남는 하한. 1020px 이하 2열 미디어쿼리는 뒤에 와서 이긴다.
+     사용량 타일은 허브 계정 수만큼 JS가 만들므로 계정이 없는 프로바이더의 타일은 아예 없다 */
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .kpis.no-usage .tile.usage { display: none; }
-  /* 허브 계정이 없는 프로바이더는 게이지를 비워 두지 않고 타일째 숨긴다 */
-  .tile.usage.off { display: none; }
   .tile .t-label .t-icon { width: 16px; height: 16px; border-radius: 4px; vertical-align: -3px; margin-right: 6px; }
+  /* 프로바이더 제목 "[로고] 이름 · 플랜" — 한 줄 유지, 넘치면 이름만 말줄임(로고·플랜은 줄지 않음). 타일(.t-label)과 사용량 패널(h2.prov)이 공유 */
+  .tile .t-label.ptl { display: flex; align-items: center; min-width: 0; }
+  .tile .t-label.ptl .t-icon { flex: none; vertical-align: baseline; }
+  .t-title { display: flex; min-width: 0; }
+  .ptitle { display: flex; min-width: 0; max-width: 100%; white-space: nowrap; }
+  .ptitle .pt-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .ptitle .pt-prov, .ptitle .pt-plan { flex: none; }
+  .ptitle > * + * { margin-left: 0.35em; }
+  .ptitle[data-d] { cursor: default; }
   .u-rows { display: flex; flex-direction: column; gap: 7px; margin-top: 6px; }
   .u-row { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
   .u-row .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
@@ -206,6 +213,8 @@
       핸드오프 큐는 대기=warn 틴트, 마커는 대기=warn·수신됨=청록·작업 중=accent·없음=good) */
   .tile[data-sev="crit"] { background: linear-gradient(180deg, var(--crit-bg), var(--surface) 60%); }
   .tile[data-sev="warn"] { background: linear-gradient(180deg, var(--warn-bg), var(--surface) 60%); }
+  .u-row .val.warn { color: var(--warn-text); }
+  .u-row .val.crit { color: var(--crit); }
   .tile .t-sub { font-size: 12px; color: var(--ink-3); margin-top: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .t-sub .mini { display: inline-flex; align-items: center; gap: 5px; }
   .t-sub .mini i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
@@ -477,7 +486,7 @@
   /* ── 사용량 탭 ── */
   .ucol { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
   .panel h2 img.picon { width: 16px; height: 16px; border-radius: 4px; flex: none; }
-  .panel h2.prov { text-transform: none; font-size: 12.5px; }
+  .panel h2.prov { text-transform: none; font-size: 12.5px; min-width: 0; max-width: 100%; }
   .prov-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
   .prov-head h2 { margin-bottom: 0; }
   .prov-resets:not(:empty) { display: flex; gap: 8px 16px; flex-wrap: wrap; max-width: 100%; }
@@ -619,13 +628,10 @@
         <span class="mini"><i class="hfdot hf-in-progress"></i>작업 중 <span id="kHfWork">0</span></span>
       </span>
     </div>
-    <div class="tile usage" id="tileClaude">
-      <span class="t-label"><img class="t-icon" src="/assets/claude.webp" alt="">Claude <span id="uClaudePlan"></span></span>
-      <div class="u-rows" id="uClaudeRows"></div>
-    </div>
-    <div class="tile usage" id="tileCodex">
-      <span class="t-label"><img class="t-icon" src="/assets/codex.webp" alt="">Codex <span id="uCodexPlan"></span></span>
-      <div class="u-rows" id="uCodexRows"></div>
+    <div class="tile">
+      <span class="t-label"><span class="hmk" style="background:var(--good);height:11px"></span>온라인 기기</span>
+      <span class="t-value"><span id="kDevOn">–</span><small>/<span id="kDevAll">–</span></small></span>
+      <span class="t-sub" id="kDevNote"></span>
     </div>
   </section>
 
@@ -963,50 +969,129 @@
     var resets = ((d && d.extras) || []).find(function (x) { return x.title === 'Reset credits'; });
     return resets ? resetCreditRows(resets) : '';
   }
+  // 프로바이더(claude·codex) 계정 목록 정규화 — 새 서버는 배열, 옛 서버는 객체 하나(key '')·null, 없으면 []
+  function provAccounts(c) {
+    if (Array.isArray(c)) return c;
+    return c && typeof c === 'object' ? [Object.assign({ key: '', label: '' }, c)] : [];
+  }
+  // 프로바이더 순서 = 타일·한도 패널 표시 순서 (Claude 계정들 → Codex 계정들)
+  var PROVS = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }];
+  // 프로바이더 제목(로고 제외, 이스케이프 완료 HTML) — 현황 타일과 사용량 한도 패널이 같이 쓴다.
+  //   타일(panel=false): "<이름> · <플랜>", 이름이 없으면 프로바이더 이름 ("Claude · Ultra")
+  //   패널(panel=true):  "<프로바이더> · <이름> · <플랜>", 이름이 없으면 "<프로바이더> · <플랜>"
+  // 이름 우선순위: 이메일 @ 앞 → 폴더 이름(`~/.claude-<이름>`, `~/.codex-<이름>`) 라벨(Claude·Codex 공통). 이메일을 알면 전체 주소를 공용 data-d 툴팁(#tip)으로 —
+  // 브라우저 title은 5초 재렌더로 사라진다.
+  function provTitleHtml(prov, d, panel) {
+    d = d || {};
+    var pname = (PROVS.find(function (x) { return x.id === prov; }) || { name: prov }).name;
+    var email = typeof d.email === 'string' ? d.email.trim() : '';
+    // API 로그인 슬롯은 이메일 대신 계정 값 자체(api:<조직명>·api:<8자>)가 이름이다
+    var name = (d.api === true && typeof d.account === 'string' && d.account.trim()) ? d.account.trim()
+      : (email.split('@')[0].trim() || (d.label ? String(d.label).trim() : ''));
+    var plan = d.plan ? '<span class="pt-plan">· ' + esc(d.plan) + '</span>' : '';
+    return '<span class="ptitle"' + (email ? ' data-d="' + esc(email) + '"' : '') + '>' +
+      (panel
+        ? '<span class="pt-prov">' + esc(pname) + '</span>' + (name ? '<span class="pt-name">· ' + esc(name) + '</span>' : '')
+        : '<span class="pt-name">' + esc(name || pname) + '</span>') + plan + '</span>';
+  }
+  function setTileTitle(el, html) {
+    if (el._html !== html) { el._html = html; el.innerHTML = html; }   // 같은 내용이면 다시 그리지 않는다 — 호버 중인 제목 보존
+  }
+  // 계정 key(슬롯 폴더 절대경로, 옛 서버의 기본 계정은 '')로 라이브 계정을 찾는다
+  function findAcct(list, key) {
+    return (list || []).find(function (a) { return (a.key || '') === (key || ''); }) || null;
+  }
   function syncUsageResets(u) {
-    ['claude', 'codex'].forEach(function (p) {
-      var el = document.getElementById('usage-' + p + '-resets');
-      if (!el) return;
-      var html = resetCreditsHtml(u && u[p]);
+    Array.prototype.forEach.call(document.querySelectorAll('.prov-resets[data-prov]'), function (el) {
+      var d = u ? findAcct(u[el.dataset.prov], el.dataset.key) : null;
+      var html = resetCreditsHtml(d);
       if (el.innerHTML !== html) el.innerHTML = html;  // 호버 중인 초기화권은 내용이 바뀔 때만 교체
     });
   }
+  // 작은따옴표 안에 넣을 셸 값 이스케이프 — ' → '\''
+  function shq(v) { return String(v).replace(/'/g, "'\\''"); }
+  // 로그인 자체의 종료 행 — 7일 이내면 D-n(warn), 지났으면 만료(crit), 그보다 멀면 표시 안 함
+  function loginRow(a) {
+    if (typeof a.login_ends !== 'number' || !isFinite(a.login_ends)) return '';
+    var left = a.login_ends * 1000 - Date.now();
+    var how = a.key ? "CLAUDE_CONFIG_DIR='" + shq(a.key) + "' claude auth login --claudeai" : '허브 기기에서 claude 실행 후 /login';
+    if (left <= 0) {
+      return '<div class="u-row text"><div class="head"><span class="lbl">로그인</span><span class="val crit" data-d="' +
+        esc('로그인 기간이 끝났습니다 — 다시 로그인: ' + how) + '">만료 · 다시 로그인 필요</span></div></div>';
+    }
+    if (left > 7 * 86400000) return '';
+    return '<div class="u-row text"><div class="head"><span class="lbl">로그인</span><span class="val warn" data-d="' +
+      esc('로그인 종료 임박 — 다시 로그인: ' + how) + '">D-' + Math.ceil(left / 86400000) + ' · ' + fmtEpoch(a.login_ends, true) + ' 종료</span></div></div>';
+  }
+  // 한 프로바이더(계정)의 타일 본문 행들
+  function usageTileRows(d, prov) {
+    var isClaude = prov === 'claude';
+    // API 로그인 슬롯 — 구독 한도가 없으므로 수집 실패가 아니라 흐린 안내 한 줄. 툴팁은 account(api:<조직명> 등)
+    if (d.api === true) {
+      return '<div class="u-row text"' + (d.account ? ' data-d="' + esc(d.account) + '"' : '') +
+        '><div class="head"><span class="lbl dim">API 로그인 · 구독 한도 없음</span></div></div>';
+    }
+    var windows = d.windows || [];
+    var html = windows.map(function (w) { return usageRow(w.title.replace(' all models', ' 전체'), w.pct, w.left); }).join('');
+    html += (d.extras || []).map(function (x) {
+      if (x.title === 'Reset credits') {
+        return resetCreditRows(x);
+      }
+      if (x.title === 'Credits') {
+        // 사용 크레딧: 꺼짐이면 한도 도달 시 크레딧을 안 쓴다는 설명을 공용 data-d 툴팁으로 (title은 5초 재렌더로 사라진다)
+        var cv = x.unlimited === true ? '무제한' : esc(x.value), off = x.enabled === false;
+        if (off) cv += ' · 꺼짐';
+        if (typeof x.expires_at === 'number') cv += ' · ' + fmtEpoch(x.expires_at, true) + ' 만료';
+        return '<div class="u-row text"><div class="head"><span class="lbl">크레딧</span><span class="val"' +
+          (off ? ' data-d="' + esc('플랜 한도에 닿아도 크레딧을 쓰지 않음 — claude.ai 설정에서 켤 수 있음') + '"' : '') + '>' + cv + '</span></div></div>';
+      }
+      return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
+    }).join('');
+    if (isClaude) html += loginRow(d);
+    var ago = d.updated ? Math.round((Date.now() - new Date(d.updated).getTime()) / 60000) : null;
+    // 실패 사유는 공용 data-d 툴팁(#tip)으로 — 브라우저 기본 title은 5초 폴링마다 행이 다시 그려져 뜨기 전에 사라졌다.
+    // 사유에 줄바꿈 포함 JSON 본문이 올 수 있어 공백을 한 칸으로 접는다.
+    var reasonText = d.error ? String(d.error).replace(/\s+/g, ' ').trim() : '';
+    if (reasonText && prov === 'codex' && d.key) reasonText += " — 다시 로그인: CODEX_HOME='" + shq(d.key) + "' codex login --device-auth";
+    var reason = esc(reasonText);
+    if (d.error && !windows.length) {
+      // 한 번도 값을 못 가져온 계정(로그인 안 된 보조 계정 등) — 타일은 보이되 수집 실패로
+      html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" data-d="' + reason + '">수집 실패</span></div></div>';
+    } else if (d.error) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" data-d="' + reason + '">실패 · 마지막 값</span></div></div>';
+    else if (ago !== null && ago > 5) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim">' + ago + '분 전</span></div></div>';
+    return html;
+  }
+  function setTileRows(rows, html) {
+    if (rows._html !== html) { rows._html = html; rows.innerHTML = html; }   // 같은 내용이면 다시 그리지 않는다 — 호버 중인 요소 보존
+  }
   function renderUsage(u) {
-    LAST_USAGE = u;
-    syncUsageResets(u);  // 사용량 탭도 같은 현재 스냅샷으로 갱신(별도 조회·캐시 없음)
-    // USAGE=0이거나 허브에 계정이 하나도 없으면 통째로 숨김(4열), 한쪽만 없으면 그 타일만 숨김(5열)
-    var nProv = u ? ['claude', 'codex'].filter(function (p) { return u[p]; }).length : 0;
+    // 사용량 탭이 참조하는 스냅샷은 정규화해 둔다(두 프로바이더 모두 항상 배열)
+    LAST_USAGE = u ? { claude: provAccounts(u.claude), codex: provAccounts(u.codex) } : null;
+    syncUsageResets(LAST_USAGE);  // 사용량 탭도 같은 현재 스냅샷으로 갱신(별도 조회·캐시 없음)
     var kpis = document.getElementById('kpis');
-    kpis.classList.toggle('no-usage', nProv === 0);
-    kpis.classList.toggle('one-usage', nProv === 1);
-    if (!u) return;
-    ['claude', 'codex'].forEach(function (p) {
-      var cap = p === 'claude' ? 'Claude' : 'Codex';
-      var d = u[p], plan = document.getElementById('u' + cap + 'Plan'), rows = document.getElementById('u' + cap + 'Rows');
-      document.getElementById('tile' + cap).classList.toggle('off', !d);
-      if (!d) { plan.textContent = ''; rows.innerHTML = ''; rows._html = ''; return; }
-      plan.textContent = d.plan ? '· ' + d.plan : '';
-      var html = (d.windows || []).map(function (w) { return usageRow(w.title.replace(' all models', ' 전체'), w.pct, w.left); }).join('');
-      html += (d.extras || []).map(function (x) {
-        if (x.title === 'Reset credits') {
-          return resetCreditRows(x);
-        }
-        if (x.title === 'Credits') {
-          // 사용 크레딧: 꺼짐이면 한도 도달 시 크레딧을 안 쓴다는 설명을 공용 data-d 툴팁으로 (title은 5초 재렌더로 사라진다)
-          var cv = x.unlimited === true ? '무제한' : esc(x.value), off = x.enabled === false;
-          if (off) cv += ' · 꺼짐';
-          if (typeof x.expires_at === 'number') cv += ' · ' + fmtEpoch(x.expires_at, true) + ' 만료';
-          return '<div class="u-row text"><div class="head"><span class="lbl">크레딧</span><span class="val"' +
-            (off ? ' data-d="' + esc('플랜 한도에 닿아도 크레딧을 쓰지 않음 — claude.ai 설정에서 켤 수 있음') + '"' : '') + '>' + cv + '</span></div></div>';
-        }
-        return '<div class="u-row text"><div class="head"><span class="lbl">' + esc(x.title) + '</span><span class="val">' + esc(x.value) + '</span></div></div>';
-      }).join('');
-      var ago = d.updated ? Math.round((Date.now() - new Date(d.updated).getTime()) / 60000) : null;
-      // 실패 사유는 공용 data-d 툴팁(#tip)으로 — 브라우저 기본 title은 5초 폴링마다 행이 다시 그려져 뜨기 전에 사라졌다.
-      // 사유에 줄바꿈 포함 JSON 본문이 올 수 있어 공백을 한 칸으로 접는다.
-      if (d.error) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim" data-d="' + esc(String(d.error).replace(/\s+/g, ' ').trim()) + '">실패 · 마지막 값</span></div></div>';
-      else if (ago !== null && ago > 5) html += '<div class="u-row text"><div class="head"><span class="lbl dim">갱신</span><span class="val dim">' + ago + '분 전</span></div></div>';
-      if (rows._html !== html) { rows._html = html; rows.innerHTML = html; }   // 같은 내용이면 다시 그리지 않는다 — 호버 중인 요소 보존
+    // 사용량 타일 = 계정마다 하나, 순서는 Claude 계정들 → Codex 계정들. 계정이 없으면 타일도 없다(열 수는 CSS auto-fit이 정한다).
+    var want = [];
+    PROVS.forEach(function (pv) {
+      (LAST_USAGE ? LAST_USAGE[pv.id] : []).forEach(function (a) { want.push({ prov: pv.id, d: a }); });
+    });
+    var tiles = Array.prototype.slice.call(kpis.querySelectorAll('.tile.usage'));
+    while (tiles.length > want.length) tiles.pop().remove();
+    want.forEach(function (w, i) {
+      var t = tiles[i];
+      if (t && t.dataset.prov !== w.prov) { t.remove(); t = null; }   // 같은 자리의 프로바이더가 달라지면 새로 만든다
+      if (!t) {
+        t = document.createElement('div');
+        t.className = 'tile usage ' + w.prov;
+        t.dataset.prov = w.prov;
+        t.innerHTML = '<span class="t-label ptl"><img class="t-icon" src="/assets/' + w.prov + '.webp" alt=""><span class="t-title"></span></span><div class="u-rows"></div>';
+        // 이 자리 뒤에 이미 있는 타일 앞에, 없으면 맨 끝에 — 앞 타일들은 이미 올바른 순서다
+        var next = null;
+        for (var k = i + 1; k < tiles.length; k++) if (tiles[k] && tiles[k].parentNode === kpis) { next = tiles[k]; break; }
+        kpis.insertBefore(t, next);
+        tiles[i] = t;
+      }
+      setTileTitle(t.querySelector('.t-title'), provTitleHtml(w.prov, w.d));
+      setTileRows(t.querySelector('.u-rows'), usageTileRows(w.d, w.prov));
     });
   }
   function sparkHtml(items, key, labelFn) {
@@ -2372,18 +2457,42 @@
         '<h2><span class="hmk" style="background:' + color + '"></span>' + title + '</h2>' + body + '</section>';
     }
     // 허브에 그 프로바이더 계정이 없으면(이력도 라이브 게이지도 없음) 빈 차트 대신 패널을 숨긴다
-    function provAlive(p, hist) {
-      var d = hist[p];
+    function provAlive(d, live) {
       if (d && Object.keys(d.windows || {}).length) return true;
-      return !!(LAST_USAGE && LAST_USAGE[p]);
+      return !!live;
     }
-    // 한도 패널 제목은 현황 타일과 동일하게 — 로고 + 이름 · 플랜
-    function provPanel(p, d) {
-      var cap = p === 'claude' ? 'Claude' : 'Codex';
+    // 한도 패널은 계정마다 하나 — 제목은 "[로고] <프로바이더> · <이름> · <플랜>".
+    // id는 프로바이더·인덱스, 라이브 계정 매칭은 data-prov + data-key (syncUsageResets)
+    function provPanel(p, d, live, idx) {
       return '<section class="panel"><div class="prov-head"><h2 class="prov"><img class="picon" src="/assets/' + p + '.webp" alt="">' +
-        cap + (d.plan ? ' · ' + esc(d.plan) : '') + '</h2>' +
-        '<div class="prov-resets" id="usage-' + p + '-resets">' + resetCreditsHtml(LAST_USAGE && LAST_USAGE[p]) + '</div></div>' +
+        provTitleHtml(p, d, true) + '</h2>' +
+        '<div class="prov-resets" id="usage-' + p + '-' + idx + '-resets" data-prov="' + p + '" data-key="' + esc(d.key || '') + '">' +
+        resetCreditsHtml(live) + '</div></div>' +
         '<div class="uchart">' + svgSteps(d.windows || {}, hist.from, hist.to, d.resets || {}, d.plan_changes || [], d.live) + '</div></section>';
+    }
+    // 한 프로바이더의 패널들: 이력 계정 순서대로, 이력에 없고 라이브에만 있는 계정은 뒤에 붙인다
+    function provPanels(p) {
+      var liveList = (LAST_USAGE && LAST_USAGE[p]) || [], seen = {}, accts = {};
+      // API 슬롯은 한도 패널이 없고, 같은 구독 계정(account)의 슬롯이 여럿이면 첫 슬롯만 — 이력이 이메일 기준이라 그래프가 같다
+      function skip(d, live) {
+        if (d.api === true || (live && live.api === true)) return true;
+        var acct = d.account || (live && live.account) || '';
+        if (!acct) return false;
+        if (accts[acct]) return true;
+        accts[acct] = true;
+        return false;
+      }
+      var out = [];
+      provAccounts(hist[p]).forEach(function (d) {
+        var live = findAcct(liveList, d.key);
+        seen[d.key || ''] = true;
+        if (provAlive(d, live) && !skip(d, live)) out.push(provPanel(p, d, live, out.length));
+      });
+      liveList.forEach(function (a) {
+        if (seen[a.key || ''] || skip(a, a)) return;
+        out.push(provPanel(p, { key: a.key, label: a.label, email: a.email, plan: a.plan, account: a.account }, a, out.length));
+      });
+      return out.join('');
     }
     function stat(label, val) {
       return '<div class="mstat"><div class="ml">' + label + '</div><div class="mv">' + val + '</div></div>';
@@ -2417,9 +2526,7 @@
     });
     // 구 서버(series_by_agent 없음)면 전체 합산 패널 하나
     var tokPanels = agents.length ? agents.map(function (a) { return tokPanel(a, sba[a]); }).join('') : tokPanel('', tok);
-    document.getElementById('usageMain').innerHTML =
-      (provAlive('claude', hist) ? provPanel('claude', hist.claude || {}) : '') +
-      (provAlive('codex', hist) ? provPanel('codex', hist.codex || {}) : '') + tokPanels;
+    document.getElementById('usageMain').innerHTML = provPanels('claude') + provPanels('codex') + tokPanels;
     document.getElementById('usageRail').innerHTML =
       panel('합계', 'var(--lg-green)',
         '<div class="mstat-grid">' + stat('input', fmtTok(t.input)) + stat('output', fmtTok(t.output)) +

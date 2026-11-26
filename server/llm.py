@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import db, state, tokens
+from . import accounts, db, state, tokens
 from .config import CFG
 
 log = logging.getLogger("madison.llm")
@@ -219,11 +219,12 @@ def _account_tokens(agent: str, usage_map: dict, c=None, started_at: str | None 
                     log.warning("worker 토큰 기록 비활성 — 이 허브 기기의 MADISON_DEVICE를 못 찾음")
                 return
             hour = tokens.local_hour(started_at)   # 허브 로컬 시 — 시간·일 원장에 같은 키로 가산
+            account = accounts.worker_account(agent)   # 허브 프로세스 env의 로그인(TTL 캐시) — 워커가 실제 쓴 계정
             with tokens.savepoint(conn, "madison_worker_tokens"):
                 for model, v in usage_map.items():
                     if any(v.values()):
                         tokens.add_ledger(conn, hour, device_id, agent, tokens.ledger_project(CFG.llm_cwd.name, "auto"), model,
-                                          "auto", "events", v)
+                                          "auto", "events", v, account=account)
     except Exception:
         log.exception("worker 토큰 기록 실패")
 

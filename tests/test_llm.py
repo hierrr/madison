@@ -147,6 +147,12 @@ class WorkerAccountingTests(unittest.TestCase):
         from pathlib import Path
         tokens.DEVICE_ENV = Path(self.envfile.name)
         tokens._hub_dev.update(id=None, at=0.0)   # 캐시 초기화
+        # 실제 ~/.claude.json·~/.codex/auth.json을 읽지 않게 워커 계정은 기본 ''(미상)로 고정
+        from unittest import mock
+        from server import accounts
+        patcher = mock.patch.object(accounts, "worker_account", return_value="")
+        self.worker_account = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         import os
@@ -246,6 +252,28 @@ class WorkerAccountingTests(unittest.TestCase):
         self.assertIsNone(self.conn.execute("SELECT * FROM token_daily").fetchone())
         self.assertIsNone(self.conn.execute("SELECT * FROM token_hourly").fetchone())
         self.assertEqual(self.conn.execute("SELECT value FROM settings WHERE key='k'").fetchone()["value"], "v")
+
+    def test_worker_usage_is_booked_under_the_hub_login_account_in_both_ledgers(self):
+        """워커 사용량의 account는 accounts.worker_account(agent) — 에이전트별로 따로 묻고 두 원장에 같은 값."""
+        self.worker_account.side_effect = lambda agent: {"claude-code": "hub-claude@example.com",
+                                                          "codex-cli": "api:ab12cd34"}[agent]
+        llm._account_tokens("claude-code", {"model-a": {"in": 5, "out": 2, "cr": 0, "cw": 0, "th": 0}}, c=self.conn)
+        llm._account_tokens("codex-cli", {"gpt-a": {"in": 3, "out": 1, "cr": 0, "cw": 0, "th": 0}}, c=self.conn)
+        for table in ("token_daily", "token_hourly"):
+            with self.subTest(table=table):
+                got = {r["agent"]: r["account"] for r in self.conn.execute(f"SELECT agent, account FROM {table}")}
+                self.assertEqual(got, {"claude-code": "hub-claude@example.com", "codex-cli": "api:ab12cd34"})
+        self.assertEqual([c.args for c in self.worker_account.call_args_list],
+                         [("claude-code",), ("codex-cli",)])
+
+    def test_unknown_worker_account_is_empty_and_two_accounts_stay_separate_rows(self):
+        usage = {"model-a": {"in": 5, "out": 2, "cr": 0, "cw": 0, "th": 0}}
+        llm._account_tokens("claude-code", usage, c=self.conn)                    # '' (기본 고정값)
+        self.worker_account.return_value = "later@example.com"
+        llm._account_tokens("claude-code", usage, c=self.conn)                    # 로그인이 바뀐 뒤
+        llm._account_tokens("claude-code", usage, c=self.conn)                    # 같은 계정은 한 행에 누적
+        rows = {r["account"]: r["input"] for r in self.conn.execute("SELECT account, input FROM token_daily")}
+        self.assertEqual(rows, {"": 5, "later@example.com": 10})
 
     def test_empty_or_zero_usage_writes_nothing(self):
         llm._account_tokens("claude-code", {}, c=self.conn)

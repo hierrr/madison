@@ -119,6 +119,33 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.total(), 100)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM token_reconcile_floors").fetchone()[0], 0)
 
+    def by_account(self, table="token_daily"):
+        return {r[0]: r[1] for r in self.conn.execute(f"SELECT account, SUM(input) FROM {table} GROUP BY account")}
+
+    def test_correction_is_booked_to_the_session_account_in_both_ledgers(self):
+        self.conn.execute("UPDATE sessions SET account='Alice@Example.com' WHERE session_id='s1'")   # 저장 형식이 아니어도 정규화
+        result = self.apply()
+        self.assertEqual(result["added_total"], 50)
+        # 이미 ''로 쌓인 처음 100은 그대로, 대조가 보탠 50만 세션 계정으로
+        self.assertEqual(self.by_account(), {"": 100, "alice@example.com": 50})
+        self.assertEqual(self.by_account("token_hourly"), self.by_account())
+        self.assertEqual(self.total(), 150)
+
+    def test_correction_without_a_session_account_is_booked_to_empty(self):
+        self.apply()
+        self.assertEqual(self.by_account(), {"": 150})
+
+    def test_evidence_records_the_session_account(self):
+        self.conn.execute("UPDATE sessions SET account='alice@example.com' WHERE session_id='s1'")
+        self.apply()
+        ev = json.loads(self.conn.execute("SELECT evidence FROM token_reconciliations").fetchone()[0])
+        self.assertEqual(ev["account"], "alice@example.com")
+
+    def test_evidence_account_is_empty_for_untracked_session(self):
+        self.assertEqual(self.apply(device=2)["status"], "untracked")
+        ev = json.loads(self.conn.execute("SELECT evidence FROM token_reconciliations").fetchone()[0])
+        self.assertEqual(ev["account"], "")
+
     def test_old_sessions_before_tracking_are_not_added(self):
         self.conn.execute("INSERT INTO sessions(device_id,agent,session_id,project) VALUES (1,'claude-code','old','acme')")
         body = self.payload(session_id="old")

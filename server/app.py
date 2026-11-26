@@ -50,6 +50,7 @@ COLLECTOR_FILES = {
     "skills/handoff/SKILL.md", "skills/pickup/SKILL.md",
     "collect_tokens_local.py",   # 토큰 백필 운반 — 허브 없는 기기에서 집계 JSON 생성
     "worker.py", "version.json",
+    "account.py",   # 계정 식별 규칙 — 수집기·허브 공용(설치기는 report.sh보다 먼저 받는다)
     "hermes/__init__.py", "hermes/madison_common.py", "hermes/plugin.yaml",   # hermes 리포터 플러그인 갱신용
 }
 
@@ -214,9 +215,10 @@ async def collector_results(request: Request, device: str = "", run_id: str = ""
 
 @app.get("/api/state")
 async def get_state(request: Request):
-    _require(request, ("device", "admin"))
+    actor = _require(request, ("device", "admin"))
     with db.tx() as c:
-        return state.assemble(c)
+        # 수집기 토큰은 한도 슬롯(계정 이메일·폴더 경로)을 볼 이유가 없다 — 대시보드(admin)만 받는다
+        return state.assemble(c, include_usage=actor["kind"] != "device")
 
 
 @app.get("/api/feed")
@@ -919,12 +921,17 @@ async def get_usage_history(request: Request, days: int = 30):
     _require(request, ("admin",))
     with db.tx() as c:
         h = usage.history(c, days)
-    snap = usage.snapshot()   # 패널 제목용 플랜명 (현황 타일과 동일 표기)
+    snap = usage.snapshot()   # 패널 제목용 플랜명·이메일 (현황 타일과 동일 표기)
     for p in usage.PROVIDERS:
-        cur = snap.get(p)
-        h[p]["plan"] = (cur or {}).get("plan") or ""
-        # 현재 스냅샷에 있는 창 제목 — 사라진 창(예: 5h)의 마지막 값을 '지금'까지 늘이지 않게 하는 용도. 스냅샷 없으면 None
-        h[p]["live"] = [w["title"] for w in cur["windows"]] if cur else None
+        by_key = {a["key"]: a for a in snap[p]}
+        # 슬롯마다 같은 key의 스냅샷으로 plan·email·api·live를 붙인다(스냅샷 없으면 plan·email "", api False, live None)
+        for item in h[p]:
+            cur = by_key.get(item["key"]) or {}
+            item["plan"] = cur.get("plan") or ""
+            item["email"] = cur.get("email") or ""
+            # 현재 스냅샷에 있는 창 제목 — 사라진 창(예: 5h)의 마지막 값을 '지금'까지 늘이지 않게 하는 용도.
+            # 수집 못 한 슬롯(updated 없음)·API 슬롯은 None
+            item["live"] = [w["title"] for w in cur["windows"]] if cur.get("updated") else None
     return h
 
 

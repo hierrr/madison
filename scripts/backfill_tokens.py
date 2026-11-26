@@ -19,6 +19,8 @@ tokens.add_ledger(일·시간 동시 가산)를 거치지 않고 아래 전용 U
   tokens.HUB_PROJECT로 적는다(tokens.ledger_project — 라이브 워커 계상·migrate 병합과 같은 규칙).
   세션 id를 얻는 경로: Claude는 줄의 sessionId, Codex는 session_meta.payload.id(허브 session_id와 같은 값을
   실데이터에서 확인). --from-json은 수집기가 날짜·프로젝트·모델·frontend로 이미 집계해 세션 id가 없어 이름 규칙(+수집기 값)만 쓴다 — 세션 조인 불가.
+- 계정(account): 허브 sessions에 그 세션이 있으면 그 세션의 account(tokens.ledger_account), 없거나 --from-json
+  (세션 id 없음)이면 ''(미상). 원장 PK에 account가 있어 계정이 다른 같은 키 행은 따로 쌓인다.
 - 프로젝트 귀속은 cwd의 basename(최선 노력) — Claude는 라인별 cwd, Codex는 session_meta.cwd.
 - 턴 수는 복원하지 않는다(turns=0) — 합계 턴은 라이브 수집분에서만.
 """
@@ -100,6 +102,23 @@ def scan_claude(root: Path, until: str) -> dict:
     return agg
 
 
+def _session_verdict(c, device_id: int, agent: str, session_id: str, cache: dict) -> tuple[str, str]:
+    """허브 sessions의 (frontend 판정, account) — 세션 기록이 없으면 ('', ''). 같은 세션은 cache로 한 번만 조회."""
+    key = (device_id, agent, session_id)
+    if key not in cache:
+        row = c.execute("SELECT frontend, account FROM sessions WHERE device_id=? AND agent=? AND session_id=?",
+                        key).fetchone()
+        cache[key] = ((row["frontend"] or ""), tokens.ledger_account(None, row)) if row else ("", "")
+    return cache[key]
+
+
+def resolve_account(c, device_id: int, agent: str, session_id: str, cache: dict | None = None) -> str:
+    """백필이 쓰는 account의 유일한 경로 — 허브 세션에 저장된 계정, 세션 기록이 없거나 id가 없으면 ''."""
+    if not session_id:
+        return ""
+    return _session_verdict(c, device_id, agent, session_id, cache if cache is not None else {})[1]
+
+
 def resolve_frontend(c, device_id: int, agent: str, session_id: str, project: str, collected: str,
                      cache: dict | None = None) -> str:
     """백필이 쓰는 frontend(자동화 여부) 판정의 유일한 경로 — 모든 입력 경로(Claude 전사본·Codex 롤아웃·
@@ -107,24 +126,20 @@ def resolve_frontend(c, device_id: int, agent: str, session_id: str, project: st
     따른다. 세션 기록이 없거나(session_id가 없는 경로 포함) 판정이 비어 있으면('' / 'unknown') 이름 규칙
     tokens.auto_frontend(project, 수집기 값)."""
     if session_id:
-        cache = cache if cache is not None else {}
-        key = (device_id, agent, session_id)
-        if key not in cache:
-            row = c.execute("SELECT frontend FROM sessions WHERE device_id=? AND agent=? AND session_id=?",
-                            key).fetchone()
-            cache[key] = (row["frontend"] or "") if row else ""
-        if cache[key] not in ("", "unknown"):
-            return cache[key]
+        verdict = _session_verdict(c, device_id, agent, session_id, cache if cache is not None else {})[0]
+        if verdict not in ("", "unknown"):
+            return verdict
     return tokens.auto_frontend(project, collected)
 
 
 def remap_frontend(c, device_id: int, agent: str, agg: dict) -> dict:
-    """스캐너 집계 {(day, project, model, session_id, 수집기 frontend): n} → {(day, project, model, frontend): n}."""
+    """스캐너 집계 {(day, project, model, session_id, 수집기 frontend): n} → {(day, project, model, frontend, account): n}."""
     out = defaultdict(lambda: {k: 0 for k in tokens.KINDS})
     cache: dict = {}
     for (day, project, model, sid, collected), v in agg.items():
         fe = resolve_frontend(c, device_id, agent, sid, project, collected, cache)
-        acc = out[(day, tokens.ledger_project(project, fe), model, fe)]   # 워커 이름 → HUB_PROJECT (auto일 때만)
+        acct = resolve_account(c, device_id, agent, sid, cache)
+        acc = out[(day, tokens.ledger_project(project, fe), model, fe, acct)]   # 워커 이름 → HUB_PROJECT (auto일 때만)
         for k in tokens.KINDS:
             acc[k] += v[k]
     return out
@@ -180,9 +195,9 @@ def cutoff_for(c, device_id: int, agent: str, until: str | None) -> str:
 
 def report_table(agg: dict) -> str:
     per_day = defaultdict(lambda: {k: 0 for k in tokens.KINDS})
-    for (day, _p, _m, _f), v in agg.items():
+    for key, v in agg.items():   # key = (day, project, model, frontend, account)
         for k in tokens.KINDS:
-            per_day[day][k] += v[k]
+            per_day[key[0]][k] += v[k]
     lines = [f"  {'day':10}  {'input':>12}  {'output':>12}  {'cache_r':>14}  {'cache_w':>12}"]
     for day in sorted(per_day):
         v = per_day[day]
@@ -217,7 +232,8 @@ def main():
                 # 집계 JSON에는 세션 id가 없다 — 세션 조인 불가, resolve_frontend의 이름 규칙 경로만 탄다
                 fe = resolve_frontend(c, device_id, str(r.get("agent") or ""), "", proj,
                                       str(r.get("frontend") or ""))
-                key = (str(r.get("day") or ""), tokens.ledger_project(proj, fe), str(r.get("model") or "")[:60], fe)
+                key = (str(r.get("day") or ""), tokens.ledger_project(proj, fe), str(r.get("model") or "")[:60], fe,
+                       "")   # 집계 JSON에는 계정도 없다
                 acc = by_agent.setdefault(str(r.get("agent") or ""), {}).setdefault(
                     key, {k: 0 for k in tokens.KINDS})
                 for k in tokens.KINDS:   # auto 재분류로 키가 합쳐질 수 있어 가산
@@ -243,15 +259,15 @@ def main():
         c.execute("DELETE FROM token_daily WHERE source='backfill' AND device_id=?", (device_id,))
         n = 0
         for agent, _until, agg in plans:
-            for (day, project, model, frontend), v in agg.items():
+            for (day, project, model, frontend, account), v in agg.items():
                 c.execute(
-                    "INSERT INTO token_daily (day, device_id, agent, project, model, frontend, source,"
+                    "INSERT INTO token_daily (day, device_id, agent, account, project, model, frontend, source,"
                     " input, output, cache_read, cache_write, thinking, turns)"
-                    " VALUES (?,?,?,?,?,?,'backfill',?,?,?,?,?,0)"
-                    " ON CONFLICT(day, device_id, agent, project, model, frontend, source) DO UPDATE SET"
+                    " VALUES (?,?,?,?,?,?,?,'backfill',?,?,?,?,?,0)"
+                    " ON CONFLICT(day, device_id, agent, account, project, model, frontend, source) DO UPDATE SET"
                     " input=excluded.input, output=excluded.output, cache_read=excluded.cache_read,"
                     " cache_write=excluded.cache_write, thinking=excluded.thinking",
-                    (day, device_id, agent, project[:120], model, frontend,
+                    (day, device_id, agent, account, project[:120], model, frontend,
                      v["in"], v["out"], v["cr"], v["cw"], v["th"]))
                 n += 1
         print(f"\n기록 완료: {n}행 (source='backfill', device={args.device})")

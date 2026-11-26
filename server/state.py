@@ -4,7 +4,7 @@ import re
 import logging
 from datetime import datetime, timedelta, timezone
 
-from . import tokens, usage
+from . import accounts, tokens, usage
 from .config import CFG
 
 log = logging.getLogger("madison.state")
@@ -167,6 +167,12 @@ def ingest(c, device_id: int, ev: dict) -> str:
     known = row["frontend"] and row["frontend"] != "unknown"
     if frontend and not (frontend == "unknown" and known):
         sets += ["frontend=?"]; args += [frontend]
+    # 로그인 계정 — 수집기가 detail.account에 싣는다(정해졌을 때만; ingest의 payload는 detail 그대로다).
+    # 정규화 결과가 비면(모르는 값·이메일도 api:도 아님) 무시해 기존 값을 지키고, 지연 도착(fresh 아님)은 세션 값을 덮지 않는다.
+    # 이벤트 자신의 값은 아래 원장 귀속(ledger_account)이 따로 쓰므로 지연 도착 이벤트도 자기 계정으로 계상된다.
+    acct = accounts.normalize(payload.get("account")) if isinstance(payload, dict) else ""
+    if acct and fresh:
+        sets += ["account=?"]; args += [acct]
     if payload.get("collection_mode"):
         sets += ["collection_mode=?"]; args += [str(payload["collection_mode"])[:20]]
     # 세션 이름(/rename·앱 제목·자동 제목·Codex thread_name): 실려 오면 최신값. 빈 값은 무시 —
@@ -224,7 +230,7 @@ def ingest(c, device_id: int, ev: dict) -> str:
     # frontend는 payload가 아니라 위 UPDATE 이후 세션에 저장된 판정(ledger_key).
     if event in ("turn_done", "session_end") and isinstance(payload.get("tokens"), dict):
         try:
-            sess = c.execute("SELECT project, frontend FROM sessions WHERE device_id=? AND agent=? AND session_id=?",
+            sess = c.execute("SELECT project, frontend, account FROM sessions WHERE device_id=? AND agent=? AND session_id=?",
                              (device_id, agent, session_id)).fetchone()
             proj, fe = tokens.ledger_key(project, sess)
             tokens.fold(c, device_id, agent, session_id,
@@ -232,7 +238,8 @@ def ingest(c, device_id: int, ev: dict) -> str:
                         model=_real_model(payload) or str(row["model"] or ""),
                         frontend=fe,
                         ts_device=ts_device, ts_hub=ts_hub,
-                        tokens=payload["tokens"], count_turn=(event == "turn_done"))
+                        tokens=payload["tokens"], count_turn=(event == "turn_done"),
+                        account=tokens.ledger_account(acct, sess))
         except Exception:
             log.exception("token fold 실패 (device=%s session=%s)", device_id, session_id)
 
@@ -257,8 +264,9 @@ def is_unconfirmed(st: str, frontend, seen_min: int, dev_online: bool, ttl: int)
     return st in ("awaiting_input", "needs_approval") and not dev_online
 
 
-def assemble(c) -> dict:
-    """GET /api/state 응답 — 세션·기기·주의필요·핸드오프·KPI·스파크."""
+def assemble(c, include_usage: bool = True) -> dict:
+    """GET /api/state 응답 — 세션·기기·주의필요·핸드오프·KPI·스파크.
+    include_usage=False면 kpi.usage(계정 이메일·폴더 절대경로가 든 한도 슬롯)를 비운다 — 수집기(device) 토큰 응답용."""
     now = datetime.now(timezone.utc)
     ttl = CFG.ttl_stale_min
 
@@ -394,7 +402,7 @@ def assemble(c) -> dict:
             "today_turns": today,
             "yesterday_turns_same_time": ydelta,
             "spark12": hours,
-            "usage": usage.snapshot() if CFG.usage_enabled else None,
+            "usage": usage.snapshot() if (CFG.usage_enabled and include_usage) else None,
         },
     }
 

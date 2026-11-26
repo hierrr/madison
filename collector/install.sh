@@ -51,8 +51,8 @@ fi
 command -v jq >/dev/null 2>&1 || { echo "jq가 필요합니다: brew install jq" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "python3가 필요합니다" >&2; exit 1; }
 
-mkdir -p "$MAD_DIR/throttle" "$MAD_DIR/locks" "$MAD_DIR/bin" "$MAD_DIR/pending" "$SKILLS_DIR/handoff" "$SKILLS_DIR/pickup"
-chmod 700 "$MAD_DIR/pending"
+mkdir -p "$MAD_DIR/throttle" "$MAD_DIR/locks" "$MAD_DIR/bin" "$MAD_DIR/pending" "$MAD_DIR/cache" "$SKILLS_DIR/handoff" "$SKILLS_DIR/pickup"
+chmod 700 "$MAD_DIR/pending" "$MAD_DIR/cache"   # cache: account.py의 로그인 정보 요약 캐시(키 꼬리 해시 포함)
 
 # ── 1) 파일 배치 (로컬 체크아웃이면 복사, 아니면 허브에서 다운로드) ──
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/nonexistent}")" 2>/dev/null && pwd || echo /nonexistent)"
@@ -66,6 +66,9 @@ fetch() { # $1 상대경로 → $2 대상. 실패 시 대상을 건드리지 않
   fi
   mv "$staged" "$2" || { rm -f "$staged"; return 1; }
 }
+# account.py를 가장 먼저 받는다 — report.sh·worker.py가 이 파일을 옆에서 불러 쓰므로, 못 받으면 아무것도 교체하기 전에
+# 중단한다(새 훅이 계정 규칙 없이 돌거나 구·신 파일이 섞이는 것을 막는다). fetch는 실패 시 대상을 건드리지 않는다.
+fetch account.py "$MAD_DIR/account.py" || { echo "account.py를 받지 못했습니다 — 기존 파일을 바꾸지 않고 설치를 중단합니다 (허브 연결 확인 후 재실행)" >&2; exit 1; }
 # launchd 잡의 실행 파일명 = 로그인 항목 표시 이름이므로, 잡 스크립트는 madison-* 스텁명으로 배치한다
 fetch worker.py "$MAD_DIR/worker.py"
 fetch version.json "$MAD_DIR/version.json"

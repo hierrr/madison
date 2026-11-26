@@ -104,12 +104,29 @@ push a piece of work from one machine to another without walking over to it.
   and their legend use the same orange as the 70% usage tier. Each chart's upper-right
   corner also shows current reset credits by kind with violet credit squares and
   expiry tooltips, updated alongside the overview tiles.
-  The gauges are **for the account signed in on the hub machine** — limits are
+  The gauges are **for the accounts signed in on the hub machine** — limits are
   per-account, so consumption from every device on that account is already
-  included, while devices signed into a different account never appear in any
-  gauge (token accounting still captures every device regardless of account).
-  A provider with no account on the hub gets its gauge and limit chart hidden
-  rather than left empty.
+  included, while an account not signed in on the hub never appears in any gauge.
+  The hub reads only dedicated sign-in folders in its home directory —
+  `~/.claude-<name>` for Claude and `~/.codex-<name>` for Codex — never the default
+  `~/.claude` / `~/.codex` that the hub machine itself works with, so switching
+  accounts there with `/login` leaves the gauges alone. Every signed-in folder becomes
+  one overview tile and one usage-tab limit chart (ordered by folder name), picked up
+  on the next poll without a restart; signing out or deleting the folder removes it.
+  Tiles are titled with the provider logo, the part of the account's email before
+  `@` and the plan, charts with `Claude · <name> · <plan>`; hovering the name shows
+  the full email, and the folder name stands in until the email is known. Two folders
+  signed in to the same account share one chart. A folder signed in for API billing
+  (Console login or API key) has no subscription limits, so its tile just says so and
+  nothing is collected. When a Claude access token expires (every 8 hours) the hub
+  runs `claude -p` once under that folder so Claude Code refreshes it (costing one
+  short model call); Codex refreshes its own tokens while the hub runs
+  `codex app-server`. Using Claude Code does not extend the sign-in itself, so a tile
+  shows the days left from 7 days before the sign-in ends and asks for a new login
+  once it has ended. A provider with no signed-in folder gets its gauge and limit
+  chart hidden rather than left empty. A folder whose read fails keeps its last values
+  and shows the error with the login command to run; there is no fallback source.
+  Limit history is stored per account email.
 - **Usage tab — token accounting & limit history** — collectors attach cumulative
   per-session token counts (input / output / cache read / cache write / thinking,
   per model, parsed from the agents' local transcripts) to turn events; the hub
@@ -123,6 +140,16 @@ push a piece of work from one machine to another without walking over to it.
   session itself, and the ledgers just record it. The hub's own LLM calls
   (summaries, reports) are recorded as automation under the project `madison`,
   not under the name of their scratch working directory.
+  Token rows are also stored per account: the collector reads which sign-in the
+  session uses from that device's `.claude.json` / `auth.json` (no network) — the
+  email for a subscription, `api:<organization>` for a Console login (no plan type and
+  non-subscription billing such as `prepaid` in `.claude.json`),
+  `api:<8 hex digits>` (a hash, never the key itself) for an API key, and
+  `api:bedrock` / `api:vertex` / `api:foundry` — and every view sums the accounts.
+  Rows from collectors older than 2026.11.26.1, from hermes, and from before the
+  update keep an unknown account. Two sign-ins sharing one email (for example a
+  personal plan and a team organization) count as one account, and `apiKeyHelper`
+  or a Codex login kept in the system keyring is not recognized.
   The tab charts limit windows over
   time (step lines), one token stack per agent (hourly for 1 and 7 days, daily
   beyond; cache, input, output and thinking in a single stack), and breakdowns
@@ -231,10 +258,47 @@ For a persistent service, register a LaunchAgent that runs `scripts/launchd/madi
 (which execs `scripts/_launchd_wrapper.sh` → the venv). The stub's filename becomes the
 login-item display name.
 
-For the subscription-limit gauges, the **hub machine must be signed into Claude Code**
-(on macOS the first read may pop a one-time Keychain access dialog — allow it from a GUI
-session). The Codex gauge appears when the codex CLI is signed in on the hub. Without
-either, everything else works normally and the gauges simply stay hidden.
+For the subscription-limit gauges, sign the hub in to each account under a folder of its
+own, from a terminal in the hub's GUI session (e.g. Screen Sharing) — on macOS the first
+read may pop a one-time Keychain access dialog; allow it there. The hub does not read its
+default login (`~/.claude`, `~/.codex`), so sign the main account in under a folder too.
+Without any folder, everything else works normally and the gauges simply stay hidden.
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-<account> claude auth login --claudeai --email <account email>
+CLAUDE_CONFIG_DIR=~/.claude-<account> claude auth status --text   # check the email and Sign-in ends
+mkdir -p ~/.codex-<account>                                       # codex refuses a CODEX_HOME that does not exist
+CODEX_HOME=~/.codex-<account> codex login --device-auth            # a device code, works over SSH
+```
+
+Name each folder after its account (for example `~/.claude-alice` for alice@example.com) and
+repeat for every account, the main one included; no `.env` entry or restart is needed, and
+tiles are ordered by folder name. A Claude folder counts once its `.claude.json` holds the
+signed-in account, a Codex folder once it has `auth.json`. Codex keeps its own runtime per
+`CODEX_HOME`, so each Codex folder takes about 550 MB and runs a small background daemon once
+signed in. Over SSH a locked Keychain makes Claude Code store the
+login in that folder's `.credentials.json` instead; the hub reads either place. If the
+browser is already signed in to claude.ai as another account, that account may get
+authorized instead — open the sign-in URL shown in the terminal in a private window on the
+same machine. When the sign-in ends, run the same login command again. These folders are for
+the hub only: to work under another account on any machine, use `/login` in the default
+login — sessions started with a different `CLAUDE_CONFIG_DIR` / `CODEX_HOME` have no MADISON
+hooks and are not collected.
+
+To remove an account from the hub, sign that folder out or delete it:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-<account> claude auth logout
+CODEX_HOME=~/.codex-<account> codex logout
+```
+
+API-billed accounts need no hub folder. A Console login (`claude auth login --console`) has no
+subscription limits and its credit balance cannot be read (the balance endpoint is
+subscription-only), so a hub folder for it only shows `api:<organization>` with a note. Claude
+Code keeps the Console login in the machine-wide `~/.config/anthropic` profile rather than in
+the folder, so signing in to Console from any folder replaces it. An API key set through
+`ANTHROPIC_API_KEY` needs nothing on the hub. Either way, tokens used on each device are recorded
+as `api:<organization>` or `api:<8 hex digits>` once that device's collector is updated.
 
 ### 2. Onboard a device
 

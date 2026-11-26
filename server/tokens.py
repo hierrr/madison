@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import accounts
 from .config import CFG
 
 log = logging.getLogger("madison.tokens")
@@ -110,7 +111,7 @@ _LEDGER_KEY = {"token_daily": "day", "token_hourly": "hour"}
 
 def merge_worker_projects(c) -> int:
     """일·시간 원장의 (워커 디렉터리 이름, frontend='auto') 행을 HUB_PROJECT 행으로 합친다 — 같은 키가 이미 있으면
-    열을 더하고 옛 행은 지운다. 멱등(합칠 행이 없으면 변화 없음). 호출부(db.migrate)의 트랜잭션 안에서 부른다.
+    열을 더하고 옛 행은 지운다(account는 그대로 — 계정이 다른 행끼리는 합치지 않는다). 멱등(합칠 행이 없으면 변화 없음). 호출부(db.migrate)의 트랜잭션 안에서 부른다.
     frontend가 auto가 아닌 행은 사람 작업이라 건드리지 않는다. 합친(지운) 행 수를 돌려준다."""
     names = tuple(n for n in worker_dirs() if n != HUB_PROJECT)
     if not names:
@@ -123,12 +124,12 @@ def merge_worker_projects(c) -> int:
                          names).fetchone():
             continue
         c.execute(
-            f"INSERT INTO {table} ({key}, device_id, agent, project, model, frontend, source,"
+            f"INSERT INTO {table} ({key}, device_id, agent, account, project, model, frontend, source,"
             f" input, output, cache_read, cache_write, thinking, turns)"
-            f" SELECT {key}, device_id, agent, ?, model, frontend, source,"
+            f" SELECT {key}, device_id, agent, account, ?, model, frontend, source,"
             f" input, output, cache_read, cache_write, thinking, turns FROM {table}"
             f" WHERE frontend='auto' AND project IN ({marks})"
-            f" ON CONFLICT({key}, device_id, agent, project, model, frontend, source) DO UPDATE SET"
+            f" ON CONFLICT({key}, device_id, agent, account, project, model, frontend, source) DO UPDATE SET"
             f" input=input+excluded.input, output=output+excluded.output,"
             f" cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write,"
             f" thinking=thinking+excluded.thinking, turns=turns+excluded.turns",
@@ -150,6 +151,20 @@ def ledger_key(event_project, session) -> tuple[str, str]:
     project = str(event_project or (session["project"] if session else "") or "")
     frontend = str((session["frontend"] if session else "") or "")
     return ledger_project(project, frontend), frontend
+
+
+def ledger_account(event_value, session) -> str:
+    """토큰 한 덩어리의 account — 이벤트 자신의 값 → 세션에 저장된 값 → ''(미상). 값은 accounts.normalize를 거친다
+    (구독 이메일은 소문자, API는 'api:…', 그 외는 ''). 실시간 fold·대조·시간 원장 채우기가 함께 쓰는 단일 경로."""
+    acct = accounts.normalize(event_value)
+    if acct:
+        return acct
+    if session is not None:
+        try:
+            return accounts.normalize(session["account"])
+        except (KeyError, IndexError):
+            pass
+    return ""
 
 
 # 토큰 '규모' = input + cache_read + cache_write + output (thinking은 output의 부분집합이라 더하지 않는다).
@@ -250,9 +265,9 @@ def _spread(deltas: dict, count_turn: bool):
 
 
 def fold(c, device_id: int, agent: str, session_id: str, *, project: str, model: str,
-         frontend: str, ts_device: str, ts_hub: str, tokens: dict, count_turn: bool):
+         frontend: str, ts_device: str, ts_hub: str, tokens: dict, count_turn: bool, account: str = ""):
     """이벤트의 tokens.cum을 델타로 바꿔 시간·일 원장에 가산하고 기준점을 갱신한다.
-    project·frontend는 호출부가 ledger_key로 구해 넘긴다 — frontend는 이번 갱신 이후 세션에 저장된 판정.
+    project·frontend는 호출부가 ledger_key로, account는 ledger_account로 구해 넘긴다 — frontend는 이번 갱신 이후 세션에 저장된 판정.
     원장 가산 전부와 기준점(tokens_cum) 갱신은 한 SAVEPOINT다 — 중간에 실패하면 모두 되돌리고 예외를 올린다
     (state.ingest가 잡아 로그). 일부만 남으면 기준점이 그대로라 다음 턴에 이미 들어간 델타가 또 가산된다."""
     cum = _clean(tokens.get("cum"))
@@ -279,34 +294,37 @@ def fold(c, device_id: int, agent: str, session_id: str, *, project: str, model:
             stored = merge_max(old, stored)
         hour = local_hour(ts_device, ts_hub)
         for m, d, turns in _spread(deltas, count_turn):
-            add_ledger(c, hour, device_id, agent, project, m, frontend, "events", d, turns=turns)
+            add_ledger(c, hour, device_id, agent, project, m, frontend, "events", d, turns=turns, account=account)
         c.execute("UPDATE sessions SET tokens_cum=? WHERE device_id=? AND agent=? AND session_id=?",
                   (json.dumps(stored, ensure_ascii=False), device_id, agent, session_id))
 
 
 _LEDGER_UPSERT = (
-    "INSERT INTO {table} ({key}, device_id, agent, project, model, frontend, source,"
+    "INSERT INTO {table} ({key}, device_id, agent, account, project, model, frontend, source,"
     " input, output, cache_read, cache_write, thinking, turns)"
-    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
-    " ON CONFLICT({key}, device_id, agent, project, model, frontend, source) DO UPDATE SET"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    " ON CONFLICT({key}, device_id, agent, account, project, model, frontend, source) DO UPDATE SET"
     " input=input+excluded.input, output=output+excluded.output,"
     " cache_read=cache_read+excluded.cache_read, cache_write=cache_write+excluded.cache_write,"
     " thinking=thinking+excluded.thinking, turns=turns+excluded.turns")
 
 
 def _upsert(c, table: str, key: str, stamp, device_id, agent, project, model, frontend, source,
-            counts: dict, turns: int):
+            counts: dict, turns: int, account: str = ""):
     c.execute(_LEDGER_UPSERT.format(table=table, key=key),
-              (stamp, device_id, agent, (project or "")[:120], (model or "")[:60], (frontend or "")[:20],
+              (stamp, device_id, agent, (account or "")[:200], (project or "")[:120], (model or "")[:60], (frontend or "")[:20],
                source, counts["in"], counts["out"], counts["cr"], counts["cw"], counts["th"], turns))
 
 
-def add_ledger(c, hour: str, device_id, agent, project, model, frontend, source, counts: dict, turns=0):
+def add_ledger(c, hour: str, device_id, agent, project, model, frontend, source, counts: dict, turns=0,
+               account: str = ""):
     """원장 쓰기 경로의 전부 — 로컬 시 키 'YYYY-MM-DDTHH' 하나를 받아 token_hourly(그 시)와
-    token_daily(날 = hour[:10])에 같은 값을 가산 UPSERT한다. fold(이벤트)·llm._account_tokens(허브 워커)가 쓴다.
+    token_daily(날 = hour[:10])에 같은 값을 가산 UPSERT한다. account는 PK의 일부 — ''는 계정 미상. fold(이벤트)·llm._account_tokens(허브 워커)가 쓴다.
     (전사본 백필은 일 원장만 쓴다 — scripts/backfill_tokens.py 주석 참고.)"""
-    _upsert(c, "token_daily", "day", hour[:10], device_id, agent, project, model, frontend, source, counts, turns)
-    _upsert(c, "token_hourly", "hour", hour, device_id, agent, project, model, frontend, source, counts, turns)
+    _upsert(c, "token_daily", "day", hour[:10], device_id, agent, project, model, frontend, source, counts, turns,
+            account)
+    _upsert(c, "token_hourly", "hour", hour, device_id, agent, project, model, frontend, source, counts, turns,
+            account)
 
 
 def backfill_hourly(c):
@@ -316,10 +334,11 @@ def backfill_hourly(c):
     실시간 fold·다른 프로세스의 채우기와 이중 계상되지 않는다.
     재료 둘:
       1) 토큰이 실린 turn_done/session_end 이벤트를 세션별 id 순으로 재생 — 규칙은 fold와 같다(_step·_spread).
-         frontend는 세션의 현재 판정(sessions.frontend), project는 이벤트 project 또는 세션 project(ledger_key).
+         frontend는 세션의 현재 판정(sessions.frontend), project는 이벤트 project 또는 세션 project(ledger_key),
+         account는 세션의 현재 account(ledger_account — 옛 이벤트 시점의 계정은 복원하지 않는다).
          과거 이벤트 시점의 판정과 갈릴 수 있는 경계 사례는 일 원장과의 날짜별 합 비교로 확인한다.
       2) llm_runs.usage — 허브 워커(훅 억제라 이벤트 없음): started_at 시(실시간 _account_tokens와 같은 기준),
-         frontend 'auto', project는 ledger_project(워커 cwd 이름, 'auto') = HUB_PROJECT, 기기는 허브 기기. 기기를 못 찾으면 건너뛴다.
+         frontend 'auto', project는 ledger_project(워커 cwd 이름, 'auto') = HUB_PROJECT, 기기는 허브 기기, account는 ''(llm_runs에 없다). 기기를 못 찾으면 건너뛴다.
     격리: 세션 하나(재료 1)·llm_runs 한 행(재료 2)의 처리는 각각 SAVEPOINT다. 손상된 한 단위가 실패하면 그 단위만
     롤백하고 건너뛴 뒤 건수를 경고로 남긴다 — 기동을 막지 않는다. 전체 트랜잭션 실패(락·디스크)는 그대로 올린다.
     경계: EVENT_RETENTION_DAYS>0으로 오래된 이벤트가 지워졌다면 세션의 남은 첫 이벤트가 전체 누적을 첫 델타로
@@ -330,7 +349,7 @@ def backfill_hourly(c):
     skipped_sessions = skipped_runs = 0
     first_error = None
     sessions = {(r["device_id"], r["agent"], r["session_id"]): r
-                for r in c.execute("SELECT device_id, agent, session_id, project, frontend FROM sessions")}
+                for r in c.execute("SELECT device_id, agent, session_id, project, frontend, account FROM sessions")}
     # 세션별로 이벤트를 읽는다 — 읽기 커서가 열린 채 ROLLBACK TO 하지 않으려고 키 목록을 먼저 확정한다.
     keys = [tuple(r) for r in c.execute(
         "SELECT DISTINCT device_id, agent, session_id FROM events"
@@ -394,9 +413,10 @@ def _fill_session(c, key, rows, session, state) -> int:
         last_model = model
         deltas, old = _step(key[1], old, cum, model)
         proj, fe = ledger_key(r["project"], session)
+        acct = ledger_account(None, session)
         hour = local_hour(r["ts_device"], r["ts_hub"])
         for m, d, turns in _spread(deltas, r["event"] == "turn_done"):
-            _upsert(c, "token_hourly", "hour", hour, key[0], key[1], proj, m, fe, "events", d, turns)
+            _upsert(c, "token_hourly", "hour", hour, key[0], key[1], proj, m, fe, "events", d, turns, acct)
             n += 1
     return n
 

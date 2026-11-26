@@ -4,6 +4,7 @@
 set -u
 
 MAD_DIR="$HOME/.claude/madison"
+HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || HERE=""
 ENV_FILE="$MAD_DIR/env"
 SPOOL="$MAD_DIR/spool.jsonl"
 LOCK="$MAD_DIR/lock"
@@ -172,7 +173,6 @@ fi
 # 승인 요청 직후엔 다음 이벤트가 즉시 통과해야 빨강 해제가 안 늦음 (§7.2)
 [ "$EV" = "permission_request" ] && rm -f "$THROTTLE_DIR/$SID" 2>/dev/null
 
-TS="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
 CWD=$(printf '%s' "$IN" | jq -r '.cwd // ""' 2>/dev/null) || CWD=""
 TP=$(printf '%s' "$IN" | jq -r '.transcript_path // ""' 2>/dev/null) || TP=""
 TURN_ID=$(printf '%s' "$IN" | jq -r '.turn_id // ""' 2>/dev/null) || TURN_ID=""
@@ -227,6 +227,30 @@ if [ -z "$FRONTEND" ]; then
   if [ "$AGENT" = "claude-code" ]; then FRONTEND="cli"; else FRONTEND="unknown"; fi
 fi
 
+# ── 시각(TS)과 계정 ────────────────────────────────────
+# 계정은 에이전트 env(CLAUDE_CONFIG_DIR·ANTHROPIC_*·CODEX_HOME 등)에서만 알 수 있어 훅 프로세스 안에서 구한다
+# (launchd 플러셔·워커엔 그 env가 없다). python 호출 수를 늘리지 않으려고 기존 TS 계산 호출을 account.py --ts로
+# 바꿨다 — 한 번의 호출이 "<ts>\t<account>"를 낸다. 계정은 session_start·prompt·turn_done에만 싣는다
+# (그 외 이벤트는 account.py를 부르지 않는 기존 경로). account.py가 없는 구버전 설치(부분 갱신)나 실패 때는
+# 기존 방식의 TS만 쓰고 계정은 생략한다. 캐시는 $MAD_DIR/cache.
+TS=""; ACCOUNT=""; TAB=$'\t'
+case "$EV" in
+  session_start|prompt|turn_done)
+    if [ -n "$HERE" ] && [ -f "$HERE/account.py" ]; then
+      ACCT_ARGS=(--ts --agent "$AGENT" --cache-dir "$MAD_DIR/cache")
+      [ "$FRONTEND" = "auto" ] && ACCT_ARGS+=(--headless)
+      ACCT_OUT=$(python3 "$HERE/account.py" "${ACCT_ARGS[@]}" 2>/dev/null) || ACCT_OUT=""
+      # 형식이 맞을 때만 채택한다 — 어긋나면 아래 기존 방식으로 TS를 다시 구한다
+      case "$ACCT_OUT" in
+        20??-??-??T??:??:??.???Z"$TAB"*) TS="${ACCT_OUT%%"$TAB"*}"; ACCOUNT="${ACCT_OUT#*"$TAB"}" ;;
+      esac
+    fi
+    ;;
+esac
+if [ -z "$TS" ]; then
+  TS="$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
+
 # ── 모델/effort ───────────────────────────────────────
 # Codex는 model을 공식 훅 필드로 제공한다. effort는 훅 필드 우선, rollout turn_context 폴백.
 # Claude Code는 훅에 model이 없으면 전사본 꼬리의 마지막 assistant 라인에서 취한다.
@@ -258,7 +282,7 @@ fi
 #   자동 제목을 같은 레코드로 쓴다. 없으면 자동 제목 ai-title(/resume 목록의 그것) — 자동 제목 포함은
 #   2026-10-01 사용자 결정. 꼬리만 본다: 턴마다 반복 기록되므로 충분하고 전체 스캔 비용을 지지 않는다.
 # Codex: 훅 입력·rollout 어디에도 없고 ~/.codex/session_index.jsonl의 thread_name뿐(첫 지시로 자동 생성,
-#   앱에서 바꾼 이름도 같은 필드). 허브는 빈 값을 무시하므로 없으면 안 싣는다.
+#   앱에서 바꾼 이름도 같은 필드, 위치는 ${CODEX_HOME:-~/.codex}). 허브는 빈 값을 무시하므로 없으면 안 싣는다.
 SESSION_NAME=""
 if [ "$AGENT" = "claude-code" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
   SESSION_NAME=$(tail -n 4000 "$TP" 2>/dev/null | grep -E '"type": ?"(custom-title|ai-title)"' | jq -rs '
@@ -266,12 +290,12 @@ if [ "$AGENT" = "claude-code" ] && [ -n "$TP" ] && [ -f "$TP" ]; then
      // ([.[] | select(type=="object" and .type=="ai-title") | .aiTitle // ""] | map(select(. != "")) | last)
      // "") | tostring | gsub("[\\n\\r\\t]+"; " ") | .[0:120]
   ' 2>/dev/null) || SESSION_NAME=""
-elif [ "$AGENT" = "codex-cli" ] && [ -f "$HOME/.codex/session_index.jsonl" ]; then
+elif [ "$AGENT" = "codex-cli" ] && [ -f "${CODEX_HOME:-$HOME/.codex}/session_index.jsonl" ]; then
   # 라인 단위 fromjson? — 쓰다 만 마지막 줄이 있어도 나머지는 읽힌다. 같은 id가 여러 번이면 마지막(최신)
   SESSION_NAME=$(jq -Rrn --arg id "$SID" '
     [inputs | fromjson? | select(type=="object" and .id == $id) | .thread_name // "" | tostring]
     | map(select(. != "")) | last // "" | gsub("[\\n\\r\\t]+"; " ") | .[0:120]
-  ' "$HOME/.codex/session_index.jsonl" 2>/dev/null) || SESSION_NAME=""
+  ' "${CODEX_HOME:-$HOME/.codex}/session_index.jsonl" 2>/dev/null) || SESSION_NAME=""
 fi
 
 # ── 프로젝트/브랜치 ────────────────────────────────────
@@ -417,6 +441,12 @@ fi
 # 세션 이름은 모든 이벤트에 싣는다 — 이름은 세션 중간에 생기거나 바뀌므로(/rename, 앱 제목 생성) 매 신호가 갱신 기회
 if [ -n "$SESSION_NAME" ]; then
   MERGED=$(printf '%s' "$DETAIL" | jq -c --arg n "$SESSION_NAME" '. + {session_name: $n}' 2>/dev/null) \
+    && [ -n "$MERGED" ] && DETAIL="$MERGED"
+fi
+
+# 계정은 정해졌을 때만 싣는다(모르면 키 생략 — 허브는 빈 값을 무시한다)
+if [ -n "$ACCOUNT" ]; then
+  MERGED=$(printf '%s' "$DETAIL" | jq -c --arg a "$ACCOUNT" '. + {account: $a}' 2>/dev/null) \
     && [ -n "$MERGED" ] && DETAIL="$MERGED"
 fi
 

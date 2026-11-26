@@ -136,6 +136,7 @@ def reconcile(c, device_id, body):
             result["status"] = "before_tracking"
         else:
             project, frontend = tokens.ledger_key(session["project"], session)
+            account = tokens.ledger_account(None, session)   # 대조는 이벤트가 없다 — 세션에 저장된 계정
             baseline = old
             with tokens.savepoint(c, "reconcile_session"):
                 for ts, model, value in clean:
@@ -143,7 +144,7 @@ def reconcile(c, device_id, body):
                     delta = tokens._delta(baseline.get(key), value)
                     if any(delta.values()):
                         tokens.add_ledger(c, tokens.local_hour(ts.isoformat()), device_id, agent,
-                                          project, model, frontend, "events", delta, turns=0)
+                                          project, model, frontend, "events", delta, turns=0, account=account)
                         for k in tokens.KINDS:
                             result["added"][k] += delta[k]
                     baseline = merge_max(baseline, {key: value})
@@ -158,6 +159,7 @@ def reconcile(c, device_id, body):
     result["added_total"] = sum(result["added"][k] for k in ("in", "out", "cr", "cw"))
     evidence = {"source": str(body.get("source") or "")[:40], "complete": body.get("complete") is True,
                 "local_cum": final, "hub_cum_before": old,
+                "account": tokens.ledger_account(None, session),
                 "first_ts": clean[0][0].isoformat() if clean else None,
                 "last_ts": clean[-1][0].isoformat() if clean else None}
     if isinstance(body.get("local_total"), int):

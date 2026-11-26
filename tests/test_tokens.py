@@ -824,10 +824,11 @@ class HourlyBackfillTests(unittest.TestCase):
     def _flaky_upsert(self, bad):
         real = tokens._upsert
 
-        def upsert(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns):
+        def upsert(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns,
+                   account=""):
             if bad(project, model):
                 raise sqlite3.OperationalError("simulated bad row")
-            return real(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns)
+            return real(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns, account)
         return upsert
 
     def test_corrupt_session_is_skipped_and_the_rest_is_filled(self):
@@ -836,7 +837,7 @@ class HourlyBackfillTests(unittest.TestCase):
         self.send("bad", "2026-09-02T11:20:00Z", {"model-a": cum(9, 9)}, project="bad-proj")
         self.send("good2", "2026-09-02T12:10:00Z", {"model-b": cum(5, 5)})
         self.conn.commit()
-        want = [r for r in self.hourly() if r[3] != "bad-proj"]
+        want = [r for r in self.hourly() if r[4] != "bad-proj"]
         self.assertTrue(want)
         self.conn.execute("DROP TABLE token_hourly")
         self.conn.commit()
@@ -922,10 +923,11 @@ class AtomicFoldTests(unittest.TestCase):
     def flaky(self, fail_when):
         real = tokens._upsert
 
-        def upsert(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns):
+        def upsert(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns,
+                   account=""):
             if fail_when(table, model):
                 raise sqlite3.OperationalError("simulated")
-            return real(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns)
+            return real(c, table, key, stamp, device_id, agent, project, model, frontend, source, counts, turns, account)
         return upsert
 
     def test_failure_on_second_model_leaves_nothing_and_next_turn_counts_exactly(self):
@@ -1208,37 +1210,37 @@ class BackfillScriptHubProjectTests(unittest.TestCase):
         for name in ("llm-cwd", "summarizer"):
             with self.subTest(project=name):
                 out = self.remap({("2026-09-01", name, "haiku", "no-such-session", ""): self.n(5)})
-                self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto")])
+                self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto", "")])
 
     def test_current_llm_cwd_name_without_session_maps_too(self):
         with mock.patch.object(tokens.CFG, "llm_cwd", Path("/x/custom-worker-dir")):
             out = self.remap({("2026-09-01", "custom-worker-dir", "haiku", "", ""): self.n(5)})
-        self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto")])
+        self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto", "")])
 
     def test_rows_collapsing_to_the_same_key_are_summed(self):
         out = self.remap({("2026-09-01", "llm-cwd", "haiku", "a", ""): self.n(5),
                           ("2026-09-01", "summarizer", "haiku", "b", ""): self.n(7)})
         (key,) = out
-        self.assertEqual(key, ("2026-09-01", "madison", "haiku", "auto"))
+        self.assertEqual(key, ("2026-09-01", "madison", "haiku", "auto", ""))
         self.assertEqual(out[key]["in"], 12)
 
     def test_human_session_keeps_name_and_verdict_even_with_worker_like_name(self):
         out = self.remap({("2026-09-01", "llm-cwd", "model-a", "human-llm", ""): self.n(5),
                           ("2026-09-01", "summarizer", "model-a", "human-sum", "auto"): self.n(6)})
-        self.assertEqual(set(out), {("2026-09-01", "llm-cwd", "model-a", "cli"),
-                                    ("2026-09-01", "summarizer", "model-a", "app")})
+        self.assertEqual(set(out), {("2026-09-01", "llm-cwd", "model-a", "cli", ""),
+                                    ("2026-09-01", "summarizer", "model-a", "app", "")})
 
     def test_auto_session_keeps_its_project_name(self):
         out = self.remap({("2026-09-01", "acme-web", "model-a", "auto-sess", ""): self.n(5)})
-        self.assertEqual(list(out), [("2026-09-01", "acme-web", "model-a", "auto")])
+        self.assertEqual(list(out), [("2026-09-01", "acme-web", "model-a", "auto", "")])
 
     def test_ordinary_project_without_session_is_untouched(self):
         out = self.remap({("2026-09-01", "acme-web", "model-a", "no-such-session", "app"): self.n(5)})
-        self.assertEqual(list(out), [("2026-09-01", "acme-web", "model-a", "app")])
+        self.assertEqual(list(out), [("2026-09-01", "acme-web", "model-a", "app", "")])
 
     def test_other_devices_session_is_not_a_record(self):
         out = self.remap({("2026-09-01", "llm-cwd", "haiku", "human-llm", ""): self.n(5)}, device=2)
-        self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto")])
+        self.assertEqual(list(out), [("2026-09-01", "madison", "haiku", "auto", "")])
 
 
 class TxTests(unittest.TestCase):
@@ -1265,3 +1267,235 @@ class TxTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LedgerAccountTests(unittest.TestCase):
+    """원장의 account 차원 — 귀속 규칙, 같은 키 가산, 워커 병합, 조회 합산, 시간 원장 채우기, 백필 스크립트."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        for did, name in ((1, "acme-mini"), (2, "acme-hub")):
+            self.conn.execute(
+                "INSERT INTO devices (id,name,token_hash,created_at,last_seen_at)"
+                " VALUES (?,?,'x',datetime('now'),datetime('now'))", (did, name))
+        self.hour = datetime.now().astimezone().replace(minute=0, second=0, microsecond=0)
+        self.hour = (self.hour - timedelta(hours=1)).strftime("%Y-%m-%dT%H")
+        self.reg = registry.Registry()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def add(self, account, n, *, project="acme-web", model="model-a", frontend="cli", turns=1, device=1):
+        tokens.add_ledger(self.conn, self.hour, device, "claude-code", project, model, frontend, "events",
+                          cum(n, n // 2, 10, 1, 0), turns=turns, account=account)
+
+    # ── ledger_account ──
+
+    def test_ledger_account_prefers_event_then_session_then_empty(self):
+        sess = {"account": "session@example.com"}
+        self.assertEqual(tokens.ledger_account("Event@Example.com", sess), "event@example.com")
+        self.assertEqual(tokens.ledger_account(None, sess), "session@example.com")
+        self.assertEqual(tokens.ledger_account("", sess), "session@example.com")
+        self.assertEqual(tokens.ledger_account("garbage", sess), "session@example.com")   # 정규화 결과가 비면 무시
+        self.assertEqual(tokens.ledger_account("api:Acme Org", sess), "api:Acme Org")
+        self.assertEqual(tokens.ledger_account(None, None), "")
+        self.assertEqual(tokens.ledger_account(None, {"account": ""}), "")
+        self.assertEqual(tokens.ledger_account(None, {"account": None}), "")
+        self.assertEqual(tokens.ledger_account(None, {"project": "x"}), "")      # account 열 없는 행·딕셔너리도 예외 없이 ''
+        self.assertEqual(tokens.ledger_account(5, None), "")
+
+    def test_ledger_account_reads_sqlite_rows(self):
+        self.conn.execute("INSERT INTO sessions (device_id, agent, session_id, account) VALUES (1,'claude-code','s','a@example.com')")
+        row = self.conn.execute("SELECT account FROM sessions").fetchone()
+        self.assertEqual(tokens.ledger_account(None, row), "a@example.com")
+        row = self.conn.execute("SELECT project FROM sessions").fetchone()
+        self.assertEqual(tokens.ledger_account(None, row), "")
+
+    # ── 쓰기 ──
+
+    def test_add_ledger_writes_both_ledgers_and_accumulates_per_account(self):
+        self.add("a@example.com", 100)
+        self.add("a@example.com", 50)
+        self.add("b@example.com", 7)
+        self.add("", 3)
+        for table in ("token_daily", "token_hourly"):
+            with self.subTest(table=table):
+                got = {r["account"]: (r["input"], r["turns"]) for r in self.conn.execute(f"SELECT * FROM {table}")}
+                self.assertEqual(got, {"a@example.com": (150, 2), "b@example.com": (7, 1), "": (3, 1)})
+
+    def test_add_ledger_account_defaults_to_empty(self):
+        tokens.add_ledger(self.conn, self.hour, 1, "claude-code", "p", "m", "cli", "events", cum(5))
+        self.assertEqual(self.conn.execute("SELECT account FROM token_daily").fetchone()[0], "")
+
+    def test_fold_carries_the_account_argument(self):
+        self.conn.execute("INSERT INTO sessions (device_id, agent, session_id, project, frontend) VALUES (1,'claude-code','s','p','cli')")
+        tokens.fold(self.conn, 1, "claude-code", "s", project="p", model="m", frontend="cli",
+                    ts_device="2026-11-26T01:00:00Z", ts_hub="2026-11-26T01:00:00Z",
+                    tokens={"cum": {"m": cum(40)}}, count_turn=True, account="z@example.com")
+        self.assertEqual({r[0]: r[1] for r in self.conn.execute("SELECT account, input FROM token_daily")},
+                         {"z@example.com": 40})
+
+    # ── 워커 project 병합 ──
+
+    def test_merge_worker_projects_keeps_accounts_apart_and_merges_within_an_account(self):
+        for table, key, stamp in (("token_daily", "day", self.hour[:10]), ("token_hourly", "hour", self.hour)):
+            for project, account, n in (("llm-cwd", "a@example.com", 10), ("summarizer", "a@example.com", 5),
+                                        ("madison", "a@example.com", 100), ("llm-cwd", "b@example.com", 7),
+                                        ("llm-cwd", "", 3)):
+                self.conn.execute(
+                    f"INSERT INTO {table} ({key}, device_id, agent, account, project, model, frontend, source, input)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)", (stamp, 1, "claude-code", account, project, "haiku", "auto", "events", n))
+        merged = tokens.merge_worker_projects(self.conn)
+        self.assertEqual(merged, 8)   # 두 테이블 x 옛 워커 이름 행 4개(madison 행은 대상 아님)
+        for table in ("token_daily", "token_hourly"):
+            with self.subTest(table=table):
+                got = {(r["account"], r["project"]): r["input"] for r in self.conn.execute(f"SELECT * FROM {table}")}
+                self.assertEqual(got, {("a@example.com", "madison"): 115, ("b@example.com", "madison"): 7,
+                                       ("", "madison"): 3})
+
+    # ── 조회는 계정을 합산하고 응답 형태는 그대로 ──
+
+    def test_window_and_summary_sum_accounts_without_new_keys(self):
+        self.add("a@example.com", 100)
+        self.add("b@example.com", 60)
+        self.add("", 40)
+        self.add("a@example.com", 8, project="other", model="model-b", frontend="auto", device=2)
+        single = sqlite3.connect(":memory:")
+        single.row_factory = sqlite3.Row
+        single.executescript(db.SCHEMA)
+        single.execute("INSERT INTO devices (id,name,token_hash,created_at) VALUES (1,'acme-mini','x','t'),(2,'acme-hub','x','t')")
+        for n, kw in ((200, {}), (8, dict(project="other", model="model-b", frontend="auto", device=2))):
+            tokens.add_ledger(single, self.hour, kw.get("device", 1), "claude-code", kw.get("project", "acme-web"),
+                              kw.get("model", "model-a"), kw.get("frontend", "cli"), "events", cum(n, n // 2, 10, 1, 0), turns=1)
+        # 합산 열은 한 계정 행 하나로 쌓은 것과 같지 않다(cache 등 다른 값) — 아래서 항목별로 직접 확인
+        w = tokens.window(self.conn, self.reg, hours_back=24)
+        s = tokens.summary(self.conn, self.reg, days=30)
+        for res in (w, s):
+            self.assertEqual(res["total"]["input"], 208)
+            self.assertEqual(res["total"]["turns"], 4)
+            self.assertEqual({r["project"]: r["input"] for r in res["by_project"]}, {"acme-web": 200, "other": 8})
+            self.assertEqual({r["model"]: r["input"] for r in res["by_model"]}, {"model-a": 200, "model-b": 8})
+            self.assertEqual({r["device"]: r["input"] for r in res["by_device"]}, {"acme-mini": 200, "acme-hub": 8})
+            self.assertEqual([r["agent"] for r in res["by_agent"]], ["claude-code"])
+            self.assertEqual(sum(d["input"] for d in res["days"]), 208)
+            self.assertEqual(sum(h["input"] for h in (res["hours"] or [])), 208 if res["hours"] else 0)
+        # 단일 계정으로 쌓은 DB와 응답의 키 집합이 같다
+        w1 = tokens.window(single, self.reg, hours_back=24)
+        self.assertEqual(set(w), set(w1))
+        self.assertEqual(set(w["by_project"][0]), set(w1["by_project"][0]))
+        self.assertEqual(set(w["hours"][0]), set(w1["hours"][0]))
+        self.assertNotIn("account", json.dumps([w, s]))
+        single.close()
+
+    def test_human_filter_and_service_filter_still_apply_across_accounts(self):
+        self.add("a@example.com", 100)
+        self.add("b@example.com", 50, frontend="auto")
+        w = tokens.window(self.conn, self.reg, hours_back=24, human=True)
+        self.assertEqual(w["total"]["input"], 100)
+        w = tokens.window(self.conn, self.reg, hours_back=24, device="acme-mini")
+        self.assertEqual(w["total"]["input"], 150)
+
+    # ── 시간 원장 채우기 ──
+
+    def test_backfill_hourly_books_session_account_and_empty_for_worker_runs(self):
+        self.conn.execute("INSERT INTO sessions (device_id, agent, session_id, project, frontend, account)"
+                          " VALUES (1,'claude-code','s1','acme-web','cli','alice@example.com')")
+        self.conn.execute("INSERT INTO sessions (device_id, agent, session_id, project, frontend)"
+                          " VALUES (1,'claude-code','s2','acme-web','cli')")
+        for sid, n, eid in (("s1", 100, "e1"), ("s2", 30, "e2")):
+            payload = {"model": "model-a", "tokens": {"cum": {"model-a": cum(n)}}}
+            self.conn.execute(
+                "INSERT INTO events (device_id, agent, session_id, event_id, event, ts_device, ts_hub, project, payload)"
+                " VALUES (1,'claude-code',?,?,'turn_done','2026-09-02T10:00:00Z','2026-09-02T10:00:00Z','acme-web',?)",
+                (sid, eid, json.dumps(payload)))
+        self.conn.execute("INSERT INTO llm_runs (site, provider, model, started_at, usage) VALUES ('summary','claude','haiku',?,?)",
+                          ("2026-09-02T10:20:00Z", json.dumps({"haiku": cum(7, 3)})))
+        envfile = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
+        envfile.write("MADISON_URL=http://x\nMADISON_DEVICE=acme-hub\n")
+        envfile.close()
+        self.addCleanup(Path(envfile.name).unlink)
+        patcher = mock.patch.object(tokens, "DEVICE_ENV", Path(envfile.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tokens._hub_dev.update(id=None, at=0.0)
+        self.addCleanup(tokens._hub_dev.update, id=None, at=0.0)
+        tokens.backfill_hourly(self.conn)
+        got = {(r["device_id"], r["project"], r["account"]): r["input"] for r in self.conn.execute("SELECT * FROM token_hourly")}
+        self.assertEqual(got, {(1, "acme-web", "alice@example.com"): 100, (1, "acme-web", ""): 30,
+                               (2, tokens.HUB_PROJECT, ""): 7})
+
+
+class BackfillScriptAccountTests(unittest.TestCase):
+    """scripts/backfill_tokens.py — 세션 조인으로 계정을 정하고(없거나 --from-json이면 ''), 새 PK의 ON CONFLICT로 쓴다."""
+
+    def setUp(self):
+        self.mod = _load_backfill_script()
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(db.SCHEMA)
+        self.conn.execute("INSERT INTO devices (id,name,token_hash,created_at) VALUES (1,'acme-mini','x','t')")
+        self.conn.execute("INSERT INTO sessions (device_id, agent, session_id, frontend, account)"
+                          " VALUES (1,'claude-code','sid-a','cli','alice@example.com')")
+        self.conn.execute("INSERT INTO sessions (device_id, agent, session_id, frontend)"
+                          " VALUES (1,'claude-code','sid-none','cli')")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def line(self, sid, n, model="model-a"):
+        return json.dumps({"type": "assistant", "timestamp": "2026-08-01T10:00:00Z", "cwd": "", "sessionId": sid,
+                           "message": {"model": model, "usage": {"input_tokens": n, "output_tokens": 1}}})
+
+    def run_main(self, *argv):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_tx():
+            yield self.conn
+        with mock.patch.object(self.mod.db, "tx", fake_tx), \
+                mock.patch("sys.argv", ["backfill_tokens.py", "--device", "acme-mini", *argv]):
+            with mock.patch("builtins.print"):
+                self.mod.main()
+
+    def rows(self):
+        out: dict = {}
+        for r in self.conn.execute("SELECT * FROM token_daily WHERE source='backfill'"):
+            k = (r["agent"], r["account"], r["model"])   # frontend 판정이 다른 행은 계정별로 합산해 본다
+            out[k] = out.get(k, 0) + r["input"]
+        return out
+
+    def test_remap_attaches_the_session_account_and_empty_without_a_session(self):
+        agg = {("2026-08-01", "p", "m", "sid-a", ""): {"in": 5, "out": 1, "cr": 0, "cw": 0, "th": 0},
+               ("2026-08-01", "p", "m", "sid-none", ""): {"in": 3, "out": 1, "cr": 0, "cw": 0, "th": 0},
+               ("2026-08-01", "p", "m", "ghost", ""): {"in": 2, "out": 1, "cr": 0, "cw": 0, "th": 0},
+               ("2026-08-01", "p", "m", "", ""): {"in": 1, "out": 1, "cr": 0, "cw": 0, "th": 0}}
+        out = self.mod.remap_frontend(self.conn, 1, "claude-code", agg)
+        by_account: dict = {}
+        for k, v in out.items():   # 세션 판정(frontend)이 달라 키가 갈라질 수 있으니 계정별로 합산해 본다
+            by_account[k[4]] = by_account.get(k[4], 0) + v["in"]
+        self.assertEqual(by_account, {"alice@example.com": 5, "": 6})
+
+    def test_transcript_backfill_writes_account_rows_and_reruns_idempotently(self):
+        root = self.tmp / "claude" / "proj"
+        root.mkdir(parents=True)
+        (root / "t.jsonl").write_text("\n".join([self.line("sid-a", 10), self.line("sid-a", 5),
+                                                  self.line("sid-none", 7), self.line("ghost", 2)]) + "\n")
+        empty = self.tmp / "codex"
+        empty.mkdir()
+        for _ in range(2):   # 두 번째는 기존 backfill 행을 지우고 다시 넣어도 같은 결과
+            self.run_main("--claude-dir", str(self.tmp / "claude"), "--codex-dir", str(empty))
+            self.assertEqual(self.rows(), {("claude-code", "alice@example.com", "model-a"): 15,
+                                           ("claude-code", "", "model-a"): 9})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM token_hourly").fetchone()[0], 0)   # 시간 원장은 쓰지 않는다
+
+    def test_from_json_rows_have_no_account(self):
+        f = self.tmp / "agg.json"
+        f.write_text(json.dumps({"device": "acme-mini", "rows": [
+            {"day": "2026-08-01", "agent": "claude-code", "project": "p", "model": "m", "frontend": "cli",
+             "in": 11, "out": 2, "cr": 0, "cw": 0, "th": 0}]}))
+        self.run_main("--from-json", str(f))
+        self.assertEqual(self.rows(), {("claude-code", "", "m"): 11})

@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,7 +22,28 @@ def executable(path: Path, text: str):
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+# Claude Code·Codex 세션 안에서 테스트를 돌리면 이 값들이 실제 계정으로 섞여 계정 판정이 달라진다.
+AGENT_ENV_NAMES = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENAI_API_KEY", "MADISON_SUPPRESS")
+AGENT_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_")
+
+
+def jwt(claims: dict) -> str:
+    def part(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+    return ".".join([part({"alg": "none"}), part(claims), "ZmFrZS1zaWduYXR1cmU"])
+
+
+def sha8(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:8]
+
+
 class CollectorTests(unittest.TestCase):
+    @staticmethod
+    def base_env():
+        """호스트의 에이전트 설정이 섞이지 않은 하네스 env."""
+        return {k: v for k, v in os.environ.items()
+                if k not in AGENT_ENV_NAMES and not k.startswith(AGENT_ENV_PREFIXES)}
+
     def make_home(self, root: Path):
         home = root / "home"
         mad = home / ".claude" / "madison"
@@ -60,6 +83,15 @@ class CollectorTests(unittest.TestCase):
             "esac\n",
         )
         executable(bindir / "launchctl", "#!/bin/bash\nexit 0\n")
+        # 부모 프로세스 탐색(프런트엔드 판별)을 결정적으로 만든다: 부모 명령줄은 MADISON_TEST_PCMD, 그 위는 없음
+        executable(
+            bindir / "ps",
+            "#!/bin/bash\n"
+            "case \"$*\" in\n"
+            "  *'ppid='*) echo 1 ;;\n"
+            "  *'command='*) printf '%s\\n' \"${MADISON_TEST_PCMD:-}\" ;;\n"
+            "esac\n",
+        )
         executable(
             bindir / "codex",
             "#!/bin/bash\n"
@@ -81,7 +113,7 @@ class CollectorTests(unittest.TestCase):
                 + json.dumps({"type": "turn_context", "payload": {"model": "gpt-rollout", "effort": "xhigh"}}) + "\n"
             )
             hook["transcript_path"] = str(transcript)
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_CAPTURE": str(capture)})
             subprocess.run(
                 ["bash", str(REPORT), event, "codex-cli"],
@@ -99,7 +131,7 @@ class CollectorTests(unittest.TestCase):
             transcript = root / "transcript.jsonl"
             transcript.write_text(transcript_text)
             hook["transcript_path"] = str(transcript)
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_CAPTURE": str(capture)})
             subprocess.run(
                 ["bash", str(REPORT), event, agent],
@@ -254,7 +286,7 @@ class CollectorTests(unittest.TestCase):
             home, mad = self.make_home(root)
             bindir = self.fake_path(root)
             log = root / "curl.log"
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({
                 "HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
                 "MADISON_TEST_CAPTURE": str(root / "capture.json"),
@@ -287,7 +319,7 @@ class CollectorTests(unittest.TestCase):
                 "for last in \"$@\"; do :; done\n"
                 "printf '%s\\n' \"$last\" >> \"${MADISON_TEST_NOTIFY:-/dev/null}\"\n",
             )
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({
                 "HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
                 "MADISON_TEST_NOTIFY": str(notified),
@@ -341,7 +373,7 @@ class CollectorTests(unittest.TestCase):
                 {"type": "command", "command": "~/.claude/madison/report.sh session_end 2>/dev/null || true", "statusMessage": "keep"},
                 {"type": "command", "command": "custom-end", "timeout": 4}]}]}}))
 
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
             command = ["bash", str(INSTALL), "--name", "test-device", "--hub", "http://madison.test"]
             subprocess.run(command, env=env, cwd=REPO, check=True, capture_output=True, text=True)
@@ -382,7 +414,7 @@ class CollectorTests(unittest.TestCase):
             home, mad = self.make_home(root)
             bindir = self.fake_path(root)
             log = root / "curl.log"
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_LOG": str(log)})
             subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO, check=True, capture_output=True, text=True)
             log_text = log.read_text()
@@ -395,7 +427,7 @@ class CollectorTests(unittest.TestCase):
             home, _mad = self.make_home(root)
             bindir = self.fake_path(root)
             log = root / "curl.log"
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
                         "MADISON_TEST_LOG": str(log), "MADISON_TEST_CURL_STATUS": "28"})
             proc = subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO,
@@ -418,7 +450,7 @@ class CollectorTests(unittest.TestCase):
                     installed = home / agent / "skills" / skill / "SKILL.md"
                     installed.parent.mkdir(parents=True, exist_ok=True)
                     installed.write_text("구버전 스킬\n")
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_LOG": str(log)})
             subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO, check=True, capture_output=True, text=True)
             self.assertNotIn("/api/enroll", log.read_text())
@@ -493,7 +525,7 @@ class CollectorTests(unittest.TestCase):
                 bindir = failing
             # 호스트에 실제 hermes가 있어도 영향받지 않도록 PATH에서 제외한다
             path_dirs = [d for d in os.environ["PATH"].split(os.pathsep) if d and not (Path(d) / "hermes").exists()]
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": os.pathsep.join([str(bindir)] + extra_dirs + path_dirs),
                         "MADISON_TEST_HERMES_LOG": str(hermes_log),
                         "MADISON_TEST_ENABLE_FAILS": str(enable_failures)})
@@ -598,7 +630,7 @@ class CollectorTests(unittest.TestCase):
             home, mad = self.make_home(root)
             (mad / "env").unlink()
             bindir = self.fake_path(root)
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
             proc = subprocess.run(
                 ["bash", str(INSTALL), "--name", "test-device", "--secret", "s3"],
@@ -615,7 +647,7 @@ class CollectorTests(unittest.TestCase):
             home, mad = self.make_home(root)
             bindir = self.fake_path(root)
             log = root / "curl.log"
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_LOG": str(log)})
             subprocess.run(
                 ["bash", str(INSTALL), "--hub", "http://lan.test:8787"],
@@ -642,7 +674,7 @@ class CollectorTests(unittest.TestCase):
             )
             (mad / "codex-orig-notify.json").write_text('["/Apps/SkyComputerUseClient", "turn-ended"]')
 
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
             subprocess.run(
                 ["bash", str(INSTALL), "--name", "test-device", "--hub", "http://madison.test"],
@@ -658,7 +690,7 @@ class CollectorTests(unittest.TestCase):
             home, _mad = self.make_home(root)
             bindir = self.fake_path(root)
             capture = root / "capture.json"
-            env = os.environ.copy()
+            env = self.base_env()
             env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
                         "MADISON_TEST_CAPTURE": str(capture), "MADISON_SUPPRESS": "1"})
             subprocess.run(["bash", str(REPORT), "prompt", "claude-code"],
@@ -673,6 +705,284 @@ class CollectorTests(unittest.TestCase):
         self.assertLess(guard, ps1.index("Test-Path $EnvFile"))
         sh = REPORT.read_text(encoding="utf-8")
         self.assertIn('[ "${MADISON_SUPPRESS:-0}" = "1" ] && exit 0', sh)
+
+
+    # ── 계정 (detail.account) ───────────────────────────────
+    CLAUDE_LOGIN = {"oauthAccount": {"emailAddress": "Alice@Example.com", "organizationType": "claude_max"}}
+    CODEX_AUTH = {"auth_mode": "chatgpt",
+                  "tokens": {"id_token": jwt({"email": "Carol@Example.com"}), "access_token": "fake-access"}}
+    FAKE_API_KEY = "sk-ant-api03-FAKEFAKEFAKEFAKEFAKE0000"
+    TS_FORMAT = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{3})?Z$"
+
+    def run_hook(self, agent, event, hook=None, *, files=None, extra_env=None, pcmd="", report=REPORT,
+                 originator="codex-tui", prepare=None):
+        """임시 HOME에서 report.sh를 실행해 전송 payload를 돌려준다(전송 안 했으면 None).
+        files: root 기준 상대경로 → 내용(dict는 JSON). extra_env 값의 {root}는 임시 루트로 치환."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            capture = root / "capture.json"
+            for rel, content in (files or {}).items():
+                target = root / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content if isinstance(content, str) else json.dumps(content))
+            hook = dict(hook or {})
+            hook.setdefault("session_id", "s1")
+            hook.setdefault("cwd", str(REPO))
+            if agent == "codex-cli":
+                transcript = root / "rollout.jsonl"
+                transcript.write_text(json.dumps({"type": "session_meta", "payload": {"originator": originator}}) + "\n")
+                hook["transcript_path"] = str(transcript)
+            if prepare:
+                prepare(root, home, mad, bindir)
+            env = self.base_env()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_CAPTURE": str(capture),
+                        "MADISON_TEST_PCMD": pcmd})
+            env.update({k: v.replace("{root}", str(root)) for k, v in (extra_env or {}).items()})
+            subprocess.run(["bash", str(report), event, agent], input=json.dumps(hook), text=True,
+                           env=env, cwd=REPO, check=True)
+            if not capture.exists():
+                return None
+            payload = json.loads(capture.read_text())
+            payload["_mad"] = {p.name: p.read_text() for p in (mad / "cache").glob("*")} if (mad / "cache").is_dir() else {}
+            return payload
+
+    def test_account_is_attached_to_session_start_prompt_and_turn_done_only(self):
+        files = {"home/.claude.json": self.CLAUDE_LOGIN}
+        for event in ("session_start", "prompt", "turn_done"):
+            payload = self.run_hook("claude-code", event, files=files)
+            self.assertEqual(payload["detail"]["account"], "alice@example.com", event)
+            self.assertRegex(payload["ts"], self.TS_FORMAT)
+        for event in ("heartbeat", "tool_start", "permission_request", "idle", "subagent_stop", "session_end"):
+            payload = self.run_hook("claude-code", event, files=files)
+            self.assertNotIn("account", payload["detail"], event)
+            self.assertRegex(payload["ts"], self.TS_FORMAT)
+
+    def test_account_is_omitted_when_unknown(self):
+        for files in (None, {"home/.claude.json": "{not json"}, {"home/.claude.json": {"projects": {}}}):
+            payload = self.run_hook("claude-code", "prompt", {"prompt": "hi"}, files=files)
+            self.assertNotIn("account", payload["detail"])
+            self.assertEqual(payload["detail"]["prompt"], "hi")
+            self.assertRegex(payload["ts"], self.TS_FORMAT)
+
+    def test_claude_config_dir_is_honoured(self):
+        files = {"home/.claude.json": self.CLAUDE_LOGIN,
+                 "cfg/.claude.json": {"oauthAccount": {"emailAddress": "Bob@Example.com", "organizationType": "claude_pro"}}}
+        payload = self.run_hook("claude-code", "session_start", {"source": "startup"}, files=files,
+                                extra_env={"CLAUDE_CONFIG_DIR": "{root}/cfg"})
+        self.assertEqual(payload["detail"]["account"], "bob@example.com")
+
+    def test_api_login_modes_and_headless_detection(self):
+        tail = self.FAKE_API_KEY[-20:]
+        rejected = {"home/.claude.json": {**self.CLAUDE_LOGIN, "customApiKeyResponses": {"rejected": [tail]}}}
+        env = {"ANTHROPIC_API_KEY": self.FAKE_API_KEY}
+        # 대화형: 사용자가 거절한 키는 쓰이지 않으므로 구독 이메일
+        payload = self.run_hook("claude-code", "prompt", {"prompt": "x"}, files=rejected, extra_env=env)
+        self.assertEqual(payload["detail"]["account"], "alice@example.com")
+        self.assertEqual(payload["detail"]["frontend"], "cli")
+        # 프런트엔드가 auto(claude -p)면 headless로 판정 — 프롬프트가 없으므로 키를 그대로 쓴다
+        payload = self.run_hook("claude-code", "prompt", {"prompt": "x"}, files=rejected, extra_env=env,
+                                pcmd="claude -p")
+        self.assertEqual(payload["detail"]["frontend"], "auto")
+        self.assertEqual(payload["detail"]["account"], "api:" + sha8(self.FAKE_API_KEY))
+        # 거절 기록이 없으면 대화형에서도 키
+        payload = self.run_hook("claude-code", "prompt", {"prompt": "x"},
+                                files={"home/.claude.json": self.CLAUDE_LOGIN}, extra_env=env)
+        self.assertEqual(payload["detail"]["account"], "api:" + sha8(self.FAKE_API_KEY))
+        # 클라우드 플래그와 AUTH_TOKEN
+        payload = self.run_hook("claude-code", "prompt", {"prompt": "x"}, files=rejected,
+                                extra_env={"CLAUDE_CODE_USE_BEDROCK": "1"})
+        self.assertEqual(payload["detail"]["account"], "api:bedrock")
+        payload = self.run_hook("claude-code", "prompt", {"prompt": "x"}, files=rejected,
+                                extra_env={"ANTHROPIC_AUTH_TOKEN": "fake-token"})
+        self.assertEqual(payload["detail"]["account"], "api:" + sha8("fake-token"))
+
+    def test_account_never_carries_secrets_into_event_or_cache(self):
+        files = {"home/.claude.json": {**self.CLAUDE_LOGIN,
+                                       "customApiKeyResponses": {"rejected": [self.FAKE_API_KEY[-20:]]}}}
+        payload = self.run_hook("claude-code", "session_start", {"source": "startup"}, files=files,
+                                extra_env={"ANTHROPIC_API_KEY": self.FAKE_API_KEY})
+        self.assertNotIn(self.FAKE_API_KEY[-20:], json.dumps(payload["detail"]))
+        self.assertTrue(payload["_mad"], "캐시 파일이 만들어져야 한다")
+        for text in payload["_mad"].values():
+            self.assertNotIn(self.FAKE_API_KEY[-20:], text)
+
+    def test_codex_events_carry_account_and_honour_codex_home(self):
+        files = {"home/.codex/auth.json": self.CODEX_AUTH,
+                 "alt/auth.json": {"auth_mode": "chatgpt", "tokens": {"id_token": jwt({"email": "Dave@Example.com"})}}}
+        for event in ("session_start", "prompt", "turn_done"):
+            payload = self.run_hook("codex-cli", event, {"turn_id": "t1"}, files=files)
+            self.assertEqual(payload["detail"]["account"], "carol@example.com", event)
+        payload = self.run_hook("codex-cli", "heartbeat", {"turn_id": "t1", "tool_use_id": "u1"}, files=files)
+        self.assertNotIn("account", payload["detail"])
+        payload = self.run_hook("codex-cli", "prompt", {"turn_id": "t1"}, files=files,
+                                extra_env={"CODEX_HOME": "{root}/alt"})
+        self.assertEqual(payload["detail"]["account"], "dave@example.com")
+        payload = self.run_hook("codex-cli", "prompt", {"turn_id": "t1"})   # auth.json 없음
+        self.assertNotIn("account", payload["detail"])
+
+    def test_codex_session_name_follows_codex_home(self):
+        index = json.dumps({"id": "s1", "thread_name": "대체 홈의 이름"}) + "\n"
+        payload = self.run_hook("codex-cli", "prompt", {"turn_id": "t1"}, files={"alt/session_index.jsonl": index},
+                                extra_env={"CODEX_HOME": "{root}/alt"})
+        self.assertEqual(payload["detail"]["session_name"], "대체 홈의 이름")
+
+    def test_hook_without_account_rule_file_still_reports_with_plain_timestamp(self):
+        """구버전 설치(account.py 없음)·깨진 account.py: TS는 기존 방식, 계정은 생략, 이벤트는 정상 전송."""
+        for content in (None, "import sys\nsys.exit(1)\n", "print('garbage')\n", "raise RuntimeError('boom')\n"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                home, mad = self.make_home(root)
+                bindir = self.fake_path(root)
+                (home / ".claude.json").write_text(json.dumps(self.CLAUDE_LOGIN))
+                installed = root / "installed"   # report.sh 한 파일만 있는 부분 갱신 상태
+                installed.mkdir()
+                shutil.copy(REPORT, installed / "report.sh")
+                if content is not None:
+                    (installed / "account.py").write_text(content)
+                capture = root / "capture.json"
+                env = self.base_env()
+                env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}", "MADISON_TEST_CAPTURE": str(capture)})
+                subprocess.run(["bash", str(installed / "report.sh"), "prompt", "claude-code"],
+                               input=json.dumps({"session_id": "s1", "cwd": str(REPO), "prompt": "hi"}),
+                               text=True, env=env, cwd=REPO, check=True)
+                payload = json.loads(capture.read_text())
+                self.assertNotIn("account", payload["detail"], repr(content))
+                self.assertEqual(payload["detail"]["prompt"], "hi")
+                self.assertRegex(payload["ts"], self.TS_FORMAT, repr(content))
+
+    def test_hook_python_call_count_is_unchanged(self):
+        """TS 계산 호출을 account.py --ts로 바꿨을 뿐이라 이벤트당 python3 호출은 1회."""
+        for event, expected in (("session_start", "account.py"), ("prompt", "account.py"), ("turn_done", "account.py"),
+                                ("heartbeat", "-c"), ("tool_start", "-c")):
+            self._assert_one_python_call(event, expected)
+
+    def _assert_one_python_call(self, event, expected_script):
+        real = shutil.which("python3")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            executable(bindir / "python3", f"#!/bin/bash\necho \"$1\" >> '{root}/py.log'\nexec '{real}' \"$@\"\n")
+            (home / ".claude.json").write_text(json.dumps(self.CLAUDE_LOGIN))
+            env = self.base_env()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}",
+                        "MADISON_TEST_CAPTURE": str(root / "capture.json")})
+            subprocess.run(["bash", str(REPORT), event, "claude-code"],
+                           input=json.dumps({"session_id": "s1", "cwd": str(REPO), "prompt": "x", "source": "startup"}),
+                           text=True, env=env, cwd=REPO, check=True)
+            calls = (root / "py.log").read_text().splitlines()
+            self.assertEqual(len(calls), 1, (event, calls))
+            self.assertTrue(calls[0].endswith(expected_script), (event, calls))
+
+    def test_installer_places_account_rule_before_report_and_creates_cache(self):
+        text = INSTALL.read_text(encoding="utf-8")
+        fetches = [line for line in text.splitlines() if line.startswith("fetch ")]
+        self.assertTrue(fetches[0].startswith("fetch account.py "), fetches[0])
+        self.assertLess(text.index("fetch account.py"), text.index("fetch report.sh"))
+        self.assertLess(text.index("fetch account.py"), text.index("fetch worker.py"))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            env = self.base_env()
+            env.update({"HOME": str(home), "PATH": f"{bindir}:{env['PATH']}"})
+            subprocess.run(["bash", str(INSTALL)], env=env, cwd=REPO, check=True, capture_output=True, text=True)
+            self.assertEqual((mad / "account.py").read_bytes(), (REPO / "collector" / "account.py").read_bytes())
+            self.assertTrue((mad / "cache").is_dir())
+            self.assertEqual(stat.S_IMODE((mad / "cache").stat().st_mode), 0o700)
+            self.assertEqual(json.loads((mad / "version.json").read_text())["version"],
+                             json.loads((REPO / "collector" / "version.json").read_text())["version"])
+
+    def test_installer_aborts_before_replacing_anything_when_account_rule_cannot_be_fetched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, mad = self.make_home(root)
+            bindir = self.fake_path(root)
+            # 로컬 체크아웃 복사본에서 account.py를 빼 허브 다운로드 경로를 강제하고, 그 다운로드를 실패시킨다
+            src = root / "collector"
+            shutil.copytree(REPO / "collector", src, ignore=shutil.ignore_patterns("__pycache__"))
+            (src / "account.py").unlink()
+            failing = root / "failing-bin"
+            failing.mkdir()
+            executable(failing / "curl",
+                       "#!/bin/bash\n"
+                       "case \"$*\" in *'/collector/account.py'*) exit 22 ;; esac\n"
+                       f"exec '{bindir / 'curl'}' \"$@\"\n")
+            stale = {"worker.py": "old worker\n", "report.sh": "old report\n", "version.json": '{"version":"old"}\n'}
+            for name, text in stale.items():
+                (mad / name).write_text(text)
+            env = self.base_env()
+            env.update({"HOME": str(home), "PATH": f"{failing}:{bindir}:{env['PATH']}"})
+            proc = subprocess.run(["bash", str(src / "install.sh")], env=env, cwd=REPO, capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("account.py", proc.stderr)
+            self.assertFalse((mad / "account.py").exists())
+            for name, text in stale.items():
+                self.assertEqual((mad / name).read_text(), text, name)   # 아무것도 교체되지 않았다
+            self.assertFalse((home / ".claude" / "settings.json").exists())   # 훅도 병합되지 않았다
+            self.assertFalse((mad / "pending" / "install.json").exists())
+            self.assertEqual([p.name for p in mad.glob(".madison-download.*")], [])
+
+    def test_windows_collector_ports_the_account_rule(self):
+        """pwsh가 없어 실행은 검증하지 못한다 — report.sh와 같은 규칙이 이식됐는지 정적으로만 확인한다."""
+        ps1 = (REPO / "collector" / "report.ps1").read_text(encoding="utf-8")
+        for needle in (
+            "[System.Security.Cryptography.SHA256]::Create()",          # SHA-256 (api:<sha8>, 거절 키 꼬리 비교)
+            "$_.ToString(\"x2\")",
+            "Replace(\"-\", \"+\").Replace(\"_\", \"/\")",               # JWT base64url 디코드
+            "[Convert]::FromBase64String",
+            "JavaScriptSerializer",                                      # PS 5.1 큰 JSON
+            "$serializer.MaxJsonLength = [int]::MaxValue",
+            "ConvertFrom-Json -AsHashtable",                             # PS 7+
+            "$PSVersionTable.PSVersion.Major -ge 7",
+            'Join-Path $MadDir "cache"',                                  # 캐시 위치
+            "claude-login-",
+            "$env:USERPROFILE",
+            "CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+            "https://api.openai.com/profile",
+            '$orgType.StartsWith("claude_")',                              # 1. claude_* -> 구독
+            '$orgType.StartsWith("api")',                                  # 2. api* -> API
+            '$billing = $login.billingType.Trim().ToLowerInvariant()',     # 3. 그 외(빈 값·처음 보는 값)는 billingType으로 판정
+            '$billing.Contains("subscription")',
+            '(-not $billing)',
+            'function Import-WebExtensions',                               # Add-Type 가드
+            '"System.Web.Script.Serialization.JavaScriptSerializer" -as [type]',
+            'billingType = (Get-Text $oauth "billingType")',               # 캐시 요약에 billingType 추가
+            'billingType = "$($cached.billingType)"',
+            'billingType = $data.billingType',
+            '$cached.version -eq 2',                                       # 옛(v1) 캐시 무효화
+            '@{ version = 2; stamp',
+            "$Headers",   # 기존 전송 경로는 그대로
+        ):
+            self.assertIn(needle, ps1)
+        # 캐시 버전은 읽기와 쓰기가 같아야 하고, 옛 버전 판정이 남아 있으면 안 된다
+        self.assertNotIn("$cached.version -eq 1", ps1)
+        self.assertNotIn("version = 1;", ps1)
+        self.assertNotIn("not $orgType -or", ps1)
+        # Add-Type은 가드 함수 안에서만, 타입 검사 뒤에 한 번만 나온다 (훅마다 반복하지 않는다)
+        self.assertEqual(ps1.count("Add-Type -AssemblyName"), 1)
+        guard = ps1[ps1.index("function Import-WebExtensions"):]
+        guard = guard[:guard.index("\n}\n")]
+        self.assertLess(guard.index("-as [type]"), guard.index("Add-Type -AssemblyName System.Web.Extensions"))
+        self.assertEqual(ps1.count("Import-WebExtensions\n"), 2)   # Read-JsonFile, Get-JwtClaims
+        jwt = ps1[ps1.index("function Get-JwtClaims"):]
+        jwt = jwt[:jwt.index("\n}\n")]
+        self.assertIn("Import-WebExtensions", jwt)
+        self.assertNotIn("Add-Type -AssemblyName", jwt)
+        # 계정은 세 이벤트에만, 정해졌을 때만 싣는다
+        block = ps1[ps1.index('if ($EventName -in @("session_start", "prompt", "turn_done"))'):]
+        block = block[:block.index("\n}\n")]
+        self.assertIn('Resolve-Account $AgentName ($frontend -eq "auto")', block)
+        self.assertIn("if ($account) { $detail.account = $account }", block)
+        # 함수 정의가 호출보다 앞, 그리고 stdin 처리보다 앞
+        self.assertLess(ps1.index("function Resolve-Account"), ps1.index("[Console]::In.ReadToEnd()"))
+        self.assertIn('$codexBase = if ($env:CODEX_HOME)', ps1)
+        # 설치기는 cache 폴더를 만든다
+        install_ps1 = (REPO / "collector" / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn('(Join-Path $MadDir "cache")', install_ps1)
 
 
 if __name__ == "__main__":

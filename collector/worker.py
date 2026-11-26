@@ -4,6 +4,7 @@ import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,8 @@ import urllib.request
 import uuid
 
 KINDS = ("in", "out", "cr", "cw", "th")
+_ACCOUNT_UNSET = object()
+_account_cache = _ACCOUNT_UNSET
 
 
 def utcnow():
@@ -155,6 +158,23 @@ def frontend():
     return "cli"
 
 
+def _account_module():
+    """collector/account.py를 이 파일 옆에서 불러온다(sys.path 의존 없음). 없거나 깨졌으면 None."""
+    global _account_cache
+    if _account_cache is _ACCOUNT_UNSET:
+        module = None
+        try:
+            path = Path(__file__).with_name("account.py")
+            if path.is_file():
+                spec = importlib.util.spec_from_file_location("madison_collector_account", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+        except Exception:
+            module = None
+        _account_cache = module
+    return _account_cache
+
+
 class Worker:
     def __init__(self, directory, user_root=None):
         self.directory = Path(directory)
@@ -178,12 +198,28 @@ class Worker:
             return json.load(response)
 
     def enqueue(self, agent, hook):
-        job_id = str(uuid.uuid4())
-        job = {"kind": "end", "id": job_id, "agent": agent, "ts": utcnow(), "frontend": frontend(),
-               "hook": {k: hook[k] for k in ("session_id", "transcript_path", "cwd", "reason", "model") if k in hook}}
         if not isinstance(hook.get("session_id"), str) or not hook["session_id"]:
             raise ValueError("세션 ID 없음")
+        job_id = str(uuid.uuid4())
+        client = frontend()
+        job = {"kind": "end", "id": job_id, "agent": agent, "ts": utcnow(), "frontend": client,
+               "hook": {k: hook[k] for k in ("session_id", "transcript_path", "cwd", "reason", "model") if k in hook}}
+        # 계정은 에이전트 env가 있는 지금(훅 프로세스)에만 알 수 있다 — 전송은 env 없는 launchd 플러셔에서 하므로
+        # 큐에 담아 둔다. 모르면 키를 두지 않는다(옛 job과 같은 모양).
+        account = self.account_for(agent, client == "auto")
+        if account:
+            job["account"] = account
         atomic_json(self.queue / (job_id + ".json"), job)
+
+    def account_for(self, agent, headless):
+        try:
+            module = _account_module()
+            if module is None:
+                return ""
+            return module.resolve(agent, os.environ, home=self.user_root, headless=headless,
+                                  cache_dir=self.directory / "cache") or ""
+        except Exception:
+            return ""
 
     def schedule_audit(self, force=False):
         done = read_json(self.directory / "audit-done.json", {})
@@ -219,11 +255,14 @@ class Worker:
                 top = git("rev-parse", "--show-toplevel")
                 if top:
                     project, branch, origin = Path(top).name, git("branch", "--show-current"), git("remote", "get-url", "origin")
+            detail = {"reason": hook.get("reason") or "other", "frontend": client,
+                      "collection_mode": "hooks", "model": hook.get("model") or ""}
+            account = job.get("account")
+            if isinstance(account, str) and account:   # 옛 job(키 없음)은 그대로 — 계정 미상
+                detail["account"] = account
             self.request("/api/events", {"agent": job["agent"], "session_id": hook["session_id"],
                          "event": "session_end", "event_id": "shutdown-" + job["id"], "ts": job["ts"],
-                         "project": project, "branch": branch, "origin": origin,
-                         "detail": {"reason": hook.get("reason") or "other", "frontend": client,
-                                    "collection_mode": "hooks", "model": hook.get("model") or ""}})
+                         "project": project, "branch": branch, "origin": origin, "detail": detail})
             job["sent"] = True
             atomic_json(path, job)
         snap = snapshot(Path(hook["transcript_path"]) if hook.get("transcript_path") else None,

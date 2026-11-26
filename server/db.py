@@ -1,13 +1,42 @@
 """SQLite 연결과 스키마. 트래픽이 작으므로 단일 커넥션 + 락으로 직렬화한다."""
 import contextlib
+import logging
 import sqlite3
 import threading
+import time
 
 from . import tokens
 from .config import CFG
 
+log = logging.getLogger("madison.db")
+
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
+
+
+def _ledger_ddl(name: str, key: str) -> str:
+    """토큰 원장(일·시간 공통) 테이블 DDL — 단일 출처. key는 시간 열 이름('day'|'hour').
+    day: ts_device 기준 로컬 날짜 'YYYY-MM-DD' / hour: 허브 로컬 시각 'YYYY-MM-DDTHH'.
+    agent: 'claude-code'|'codex-cli'. account: 로그인 계정(이메일 소문자 | 'api:<라벨>' | ''=미상 — 재설치 전·과거 데이터).
+    frontend: ''|cli|app|ide|auto(자동화도 집계하되 구분 — 쿼터는 소모). source: 'events'|'backfill'.
+    output은 thinking 포함, turns는 기여한 turn_done 수. 같은 PK 구성이 마이그레이션(_rebuild_ledger)의 이전·이후 형태다."""
+    return f"""CREATE TABLE IF NOT EXISTS {name} (
+  {key} TEXT NOT NULL,
+  device_id INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  account TEXT NOT NULL DEFAULT '',
+  project TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  frontend TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'events',
+  input INTEGER NOT NULL DEFAULT 0,
+  output INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  thinking INTEGER NOT NULL DEFAULT 0,
+  turns INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY ({key}, device_id, agent, account, project, model, frontend, source)
+)"""
 
 _BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -56,6 +85,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   bg_shells INTEGER DEFAULT 0, -- 그중 백그라운드 셸 수
   bg_ts TEXT,             -- 마지막 bg 이벤트 허브 시각 (표시 감쇠용)
   session_name TEXT,      -- 세션 이름: Claude /rename·앱 제목(custom-title)·자동 제목(ai-title), Codex thread_name
+  account TEXT NOT NULL DEFAULT '',   -- 로그인 계정(이벤트 detail.account, 지연 도착이 아닐 때만 갱신) — 원장 귀속 폴백
   PRIMARY KEY (device_id, agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS handoffs (
@@ -144,35 +174,18 @@ CREATE TABLE IF NOT EXISTS usage_history (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,               -- 허브 UTC ISO
   provider TEXT NOT NULL,         -- 'claude' | 'codex'
+  account TEXT NOT NULL DEFAULT '',   -- Claude 계정 key(기본 로그인 '', 나머지는 설정 폴더 절대 경로). codex는 ''
   win TEXT NOT NULL,              -- 창 제목 그대로: '5h', '7d all models', '7d <model>' …
   pct INTEGER NOT NULL,
   resets_at REAL                  -- epoch (없으면 NULL)
 );
-CREATE INDEX IF NOT EXISTS idx_usage_history ON usage_history(provider, win, ts);
 CREATE TABLE IF NOT EXISTS usage_plan_history (
   id INTEGER PRIMARY KEY,
   ts TEXT NOT NULL,               -- 허브 UTC ISO — 그 플랜을 처음 관측한 수집 시각
   provider TEXT NOT NULL,         -- 'claude' | 'codex'
+  account TEXT NOT NULL DEFAULT '',   -- usage_history.account와 같음
   plan TEXT NOT NULL              -- 타일 표기 그대로('Max', 'Team', 'Prolite' …)
 );
-CREATE INDEX IF NOT EXISTS idx_usage_plan_history ON usage_plan_history(provider, ts);
-CREATE TABLE IF NOT EXISTS token_daily (
-  day TEXT NOT NULL,              -- ts_device 기준 로컬 날짜 'YYYY-MM-DD'
-  device_id INTEGER NOT NULL,
-  agent TEXT NOT NULL,            -- 'claude-code' | 'codex-cli'
-  project TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '',
-  frontend TEXT NOT NULL DEFAULT '',   -- ''|cli|app|ide|auto — 자동화도 집계하되 구분(쿼터는 소모)
-  source TEXT NOT NULL DEFAULT 'events',   -- 'events' | 'backfill'
-  input INTEGER NOT NULL DEFAULT 0,
-  output INTEGER NOT NULL DEFAULT 0,       -- thinking 포함
-  cache_read INTEGER NOT NULL DEFAULT 0,
-  cache_write INTEGER NOT NULL DEFAULT 0,
-  thinking INTEGER NOT NULL DEFAULT 0,
-  turns INTEGER NOT NULL DEFAULT 0,        -- 기여한 turn_done 수
-  PRIMARY KEY (day, device_id, agent, project, model, frontend, source)
-);
-CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day);
 CREATE TABLE IF NOT EXISTS collector_status (
   device_id INTEGER PRIMARY KEY REFERENCES devices(id),
   version TEXT, installed_at TEXT, audit_id TEXT, audit_state TEXT,
@@ -188,31 +201,22 @@ CREATE TABLE IF NOT EXISTS token_reconciliations (
   result TEXT NOT NULL, checked_at TEXT NOT NULL, evidence TEXT,
   PRIMARY KEY(device_id,run_id,agent,session_id)
 );
+""" + _ledger_ddl("token_daily", "day") + """;
+CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day);
 """
 
 # 시간 원장 — token_daily와 같은 열, day 대신 hour. 1·7일 롤링 창(tokens.window)이 읽는다.
 # 일 원장과 같은 쓰기 경로(tokens.add_ledger)가 함께 가산하며, 일 원장처럼 영구 보존한다(정리 잡 없음).
 # migrate가 이 테이블을 새로 만들 때만 일회성 채우기를 하므로 DDL을 따로 둔다(생성+채우기를 한 트랜잭션에).
 # hour 단독 인덱스는 없다 — PK가 hour로 시작하므로 범위 조회는 PK 인덱스가 맡는다.
-_HOURLY_DDL = (
-"""CREATE TABLE IF NOT EXISTS token_hourly (
-  hour TEXT NOT NULL,             -- ts_device 기준 허브 로컬 시각 'YYYY-MM-DDTHH'
-  device_id INTEGER NOT NULL,
-  agent TEXT NOT NULL,
-  project TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '',
-  frontend TEXT NOT NULL DEFAULT '',
-  source TEXT NOT NULL DEFAULT 'events',
-  input INTEGER NOT NULL DEFAULT 0,
-  output INTEGER NOT NULL DEFAULT 0,
-  cache_read INTEGER NOT NULL DEFAULT 0,
-  cache_write INTEGER NOT NULL DEFAULT 0,
-  thinking INTEGER NOT NULL DEFAULT 0,
-  turns INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (hour, device_id, agent, project, model, frontend, source)
-)""",
-)
-SCHEMA = _BASE_SCHEMA + ";\n".join(_HOURLY_DDL) + ";\n"
+_HOURLY_DDL = (_ledger_ddl("token_hourly", "hour"),)
+# account 열을 쓰는 인덱스 — 기존 DB에선 ALTER로 열이 생긴 뒤에 만들어야 하므로 _BASE_SCHEMA에 두지 않는다
+# (옛 DB에 CREATE TABLE IF NOT EXISTS가 건너뛰어진 채 새 열을 참조하는 인덱스를 먼저 만들면 기동이 실패한다).
+_USAGE_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_usage_history_acct ON usage_history(provider, account, win, ts);
+CREATE INDEX IF NOT EXISTS idx_usage_plan_history_acct ON usage_plan_history(provider, account, ts);
+"""
+SCHEMA = _BASE_SCHEMA + ";\n".join(_HOURLY_DDL) + ";\n" + _USAGE_INDEXES
 
 # 기존 DB에 열 추가·삭제 (이미 반영됐으면 무시)
 MIGRATIONS = (
@@ -248,6 +252,13 @@ MIGRATIONS = (
     "ALTER TABLE sessions ADD COLUMN session_name TEXT",   # 세션 이름 표시 (2026-10-01)
     # PK(hour, …)와 중복인 token_hourly(hour) 인덱스 제거 — 이미 만들어진 DB용
     "DROP INDEX IF EXISTS idx_token_hourly_hour",
+    # Claude 다중 계정 (2026-11-25) — 기존 행은 ''(기본 계정). 계정 열이 없는 옛 인덱스는 새 인덱스(_USAGE_INDEXES)로 대체
+    "ALTER TABLE usage_history ADD COLUMN account TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE usage_plan_history ADD COLUMN account TEXT NOT NULL DEFAULT ''",
+    "DROP INDEX IF EXISTS idx_usage_history",
+    "DROP INDEX IF EXISTS idx_usage_plan_history",
+    # 토큰 원장 계정별 저장 (2026-11-26) — 원장 테이블은 PK가 바뀌므로 열 추가가 아니라 _rebuild_ledger가 재구성한다
+    "ALTER TABLE sessions ADD COLUMN account TEXT NOT NULL DEFAULT ''",
 )
 
 
@@ -255,29 +266,79 @@ def _table_exists(c: sqlite3.Connection, name: str) -> bool:
     return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
+_LEDGER_SUMS = "input, output, cache_read, cache_write, thinking, turns"
+
+
+def _has_column(c: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r[1] == column for r in c.execute(f"PRAGMA table_info({table})"))
+
+
+def _ledger_totals(c: sqlite3.Connection, table: str) -> tuple:
+    """(행 수, input·output·cache_read·cache_write·thinking·turns 합계 …) — 재구성 전후 검증용."""
+    sums = ",".join(f"COALESCE(SUM({col}),0)" for col in _LEDGER_SUMS.split(", "))
+    return tuple(c.execute(f"SELECT COUNT(*), {sums} FROM {table}").fetchone())
+
+
+def _rebuild_ledger(c: sqlite3.Connection, table: str, key: str) -> bool:
+    """원장 테이블을 account 열이 있는 새 PK로 재구성한다 — 이미 account 열이 있으면 False(멱등).
+    PK 변경은 ALTER로 안 되므로 '새 테이블 → 복사 → 검증 → 교체'. 모든 기존 행의 account는 ''(재설치 전·과거 데이터).
+    **호출부의 쓰기 트랜잭션(BEGIN IMMEDIATE) 안에서만 부른다** — 열 존재 검사부터 교체까지가 그 트랜잭션이라
+    동시 기동한 다른 프로세스는 락을 기다렸다가 완료된 테이블을 보고 건너뛰며, 어느 단계에서 실패해도 호출부의 ROLLBACK이
+    SQLite DDL까지 되돌려 원래 테이블이 그대로 남는다. 검증(행 수·합계 일치, account != '' 0건)이 어긋나면 RuntimeError.
+    영구 보존 데이터라 잃으면 복구할 수 없다 — 검증 전에는 원본을 지우지 않는다."""
+    if _has_column(c, table, "account"):
+        return False
+    t0 = time.monotonic()
+    tmp = f"{table}__acct"
+    c.execute(f"DROP TABLE IF EXISTS {tmp}")   # 이 트랜잭션 밖의 잔재 방어(정상 경로에서는 롤백돼 남지 않는다)
+    c.execute(_ledger_ddl(tmp, key))
+    cols = f"device_id, agent, project, model, frontend, source, {_LEDGER_SUMS}"
+    c.execute(f"INSERT INTO {tmp} ({key}, account, {cols}) SELECT {key}, '', {cols} FROM {table}")
+    before, after = _ledger_totals(c, table), _ledger_totals(c, tmp)
+    if before != after:
+        raise RuntimeError(f"{table} 재구성 검증 실패: 행 수·합계 불일치 (이전 {before}, 이후 {after})")
+    stray = c.execute(f"SELECT COUNT(*) FROM {tmp} WHERE account != ''").fetchone()[0]
+    if stray:
+        raise RuntimeError(f"{table} 재구성 검증 실패: account가 비어 있지 않은 행 {stray}건")
+    c.execute(f"DROP TABLE {table}")   # 이 테이블의 인덱스(idx_token_daily_day)도 함께 사라진다
+    c.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+    if table == "token_daily":
+        c.execute("CREATE INDEX IF NOT EXISTS idx_token_daily_day ON token_daily(day)")
+    log.info("원장 재구성 %s: %d행 account 열 추가 (%.2fs)", table, after[0], time.monotonic() - t0)
+    return True
+
+
 def migrate(c: sqlite3.Connection):
     """스키마 생성 + 열 추가 마이그레이션. 테스트의 :memory: 커넥션에도 그대로 쓴다.
-    token_hourly가 **새로 만들어질 때만** 일회성 채우기(tokens.backfill_hourly)를 한다. 순서가 중요하다:
-    일반 스키마(executescript — 실행 전에 암묵 COMMIT) 다음에 BEGIN IMMEDIATE를 먼저 잡고, 같은 트랜잭션 안에서
-    존재 검사 → 테이블 생성 → 채우기 → COMMIT. 검사가 쓰기 락 밖에 있으면 두 프로세스(허브와 genworker 서브프로세스)가
-    동시에 기동할 때 둘 다 '없음'을 보고 각자 채워 이중 계상된다 — 락을 잡은 뒤 검사하면 늦게 온 쪽은 앞선 쪽의
-    커밋을 기다렸다가 테이블이 있는 것을 보고 건너뛴다. 채우기가 실패하면(SQLite DDL도 롤백된다) 롤백하고 예외를
-    그대로 올려 기동을 실패시킨다: 조용한 부분 데이터보다 낫고, 테이블이 없는 채로 남으니 다음 기동에서 다시 시도된다.
-    (세션·워커 호출 한 건 단위의 손상은 backfill_hourly가 건너뛰므로 기동을 막지 않는다.)"""
+    일반 스키마(executescript — 실행 전에 암묵 COMMIT) 다음에 BEGIN IMMEDIATE를 먼저 잡고, 아래 일회성 작업을 전부
+    그 한 트랜잭션 안에서 한다 — 존재 검사가 쓰기 락 밖에 있으면 두 프로세스(허브와 genworker 서브프로세스)가
+    동시에 기동할 때 둘 다 '없음'을 보고 각자 처리해 이중 계상되므로, 락을 잡은 뒤 검사한다(늦게 온 쪽은 앞선 쪽의
+    커밋을 기다렸다가 이미 된 것을 보고 건너뛴다). 순서:
+      1. 일 원장 account 재구성(_rebuild_ledger) — 옛 PK에 account를 넣은 새 PK로. 없던 DB는 위 스키마가 새 형태로 이미 만들었다.
+      2. 시간 원장: 없으면 새 DDL로 생성 + 일회성 채우기(tokens.backfill_hourly, 이 함수가 이벤트를 재생하는 유일한 경로),
+         있으면 account 재구성.
+      3. 워커 project 병합(tokens.merge_worker_projects) — 반드시 재구성 뒤(새 PK의 ON CONFLICT를 쓴다).
+    어느 단계든 실패하면 롤백하고 예외를 그대로 올려 기동을 실패시킨다(SQLite DDL도 롤백돼 원래 상태가 남고 다음 기동에서
+    다시 시도된다): 조용한 부분 데이터보다 낫다. (세션·워커 호출 한 건 단위의 손상은 backfill_hourly가 건너뛰므로 기동을
+    막지 않는다.)"""
     c.executescript(_BASE_SCHEMA)
     for ddl in MIGRATIONS:
         try:
             c.execute(ddl)
         except sqlite3.OperationalError:
             pass
+    c.executescript(_USAGE_INDEXES)   # 열 추가 뒤에 — 위 MIGRATIONS 순서 의존
     c.commit()
     c.execute("BEGIN IMMEDIATE")   # 쓰기 락 — busy_timeout 동안 다른 migrate의 커밋을 기다린다
     try:
+        _rebuild_ledger(c, "token_daily", "day")
         if not _table_exists(c, "token_hourly"):
             for ddl in _HOURLY_DDL:   # executescript는 먼저 커밋해 버리므로 문장별로 같은 트랜잭션에서 실행
                 c.execute(ddl)
             tokens.backfill_hourly(c)
-        # 워커 사용량의 옛 project(워커 cwd 이름)를 HUB_PROJECT로 — 채우기 뒤에 두어 첫 기동 경로와 순서가 꼬이지 않고 멱등
+        else:
+            _rebuild_ledger(c, "token_hourly", "hour")
+        # 워커 사용량의 옛 project(워커 cwd 이름)를 HUB_PROJECT로 — 재구성·채우기 뒤에 두어 첫 기동 경로와 순서가 꼬이지 않고 멱등
         tokens.merge_worker_projects(c)
         c.commit()
     except BaseException:

@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -60,7 +61,8 @@ class CollectorTransportTests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         (self.directory / "env").write_text(f"MADISON_URL={self.url}\nMADISON_TOKEN=test-token\n")
         (self.directory / "version.json").write_text((ROOT / "collector/version.json").read_text())
-        self.worker = worker.Worker(self.directory)
+        # 사용자 루트를 임시 폴더로 — 실제 ~/.claude.json을 읽지 않는다
+        self.worker = worker.Worker(self.directory, user_root=self.directory)
 
     def tearDown(self):
         self.server.shutdown()
@@ -83,9 +85,25 @@ class CollectorTransportTests(unittest.TestCase):
         self.assertTrue(get[2]["User-Agent"].startswith("MADISON-Collector/"))
         self.assertEqual(post[3], payload)
 
+    def enqueue_clean(self, hook, **env):
+        # 호스트(Claude Code 세션 등)의 계정 env가 섞이지 않게 한다
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "OPENAI_API_KEY")
+                 and not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_"))}
+        clean.update(env)
+        with patch.object(worker, "frontend", return_value="cli"), patch.dict(os.environ, clean, clear=True):
+            self.worker.enqueue("claude-code", hook)
+
+    def test_account_travels_through_the_edge_with_the_end_event(self):
+        (self.directory / ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"emailAddress": "Alice@Example.com", "organizationType": "claude_max"}}))
+        self.enqueue_clean({"session_id": "test-session"})
+        self.worker.run()
+        events = [r[3] for r in self.server.received if r[1] == "/api/events"]
+        self.assertEqual(events[0]["detail"]["account"], "alice@example.com")
+
     def test_failed_end_stays_queued_with_diagnostics_and_recovers(self):
-        with patch.object(worker, "frontend", return_value="cli"):
-            self.worker.enqueue("claude-code", {"session_id": "test-session"})
+        self.enqueue_clean({"session_id": "test-session"})
         self.server.block_all = True
         output = io.StringIO()
         with contextlib.redirect_stderr(output):
