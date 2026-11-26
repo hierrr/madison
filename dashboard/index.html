@@ -174,11 +174,11 @@
   .htitle { margin: 8px 4px 2px; font-size: 12px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
 
   /* ── KPI ── */
-  .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
-  .kpis.no-usage { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  /* 타일이 늘면 한 줄의 칸도 늘어나되, 칸 폭이 160px 밑으로 내려가면 다음 줄로 넘긴다(auto-fit — 타일이 적으면 빈 칸이 접혀 예전처럼 한 줄을 꽉 채움).
+     160px = 타일 안쪽 폭 128px에 "100% · 3d05h" 값(약 90px)과 라벨 말줄임 자리가 남는 하한. 1020px 이하 2열 미디어쿼리는 뒤에 와서 이긴다. */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .kpis.no-usage .tile.usage { display: none; }
   /* 허브 계정이 없는 프로바이더는 게이지를 비워 두지 않고 타일째 숨긴다 */
-  .kpis.one-usage { grid-template-columns: repeat(5, minmax(0, 1fr)); }
   .tile.usage.off { display: none; }
   .tile .t-label .t-icon { width: 16px; height: 16px; border-radius: 4px; vertical-align: -3px; margin-right: 6px; }
   .u-rows { display: flex; flex-direction: column; gap: 7px; margin-top: 6px; }
@@ -190,7 +190,7 @@
   .u-row.u-50 .fill { background: #e6c229; }
   .u-row.u-70 .fill { background: var(--orange); }
   .u-row.u-90 .fill { background: var(--crit); }
-  .u-row .val { font-family: var(--mono); color: var(--ink-3); white-space: nowrap; }
+  .u-row .val { font-family: var(--mono); color: var(--ink-3); white-space: nowrap; flex: none; }
   .u-row.u-50 .val { color: #e6c229; }
   .u-row.u-70 .val { color: var(--orange); }
   .u-row.u-90 .val { color: var(--crit); }
@@ -201,14 +201,16 @@
   .tile .t-label { font-size: 12px; color: var(--ink-2); }
   .tile .t-value { font-size: 27px; font-weight: 650; letter-spacing: -0.01em; }
   .tile .t-value small { font-size: 16px; font-weight: 500; color: var(--ink-3); }
-  /* 주의 필요 타일: 숫자·마커는 다른 타일과 동일, 주의 상태일 때만 은은한 그라데이션 틴트
-     (마커 색은 JS가 상황별로 — 승인 대기=crit, 입력 대기=warn, 없음=good) */
-  .tile.hero[data-sev="crit"] { background: linear-gradient(180deg, var(--crit-bg), var(--surface) 60%); }
-  .tile.hero[data-sev="warn"] { background: linear-gradient(180deg, var(--warn-bg), var(--surface) 60%); }
+  /* 주의 필요·핸드오프 큐 타일: 숫자·마커는 다른 타일과 동일, 주의 상태일 때만 은은한 그라데이션 틴트
+     (주의 필요 마커 색은 JS가 상황별로 — 승인 대기=crit, 입력 대기=warn, 없음=good.
+      핸드오프 큐는 대기=warn 틴트, 마커는 대기=warn·수신됨=청록·작업 중=accent·없음=good) */
+  .tile[data-sev="crit"] { background: linear-gradient(180deg, var(--crit-bg), var(--surface) 60%); }
+  .tile[data-sev="warn"] { background: linear-gradient(180deg, var(--warn-bg), var(--surface) 60%); }
   .tile .t-sub { font-size: 12px; color: var(--ink-3); margin-top: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .t-sub .mini { display: inline-flex; align-items: center; gap: 5px; }
   .t-sub .mini i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-  #tileHf .t-sub { flex-direction: column; align-items: flex-start; gap: 3px; }  /* 대기·수신됨·작업 중 셋은 한 줄에 안 들어가 세로로 */
+  /* 주의 필요(승인·입력 대기)와 핸드오프 큐(대기·수신됨·작업 중)의 하위 항목은 폭과 관계없이 항목마다 한 줄 */
+  #tileHero .t-sub, #tileHf .t-sub { flex-direction: column; align-items: flex-start; gap: 3px; }
 
   .spark { display: flex; align-items: flex-end; gap: 2px; height: 30px; }
   .spark i { width: 7px; border-radius: 2px 2px 0 0; background: var(--spark-dim); height: calc(var(--v) * 100%); min-height: 2px; cursor: default; }
@@ -608,18 +610,8 @@
         <span class="mini"><i style="background:var(--warn)"></i>입력 대기 <span id="kAwait">0</span></span>
       </span>
     </div>
-    <div class="tile">
-      <span class="t-label"><span class="hmk" style="background:var(--accent);height:11px"></span>작업 중</span>
-      <span class="t-value" id="kWork">–</span>
-      <span class="t-sub"><span class="mini"><i style="background:var(--stale)"></i>신호 끊김 의심 <span id="kUnconf">0</span></span></span>
-    </div>
-    <div class="tile">
-      <span class="t-label"><span class="hmk" style="background:var(--good);height:11px"></span>온라인 기기</span>
-      <span class="t-value"><span id="kDevOn">–</span><small>/<span id="kDevAll">–</span></small></span>
-      <span class="t-sub" id="kDevNote"></span>
-    </div>
     <div class="tile" id="tileHf">
-      <span class="t-label"><span class="hmk" style="background:var(--lg-teal);height:11px"></span>핸드오프 큐</span>
+      <span class="t-label"><span class="hmk" id="kHfMark" style="background:var(--good);height:11px"></span>핸드오프 큐</span>
       <span class="t-value" id="kHf">–</span>
       <span class="t-sub">
         <span class="mini"><i class="hfdot hf-pending"></i>대기 <span id="kHfPend">0</span></span>
@@ -1045,8 +1037,6 @@
       heroSev === 'crit' ? 'var(--crit)' : heroSev === 'warn' ? 'var(--warn)' : 'var(--good)';
     document.getElementById('tileHero').setAttribute('data-sev', heroSev);
     document.querySelector('.fchip[data-f="attention"]').setAttribute('data-sev', approvalN > 0 ? 'crit' : 'warn');
-    document.getElementById('kWork').textContent = workN;
-    document.getElementById('kUnconf').textContent = unconfN;
     document.getElementById('kDevOn').textContent = st.kpi.devices_online;
     document.getElementById('kDevAll').textContent = st.kpi.devices_total;
     var offNames = st.devices.filter(function (d) { return !d.online; }).map(function (d) { return d.name; });
@@ -1058,6 +1048,11 @@
     document.getElementById('kHfPend').textContent = hfCount('pending');
     document.getElementById('kHfDeliv').textContent = hfCount('delivered');
     document.getElementById('kHfWork').textContent = hfCount('in_progress');
+    // 마커·틴트: 대기=warn(틴트 포함) > 수신됨=청록 > 작업 중=accent > 없음=good — sub의 색점(.hf-*)과 같은 계열
+    var hfPend = hfCount('pending'), hfDeliv = hfCount('delivered'), hfWork = hfCount('in_progress');
+    document.getElementById('kHfMark').style.background =
+      hfPend > 0 ? 'var(--warn)' : hfDeliv > 0 ? 'var(--hf-received)' : hfWork > 0 ? 'var(--accent)' : 'var(--good)';
+    document.getElementById('tileHf').setAttribute('data-sev', hfPend > 0 ? 'warn' : 'ok');
 
     renderUsage(st.kpi.usage);
     document.getElementById('statDevices').textContent = st.kpi.devices_total;
