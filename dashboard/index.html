@@ -208,9 +208,9 @@
   .tile .t-label { font-size: 12px; color: var(--ink-2); }
   .tile .t-value { font-size: 27px; font-weight: 650; letter-spacing: -0.01em; }
   .tile .t-value small { font-size: 16px; font-weight: 500; color: var(--ink-3); }
-  /* 주의 필요·핸드오프 큐 타일: 숫자·마커는 다른 타일과 동일, 주의 상태일 때만 은은한 그라데이션 틴트
-     (주의 필요 마커 색은 JS가 상황별로 — 승인 대기=crit, 입력 대기=warn, 없음=good.
-      핸드오프 큐는 대기=warn 틴트, 마커는 대기=warn·수신됨=청록·작업 중=accent·없음=good) */
+  /* 세션·핸드오프 큐 타일: 숫자·마커는 다른 타일과 동일, 주의 상태일 때만 은은한 그라데이션 틴트
+     (세션 마커 색은 JS가 상황별로 — 승인 대기=crit, 입력 대기=warn, 없음=good. 틴트는 승인 대기=crit일 때만.
+      핸드오프 큐는 대기 중=warn 틴트, 마커는 대기 중=warn·수신됨=청록·작업 중=accent·없음=good) */
   .tile[data-sev="crit"] { background: linear-gradient(180deg, var(--crit-bg), var(--surface) 60%); }
   .tile[data-sev="warn"] { background: linear-gradient(180deg, var(--warn-bg), var(--surface) 60%); }
   .u-row .val.warn { color: var(--warn-text); }
@@ -218,7 +218,7 @@
   .tile .t-sub { font-size: 12px; color: var(--ink-3); margin-top: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .t-sub .mini { display: inline-flex; align-items: center; gap: 5px; }
   .t-sub .mini i { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-  /* 주의 필요(승인·입력 대기)와 핸드오프 큐(대기·수신됨·작업 중)의 하위 항목은 폭과 관계없이 항목마다 한 줄 */
+  /* 세션(승인 대기·입력 대기·작업 중·신호 없음)과 핸드오프 큐(대기 중·수신됨·작업 중)의 하위 항목은 폭과 관계없이 항목마다 한 줄 */
   #tileHero .t-sub, #tileHf .t-sub { flex-direction: column; align-items: flex-start; gap: 3px; }
 
   .spark { display: flex; align-items: flex-end; gap: 2px; height: 30px; }
@@ -613,11 +613,13 @@
   <div id="view-main" class="view">
   <section class="kpis" aria-label="요약 지표" id="kpis">
     <div class="tile hero" id="tileHero">
-      <span class="t-label"><span class="hmk" id="kAttMark" style="background:var(--warn);height:11px"></span>주의 필요</span>
-      <span class="t-value" id="kAtt">–</span>
+      <span class="t-label"><span class="hmk" id="kSessMark" style="background:var(--warn);height:11px"></span>세션</span>
+      <span class="t-value" id="kSess">–</span>
       <span class="t-sub">
         <span class="mini"><i style="background:var(--crit)"></i>승인 대기 <span id="kApproval">0</span></span>
         <span class="mini"><i style="background:var(--warn)"></i>입력 대기 <span id="kAwait">0</span></span>
+        <span class="mini"><i style="background:var(--accent)"></i>작업 중 <span id="kWork">0</span></span>
+        <span class="mini"><i style="background:var(--stale)"></i>신호 없음 <span id="kUnconf">0</span></span>
       </span>
     </div>
     <div class="tile" id="tileHf">
@@ -640,7 +642,7 @@
     <div class="filters" role="group" aria-label="세션 필터 (다중 선택)" id="filters">
       <button class="fchip" data-f="attention" aria-pressed="true">주의 필요<span class="n" id="nAtt">0</span></button>
       <button class="fchip" data-f="working" aria-pressed="true">작업 중<span class="n" id="nWork">0</span></button>
-      <button class="fchip" data-f="unconf" aria-pressed="true">끊김<span class="n" id="nUnconf">0</span></button>
+      <button class="fchip" data-f="unconf" aria-pressed="true">신호 없음<span class="n" id="nUnconf">0</span></button>
     </div>
   </div>
 
@@ -674,7 +676,7 @@
           <li><i class="dot" style="background:var(--accent)"></i><span class="lname">작업 중</span><span class="ldesc">지시 접수~턴 완료</span></li>
           <li><i class="dot" style="background:var(--warn)"></i><span class="lname">입력 대기</span><span class="ldesc">다음 지시 대기</span></li>
           <li><i class="dot" style="background:var(--crit)"></i><span class="lname">승인 대기</span><span class="ldesc">권한 응답 대기</span></li>
-          <li><i class="dot" style="background:var(--stale)"></i><span class="lname">끊김 의심</span><span class="ldesc">작업 중 15분 무신호</span></li>
+          <li><i class="dot" style="background:var(--stale)"></i><span class="lname">신호 없음</span><span class="ldesc">작업 중 15분 무신호 · 대기 중 기기 꺼짐</span></li>
           <li><i class="dot" style="background:var(--line-2)"></i><span class="lname">종료</span><span class="ldesc">24시간 후 숨김</span></li>
         </ul>
       </section>
@@ -1129,15 +1131,19 @@
     var approvalN = att.filter(function (s) { return s.state === 'needs_approval'; }).length;
     var workN = vis.filter(function (s) { return s.state === 'working' && !s.unconfirmed; }).length;
     var unconfN = vis.filter(function (s) { return s.unconfirmed && s.state !== 'ended'; }).length;
-    // KPI
-    document.getElementById('kAtt').textContent = att.length;
+    // KPI — 세션 타일: 큰 숫자는 진행 중인 세션 전체(상단 "N 세션"과 같은 값), 아래는 상태별.
+    // 서버가 상태를 겹치지 않게 나눈다(주의 필요=신호 있는 승인·입력 대기, 신호 없음은 따로) → 네 줄의 합 = 큰 숫자
+    document.getElementById('kSess').textContent = vis.filter(function (s) { return s.state !== 'ended'; }).length;
     document.getElementById('kApproval').textContent = approvalN;
     document.getElementById('kAwait').textContent = att.length - approvalN;
-    // 주의 필요 마커·타일 틴트를 긴급도 색으로 (승인 대기=빨강, 입력 대기=노랑, 없음=녹색)
+    document.getElementById('kWork').textContent = workN;
+    document.getElementById('kUnconf').textContent = unconfN;
+    // 마커는 긴급도 색(승인 대기=빨강, 입력 대기=노랑, 없음=녹색). 배경 틴트는 승인 대기일 때만 —
+    // 입력 대기는 거의 늘 있어 노란 틴트가 상시 켜져 의미가 없었다
     var heroSev = approvalN > 0 ? 'crit' : att.length > 0 ? 'warn' : 'ok';
-    document.getElementById('kAttMark').style.background =
+    document.getElementById('kSessMark').style.background =
       heroSev === 'crit' ? 'var(--crit)' : heroSev === 'warn' ? 'var(--warn)' : 'var(--good)';
-    document.getElementById('tileHero').setAttribute('data-sev', heroSev);
+    document.getElementById('tileHero').setAttribute('data-sev', heroSev === 'crit' ? 'crit' : 'ok');
     document.querySelector('.fchip[data-f="attention"]').setAttribute('data-sev', approvalN > 0 ? 'crit' : 'warn');
     document.getElementById('kDevOn').textContent = st.kpi.devices_online;
     document.getElementById('kDevAll').textContent = st.kpi.devices_total;
@@ -1418,7 +1424,7 @@
   function reasonLabel(r) { return esc(r || ''); }
   function sdot(cls) { return '<span class="sdot ' + cls + '"></span>'; }
   var SESSION_DOT = { working: 's-work', awaiting_input: 's-await', needs_approval: 's-appr', ended: 's-end' };
-  // 세션 상태점 — 끊김 의심(unconfirmed)이면 상태색 대신 stale 회색 (현황 카드 칩과 같은 기준)
+  // 세션 상태점 — 신호 없음(unconfirmed)이면 상태색 대신 stale 회색 (현황 카드 칩과 같은 기준)
   function sessDot(s) { return sdot(s.unconfirmed ? 's-stale' : SESSION_DOT[s.state] || 's-end'); }
   // 핸드오프 상태 라벨·활성 판정 — 현황 카드·타일·핸드오프 탭·상태 필터 공용. 클래스는 hf-<상태>(언더스코어는 하이픈으로)
   var HF_LABEL = { pending: '대기 중', delivered: '수신됨', in_progress: '작업 중', done: '완료', cancelled: '취소' };
