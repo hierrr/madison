@@ -624,7 +624,7 @@
       <span class="t-label"><span class="hmk" id="kHfMark" style="background:var(--good);height:11px"></span>핸드오프 큐</span>
       <span class="t-value" id="kHf">–</span>
       <span class="t-sub">
-        <span class="mini"><i class="hfdot hf-pending"></i>대기 <span id="kHfPend">0</span></span>
+        <span class="mini"><i class="hfdot hf-pending"></i>대기 중 <span id="kHfPend">0</span></span>
         <span class="mini"><i class="hfdot hf-delivered"></i>수신됨 <span id="kHfDeliv">0</span></span>
         <span class="mini"><i class="hfdot hf-in-progress"></i>작업 중 <span id="kHfWork">0</span></span>
       </span>
@@ -673,7 +673,7 @@
         <ul class="legend">
           <li><i class="dot" style="background:var(--accent)"></i><span class="lname">작업 중</span><span class="ldesc">지시 접수~턴 완료</span></li>
           <li><i class="dot" style="background:var(--warn)"></i><span class="lname">입력 대기</span><span class="ldesc">다음 지시 대기</span></li>
-          <li><i class="dot" style="background:var(--crit)"></i><span class="lname">승인 필요</span><span class="ldesc">권한 응답 대기</span></li>
+          <li><i class="dot" style="background:var(--crit)"></i><span class="lname">승인 대기</span><span class="ldesc">권한 응답 대기</span></li>
           <li><i class="dot" style="background:var(--stale)"></i><span class="lname">끊김 의심</span><span class="ldesc">작업 중 15분 무신호</span></li>
           <li><i class="dot" style="background:var(--line-2)"></i><span class="lname">종료</span><span class="ldesc">24시간 후 숨김</span></li>
         </ul>
@@ -827,7 +827,7 @@
   var STATE_META = {
     working: { label: '작업 중', cls: 'working' },
     awaiting_input: { label: '입력 대기', cls: 'awaiting_input' },
-    needs_approval: { label: '승인 필요', cls: 'needs_approval' },
+    needs_approval: { label: '승인 대기', cls: 'needs_approval' },
     ended: { label: '종료', cls: 'ended' }
   };
 
@@ -1412,7 +1412,7 @@
     return (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
       ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
   }
-  var STATE_LABEL = { working: '작업 중', awaiting_input: '입력 대기', needs_approval: '승인 필요', ended: '종료' };
+  var STATE_LABEL = { working: '작업 중', awaiting_input: '입력 대기', needs_approval: '승인 대기', ended: '종료' };
   // 종료 사유는 원문 그대로 — 에이전트가 보고한 공식 값(other·prompt_input_exit·clear·resume…)도, 허브가 대시보드 종료 처리 때
   // 적는 값(manual=살아 있는 세션을 사람이 닫음, lost=신호 끊긴 세션 정리)도 한글로 바꾸지 않는다 (2026-10-01 사용자 결정: 통일성)
   function reasonLabel(r) { return esc(r || ''); }
@@ -1551,7 +1551,7 @@
   // 종료는 사유별로도 고를 수 있다('ended:<사유>') — 선택지는 서버가 그 탭 범위에 실제로 있는 사유만 내려준다 (2026-10-01)
   function stateSel(attr, cur, reasons) {
     function opt(v, label) { return '<option value="' + esc(v) + '"' + (cur === v ? ' selected' : '') + '>' + label + '</option>'; }
-    var html = [['', '상태 전체'], ['working', '작업 중'], ['awaiting_input', '입력 대기'], ['needs_approval', '승인 필요'],
+    var html = [['', '상태 전체'], ['working', '작업 중'], ['awaiting_input', '입력 대기'], ['needs_approval', '승인 대기'],
                 ['stale', '신호 없음'], ['ended', '종료 전체']].map(function (o) { return opt(o[0], o[1]); }).join('');
     if (reasons && reasons.length) {
       // '종료 전체' 바로 아래에 사유만 들여써서 — 그룹 제목·'종료 ·' 접두어 없이 (2026-10-01 사용자 지정)
